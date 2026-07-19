@@ -6,6 +6,8 @@ HantiOS is an AI-powered SaaS ERP platform for African businesses (inventory, sa
 
 Rebuild **Staff Invitation** as an email invitation link (like Slack/Notion/GitHub Orgs) — **not** WhatsApp OTP. This was mid-fix when the previous machine's SSD died; see "Staff Invitation" under Auth Architecture below for the exact locked spec. Nothing else in Auth Architecture is up for debate — this file documents *decisions*, not options to re-litigate.
 
+The schema is now ready for this (migration `20260719000001_staff_invite_email_link_and_required_consents` applied to the live DB — see "Database schema" below for the current `staff_invites` shape). What's left is the actual application code: invite creation, the email send, the accept-invite endpoint, and tests. No further schema changes should be needed for this specific feature.
+
 ## Recovery context
 
 This repo was rebuilt from total local loss (hardware failure destroyed all code + session history). The Neon Postgres database survived and is the source of truth for what's *actually* built — always run `npx prisma db pull` (`npm run prisma:pull`) and trust `prisma/schema.prisma` over the schema summary below if they ever disagree. This file is the source of truth for *why* things are the way they are and what's still missing.
@@ -25,9 +27,16 @@ This repo was rebuilt from total local loss (hardware failure destroyed all code
 
 **Core modules:** `Category`, `Product` (optimistic locking via `version`, packaging hierarchy each/inner_pack/box/carton/pallet), `BranchInventory` / `WarehouseStock` (quantity `CHECK >= 0`; **known limitation** — Postgres doesn't match `NULL=NULL` in unique indexes, so `@@unique([branchId, productId, size])` doesn't truly dedupe single-size products where `size` is `NULL`; worked around at the app layer with find-then-branch instead of upsert — a sentinel value instead of `NULL` is the proper fix, not yet done), `PriceHistory`, `PaymentMethod`, `Customer`, `Sale` (items JSON locks COGS at sale time; `total` allows negative only when `refundOfSaleId` is set), `Debt`, `Expense` (`branchId: null` means business-wide and must be set explicitly, never omitted).
 
-**Auth / security / operational:** `Session` (refresh token hashed with SHA-256 not bcrypt — high-entropy token, not a low-entropy password; `rememberMe` drives cookie Max-Age 30d vs 12h, but `expiresAt` itself is always 7 days), `OtpChallenge` (purpose is `signup` or `password_reset` only — **never** `login`), `LoginEvent`, `PasswordHistory` (last 3 checked to block reuse), `StaffInvite` (token sent via **email** link, not WhatsApp), `InventoryAdjustment`, `AuditLog` (snapshots `userName`/`userRole` at write time, not live-joined; required `reason`; never updated or deleted — no update/delete code path should ever be written for this model), `IdempotencyKey`, `DebtReminder`.
+**Auth / security / operational:** `Session` (refresh token hashed with SHA-256 not bcrypt — high-entropy token, not a low-entropy password; `rememberMe` drives cookie Max-Age 30d vs 12h, but `expiresAt` itself is always 7 days), `OtpChallenge` (purpose is `signup` or `password_reset` only — **never** `login`, **never** `staff_invite`), `LoginEvent`, `PasswordHistory` (last 3 checked to block reuse), `StaffInvite` (`token` unique, `email`/`full_name`/`phone`/`role` captured directly on the invite so it can exist before any account does; `user_id` is nullable — null until the invite is accepted and a real user gets created, then backfilled to link invite → resulting user; status is *not* a stored column, compute pending/accepted/expired/revoked from `accepted_at`/`revoked_at`/`expires_at` at the app layer, don't add a redundant status field), `InventoryAdjustment`, `AuditLog` (snapshots `userName`/`userRole` at write time, not live-joined; required `reason`; never updated or deleted — no update/delete code path should ever be written for this model), `IdempotencyKey`.
 
 Full field-level detail lives in the recovery document and should match `prisma/schema.prisma` once pulled. **Never invent a field or model that isn't in one of those two places — ask if something seems missing.**
+
+**Known schema gaps (logged, deliberately not fixed yet):**
+- `Product` has no `version` column — the doc describes optimistic locking here, but it was never migrated. Don't assume Product writes are concurrency-safe until this is added.
+- `DebtReminder` model doesn't exist in the live DB at all, despite being documented. If debt reminder scheduling work ever starts, this needs a migration first.
+- `Expense` has no `deletedAt`/`deletedBy`/`restoreReason` (soft-delete fields the doc describes). Ties to hardening roadmap Session 11 ("soft-delete standards"), which is still not started.
+
+(Fixed already, 2026-07-19: `staff_invites` got `token`/`email`/`full_name`/`phone`/`role` and `user_id` went nullable; `OtpPurpose.staff_invite` enum value was removed after confirming zero rows referenced it; `users.termsAcceptedAt`/`termsVersion`/`privacyAcceptedAt`/`privacyVersion` are now `NOT NULL` at the DB level, matching the "required" rule in Auth Architecture — this went one field further than literally requested, since leaving the two Version columns nullable while requiring the two AcceptedAt columns would've been an inconsistent half-fix.)
 
 ## Auth architecture (locked)
 
@@ -61,7 +70,7 @@ Implemented via a `NotificationProvider` interface; both WhatsApp and Email curr
 | Module | Endpoints | Status |
 |---|---|---|
 | Auth | signup, login, google/login, google/identify, forgot-password, reset-password (+verify-otp), refresh, logout, sessions (list/revoke), login-history | Done |
-| Staff | invite, accept-invite, list, role-change, deactivate, restore | **Rebuild in progress** — WhatsApp OTP → email link |
+| Staff | invite, accept-invite, list, role-change, deactivate, restore | **Rebuild in progress** — WhatsApp OTP → email link. Schema ready (see Database schema above); application code not yet written |
 | Customers | CRUD, archive | Done |
 | Products | CRUD, archive/restore, stock-adjustment (writes a real `InventoryAdjustment` row) | Done |
 | Branches, PaymentMethods | minimal CRUD | Done |

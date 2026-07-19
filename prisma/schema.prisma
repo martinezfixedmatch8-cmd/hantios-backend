@@ -409,7 +409,12 @@ model sessions {
 model staff_invites {
   id                                    String     @id
   business_id                           String
-  user_id                               String
+  email                                 String
+  full_name                             String
+  phone                                 String
+  role                                  UserRole
+  token                                 String     @unique
+  user_id                               String?
   invited_by                            String
   expires_at                            DateTime
   accepted_at                           DateTime?
@@ -417,7 +422,7 @@ model staff_invites {
   created_at                            DateTime   @default(now())
   businesses                            businesses @relation(fields: [business_id], references: [id])
   users_staff_invites_invited_byTousers users      @relation("staff_invites_invited_byTousers", fields: [invited_by], references: [id])
-  users_staff_invites_user_idTousers    users      @relation("staff_invites_user_idTousers", fields: [user_id], references: [id])
+  users_staff_invites_user_idTousers    users?     @relation("staff_invites_user_idTousers", fields: [user_id], references: [id])
 
   @@index([business_id, created_at])
   @@index([user_id, expires_at])
@@ -442,10 +447,10 @@ model users {
   oauth_provider                                AuthProvider?
   oauth_provider_id                             String?
   phone_verified_at                             DateTime?
-  privacy_accepted_at                           DateTime?
-  privacy_version                               String?
-  terms_accepted_at                             DateTime?
-  terms_version                                 String?
+  privacy_accepted_at                           DateTime
+  privacy_version                               String
+  terms_accepted_at                             DateTime
+  terms_version                                 String
   activated_at                                  DateTime?
   deactivated_at                                DateTime?
   deactivated_by                                String?
@@ -533,7 +538,6 @@ enum DiscountType {
 enum OtpPurpose {
   signup
   password_reset
-  staff_invite
 }
 
 enum PackagingLevel {
