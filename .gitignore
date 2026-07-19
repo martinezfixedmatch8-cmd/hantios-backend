@@ -1,0 +1,12 @@
+node_modules/
+dist/
+.env
+.env.*.local
+*.tmp.*
+coverage/
+npm-debug.log*
+
+# Local Claude Code state (agent definitions in .claude/agents/ ARE committed, see below)
+.claude/settings.local.json
+.claude/shell-snapshots/
+.claude/session-env/

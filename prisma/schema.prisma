@@ -1,0 +1,12 @@
+// Stub only. Once DATABASE_URL is set in .env, run `npm run prisma:pull`
+// to introspect the live Neon DB and overwrite the model definitions below.
+// Diff the result against the recovery doc's schema section before trusting it —
+// the live database is the source of truth for what's actually built.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
