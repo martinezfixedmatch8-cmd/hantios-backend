@@ -4,9 +4,11 @@ HantiOS is an AI-powered SaaS ERP platform for African businesses (inventory, sa
 
 ## ⚡ Immediate next task
 
-Rebuild **Staff Invitation** as an email invitation link (like Slack/Notion/GitHub Orgs) — **not** WhatsApp OTP. This was mid-fix when the previous machine's SSD died; see "Staff Invitation" under Auth Architecture below for the exact locked spec. Nothing else in Auth Architecture is up for debate — this file documents *decisions*, not options to re-litigate.
+Staff Invitation (email-link, no OTP) is **done** — see "Staff Invitation" under Auth Architecture below for the spec it implements, and the API modules table for what's built vs. deferred. Next up, in order of what actually unblocks real usage:
 
-The schema is now ready for this (migration `20260719000001_staff_invite_email_link_and_required_consents` applied to the live DB — see "Database schema" below for the current `staff_invites` shape). What's left is the actual application code: invite creation, the email send, the accept-invite endpoint, and tests. No further schema changes should be needed for this specific feature.
+1. **Signup + Login don't exist in this repo yet.** Everything built so far (including Staff Invitation's `authenticate` middleware) was tested by minting JWTs directly with `JWT_ACCESS_SECRET` — there is no real way for an owner to get a session today. This is the actual next task, not a roadmap nicety: without it, nothing built is reachable by a real user.
+2. Staff module is incomplete: only `invite`/`accept-invite` exist. `list`/`role-change`/`deactivate`/`restore` are still unbuilt (deliberately deferred, see API modules table).
+3. Resume the 15-session hardening roadmap at Session 7 (see below) once there's enough real functionality that hardening it is meaningful.
 
 ## Recovery context
 
@@ -44,12 +46,16 @@ Full field-level detail lives in the recovery document and should match `prisma/
 - **Login:** Email + Password (or Google). **No OTP on regular login, ever.**
 - **Password policy:** min 8 chars, 1 upper, 1 lower, 1 number, 1 special char. Last 3 passwords blocked from reuse.
 - **Email verification:** `emailVerifiedAt` gates password reset, security-alert emails, and staff-invite acceptance. Must be a real token sent to the invitee's own email — never a proxy check against the owner's email.
-- **Staff Invitation (the fix in progress):**
-  1. Owner enters Full Name, Email, Phone, Role.
-  2. System emails an Accept Invitation link: `https://app.hantios.com/invite/<token>`.
-  3. Invitee clicks → sees business name + role → sets a password → Accept.
-  4. Account activates immediately. **No OTP anywhere in this flow.**
-  5. Same login rule applies afterward: email + password only.
+- **Staff Invitation (built, 2026-07-20 — `src/{services,controllers,routes}/staffInvite.*`):**
+  1. Owner enters Full Name, Email, Phone, Role (`POST /staff/invite`, owner-only, `manager` deliberately excluded — confirm if that's wrong).
+  2. System emails an Accept Invitation link: `${APP_BASE_URL}/invite/<token>`.
+  3. Invitee clicks → `GET /staff/invite/:token` shows business name + role → sets a password + checks a Terms/Privacy consent box → `POST /staff/invite/:token/accept`.
+  4. Account activates immediately, `email_verified_at` set at that moment (presenting the mailed token *is* the verification). **No OTP anywhere in this flow.**
+  5. Same login rule applies afterward: email + password only — but there's no Login endpoint yet to actually use it (see "Immediate next task").
+  - Invitable roles exclude `owner`/`super_admin` (enforced server-side via the Zod enum, not just UI). Invite token is 256-bit random, stored in `staff_invites.token` as plaintext (not hashed) — a deliberate choice matching the schema's own naming (contrast `sessions.refresh_token_hash`, which is hashed); revisit if that stops feeling right.
+  - No resend/list/revoke-invite endpoints exist yet — a duplicate pending invite for the same business+email is a hard 409, not a resend.
+  - QA caught and this fixed a real race: accepting the same invite token twice concurrently used to be able to 500 instead of cleanly 409 (the invite-claim wasn't atomic). Fixed by claiming the invite via `updateMany({ where: { id, accepted_at: null } })` and checking the row count *before* creating the user, inside the same transaction — not relying on an incidental `users.email` unique-constraint collision as the safety net. Regression test: `tests/staffInvite.accept.test.ts` ("only lets one of two concurrent accepts win").
+  - Known minor gap, not fixed: `passwordSchema` (`src/lib/password.ts`) has no max length. Low risk (100kb body limit already bounds it), but worth a cap if this becomes a concern later.
 - **New Device / High-Risk Login:** optional per-business toggle in `Business.settings` (`Settings → Security → Require OTP for New Devices`, default OFF). ON: unrecognized device triggers WhatsApp OTP. OFF (default): no OTP ever, on any device, for regular login.
 - **Refresh tokens:** httpOnly cookie (never in the JSON body), double-submit CSRF cookie, rotated on every refresh.
 - **RBAC:** `requireRole(...roles)` middleware. `super_admin` bypasses every check. `custom` role is fail-closed (403) until a permissions-evaluation engine exists — `User.permissions` JSON is present but unused, don't wire partial support for it.
@@ -69,14 +75,17 @@ Implemented via a `NotificationProvider` interface; both WhatsApp and Email curr
 
 | Module | Endpoints | Status |
 |---|---|---|
-| Auth | signup, login, google/login, google/identify, forgot-password, reset-password (+verify-otp), refresh, logout, sessions (list/revoke), login-history | Done |
-| Staff | invite, accept-invite, list, role-change, deactivate, restore | **Rebuild in progress** — WhatsApp OTP → email link. Schema ready (see Database schema above); application code not yet written |
-| Customers | CRUD, archive | Done |
-| Products | CRUD, archive/restore, stock-adjustment (writes a real `InventoryAdjustment` row) | Done |
-| Branches, PaymentMethods | minimal CRUD | Done |
-| Sales | create, list, get, void, refund | Done |
-| Debts | create, list, get, payment, dispute | Done |
-| Expenses | CRUD, archive/restore | Done |
+| Auth | signup, login, google/login, google/identify, forgot-password, reset-password (+verify-otp), refresh, logout, sessions (list/revoke), login-history | **Not built in this repo** — the doc's "Done" describes the lost codebase. Only the `authenticate`/`requireRole` middleware exists so far; nothing issues a real session yet |
+| Staff | invite, accept-invite | **Done** (email-link, no OTP) |
+| Staff | list, role-change, deactivate, restore | Not built yet |
+| Customers | CRUD, archive | Not built in this repo (doc's "Done" is the lost codebase) |
+| Products | CRUD, archive/restore, stock-adjustment (writes a real `InventoryAdjustment` row) | Not built in this repo |
+| Branches, PaymentMethods | minimal CRUD | Not built in this repo |
+| Sales | create, list, get, void, refund | Not built in this repo |
+| Debts | create, list, get, payment, dispute | Not built in this repo |
+| Expenses | CRUD, archive/restore | Not built in this repo |
+
+All rows above marked "Not built in this repo" describe what existed in the lost codebase and are still architecturally correct targets (RBAC, transactions, audit, optimistic locking, etc. below still apply when they're built) — just don't assume any of their code exists yet. Staff Invitation is the only module with real, tested code in this repo so far.
 
 Cross-cutting on all of the above: RBAC permission matrix (8 canonical roles), DB transactions on multi-table ops, `AuditLog` on 9 audited operations, optimistic locking (inventory adjustment / debt payment / sale refund), idempotency keys (void / refund / debt payment), DB `CHECK` constraints, pagination (`page/pageSize/sort/order/search`) on every list endpoint, `{data, pagination}` response envelope, cross-business 404 isolation via an `assertOwned()` helper, N+1 fix in `createSale`. Pattern is Controller → Service → Prisma, behind `authenticate` + `requireRole`.
 
