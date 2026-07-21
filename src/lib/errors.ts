@@ -26,3 +26,5 @@ export const notFound = (message = "Resource not found") => new AppError(404, "N
 export const conflict = (message: string) => new AppError(409, "CONFLICT", message);
 
 export const gone = (message: string) => new AppError(410, "GONE", message);
+
+export const locked = (message = "Account temporarily locked") => new AppError(423, "LOCKED", message);

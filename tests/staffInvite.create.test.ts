@@ -1,7 +1,7 @@
 import request from "supertest";
 import { app } from "../src/app";
 import { prisma } from "../src/lib/prisma";
-import { createTestBusiness, createTestOwner, createTestUser, mintAccessToken } from "./helpers/factories";
+import { createTestUser, mintAccessToken, signupTestOwner, loginTestOwner } from "./helpers/factories";
 import { cleanupTestBusiness } from "./helpers/cleanup";
 import { SpyNotificationProvider } from "./helpers/notificationSpy";
 import { setNotificationProvider } from "../src/notifications/registry";
@@ -13,10 +13,12 @@ describe("POST /staff/invite", () => {
   let spy: SpyNotificationProvider;
 
   beforeAll(async () => {
-    const business = await createTestBusiness();
-    businessId = business.id;
-    const owner = await createTestOwner(businessId);
-    ownerToken = mintAccessToken(owner);
+    // Goes through the real signup -> login flow now that Auth exists, rather than
+    // constructing an owner-shaped row and hand-minting a token.
+    const owner = await signupTestOwner();
+    businessId = owner.businessId;
+    const login = await loginTestOwner(owner.email, owner.password, owner.deviceId);
+    ownerToken = login.accessToken;
   });
 
   afterAll(async () => {

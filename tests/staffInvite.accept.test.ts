@@ -1,7 +1,7 @@
 import request from "supertest";
 import { app } from "../src/app";
 import { prisma } from "../src/lib/prisma";
-import { createTestBusiness, createTestOwner, createTestInvite } from "./helpers/factories";
+import { createTestInvite, signupTestOwner } from "./helpers/factories";
 import { cleanupTestBusiness } from "./helpers/cleanup";
 import { SpyNotificationProvider } from "./helpers/notificationSpy";
 import { setNotificationProvider } from "../src/notifications/registry";
@@ -14,10 +14,10 @@ describe("GET /staff/invite/:token and POST /staff/invite/:token/accept", () => 
   let spy: SpyNotificationProvider;
 
   beforeAll(async () => {
-    const business = await createTestBusiness();
-    businessId = business.id;
-    const owner = await createTestOwner(businessId);
-    ownerId = owner.id;
+    // Real signup now that Auth exists, rather than a directly-inserted owner row.
+    const owner = await signupTestOwner();
+    businessId = owner.businessId;
+    ownerId = owner.ownerId;
   });
 
   afterAll(async () => {

@@ -1,8 +1,12 @@
 import { randomUUID } from "crypto";
+import request from "supertest";
 import type { UserRole } from "@prisma/client";
 import { prisma } from "../../src/lib/prisma";
 import { generateId } from "../../src/lib/ids";
 import { signAccessToken } from "../../src/lib/jwt";
+import { app } from "../../src/app";
+
+export const TEST_PASSWORD = "Str0ng!Passw0rd";
 
 // Random local part so a crashed run that skips afterAll doesn't collide with the
 // next run -- users.email is globally unique.
@@ -67,6 +71,66 @@ export async function createTestUser(businessId: string, role: UserRole) {
 
 export function mintAccessToken(user: { id: string; business_id: string; role: UserRole; name: string }): string {
   return signAccessToken({ sub: user.id, businessId: user.business_id, role: user.role, name: user.name });
+}
+
+// Goes through the real POST /auth/signup endpoint rather than inserting rows directly,
+// so callers exercise the actual signup path -- used by tests (e.g. staff invitation's)
+// that need a real owner session, not just an owner-shaped row.
+export async function signupTestOwner(
+  overrides: Partial<{
+    businessName: string;
+    ownerFullName: string;
+    email: string;
+    phone: string;
+    password: string;
+    country: string;
+    deviceId: string;
+  }> = {}
+) {
+  const email = overrides.email ?? uniqueEmail("signup-owner");
+  const password = overrides.password ?? TEST_PASSWORD;
+  const deviceId = overrides.deviceId ?? `test-device-${randomUUID()}`;
+
+  const res = await request(app)
+    .post("/auth/signup")
+    .set("X-Device-Id", deviceId)
+    .send({
+      provider: "email",
+      businessName: overrides.businessName ?? `Test Business ${randomUUID()}`,
+      ownerFullName: overrides.ownerFullName ?? "Test Owner",
+      businessEmail: email,
+      phone: overrides.phone ?? `+2547${Math.floor(10000000 + Math.random() * 89999999)}`,
+      password,
+      country: overrides.country ?? "KE",
+      termsAccepted: true,
+      privacyAccepted: true,
+    });
+
+  if (res.status !== 201) {
+    throw new Error(`signupTestOwner failed: ${res.status} ${JSON.stringify(res.body)}`);
+  }
+
+  return {
+    businessId: res.body.data.business.id as string,
+    ownerId: res.body.data.user.id as string,
+    email,
+    password,
+    deviceId,
+  };
+}
+
+export async function loginTestOwner(email: string, password: string, deviceId = `test-device-${randomUUID()}`) {
+  const res = await request(app).post("/auth/login").set("X-Device-Id", deviceId).send({ email, password });
+
+  if (res.status !== 200 || !res.body.data?.accessToken) {
+    throw new Error(`loginTestOwner failed: ${res.status} ${JSON.stringify(res.body)}`);
+  }
+
+  return {
+    accessToken: res.body.data.accessToken as string,
+    setCookieHeader: res.headers["set-cookie"] as unknown as string[] | undefined,
+    deviceId,
+  };
 }
 
 export async function createTestInvite(

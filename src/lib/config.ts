@@ -18,6 +18,7 @@ const envSchema = z.object({
 
   APP_BASE_URL: z.string().url().optional(),
   STAFF_INVITE_EXPIRY_HOURS: z.coerce.number().int().positive().default(72),
+  EMAIL_VERIFICATION_EXPIRY_HOURS: z.coerce.number().int().positive().default(24),
 });
 
 function loadEnv() {
@@ -29,10 +30,15 @@ function loadEnv() {
     }
     process.exit(1);
   }
-  if (parsed.data.NODE_ENV === "production" && !parsed.data.APP_BASE_URL) {
-    console.error("Invalid environment configuration:");
-    console.error("  - APP_BASE_URL is required in production (used to build links sent in emails)");
-    process.exit(1);
+  if (parsed.data.NODE_ENV === "production") {
+    const missing: string[] = [];
+    if (!parsed.data.APP_BASE_URL) missing.push("APP_BASE_URL (used to build links sent in emails)");
+    if (!parsed.data.GOOGLE_CLIENT_ID) missing.push("GOOGLE_CLIENT_ID (required for Google sign-in)");
+    if (missing.length > 0) {
+      console.error("Invalid environment configuration:");
+      for (const m of missing) console.error(`  - ${m} is required in production`);
+      process.exit(1);
+    }
   }
   return parsed.data;
 }

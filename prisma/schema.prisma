@@ -404,6 +404,7 @@ model sessions {
 
   @@index([business_id])
   @@index([user_id])
+  @@index([refresh_token_hash])
 }
 
 model staff_invites {
@@ -538,6 +539,7 @@ enum DiscountType {
 enum OtpPurpose {
   signup
   password_reset
+  new_device_login
 }
 
 enum PackagingLevel {
