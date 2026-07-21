@@ -161,3 +161,32 @@ export async function createTestInvite(
     },
   });
 }
+
+export async function createTestBranch(
+  businessId: string,
+  overrides: Partial<{ name: string; location: string; managerId: string }> = {}
+) {
+  return prisma.branches.create({
+    data: {
+      id: generateId(),
+      business_id: businessId,
+      name: overrides.name ?? `Test Branch ${randomUUID()}`,
+      location: overrides.location,
+      manager_id: overrides.managerId,
+    },
+  });
+}
+
+export async function createTestPaymentMethod(
+  businessId: string,
+  overrides: Partial<{ name: string; accountNumber: string }> = {}
+) {
+  return prisma.payment_methods.create({
+    data: {
+      id: generateId(),
+      business_id: businessId,
+      name: overrides.name ?? `Test Payment Method ${randomUUID()}`,
+      account_number: overrides.accountNumber,
+    },
+  });
+}

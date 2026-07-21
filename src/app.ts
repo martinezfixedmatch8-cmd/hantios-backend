@@ -5,6 +5,8 @@ import cookieParser from "cookie-parser";
 import { env } from "./lib/config";
 import authRoutes from "./routes/auth.routes";
 import staffInviteRoutes from "./routes/staffInvite.routes";
+import branchRoutes from "./routes/branch.routes";
+import paymentMethodRoutes from "./routes/paymentMethod.routes";
 import { notFoundHandler, errorHandler } from "./middleware/errorHandler";
 
 export const app = express();
@@ -24,6 +26,8 @@ app.use(cookieParser());
 
 app.use("/auth", authRoutes);
 app.use("/staff", staffInviteRoutes);
+app.use("/branches", branchRoutes);
+app.use("/payment-methods", paymentMethodRoutes);
 
 app.use(notFoundHandler);
 app.use(errorHandler);

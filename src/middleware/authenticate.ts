@@ -12,7 +12,7 @@ export function authenticate(req: Request, _res: Response, next: NextFunction): 
   const token = header.slice("Bearer ".length).trim();
   try {
     const payload = verifyAccessToken(token);
-    req.auth = { userId: payload.sub, businessId: payload.businessId, role: payload.role };
+    req.auth = { userId: payload.sub, businessId: payload.businessId, role: payload.role, name: payload.name };
     next();
   } catch {
     next(unauthorized());

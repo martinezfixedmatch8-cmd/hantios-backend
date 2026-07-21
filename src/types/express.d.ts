@@ -7,6 +7,7 @@ declare global {
         userId: string;
         businessId: string;
         role: UserRole;
+        name: string;
       };
     }
   }
