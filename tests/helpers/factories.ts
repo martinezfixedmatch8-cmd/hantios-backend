@@ -190,3 +190,47 @@ export async function createTestPaymentMethod(
     },
   });
 }
+
+export async function createTestProduct(
+  businessId: string,
+  overrides: Partial<{ name: string; costPrice: number; sellingPrice: number; categoryId: string }> = {}
+) {
+  return prisma.products.create({
+    data: {
+      id: generateId(),
+      business_id: businessId,
+      name: overrides.name ?? `Test Product ${randomUUID()}`,
+      cost_price: overrides.costPrice ?? 10,
+      selling_price: overrides.sellingPrice ?? 20,
+      category_id: overrides.categoryId,
+    },
+  });
+}
+
+export async function createTestCategory(businessId: string, overrides: Partial<{ name: string }> = {}) {
+  return prisma.categories.create({
+    data: {
+      id: generateId(),
+      business_id: businessId,
+      name: overrides.name ?? `Test Category ${randomUUID()}`,
+    },
+  });
+}
+
+export async function createTestBranchInventory(
+  businessId: string,
+  branchId: string,
+  productId: string,
+  overrides: Partial<{ size: string; quantity: number }> = {}
+) {
+  return prisma.branch_inventory.create({
+    data: {
+      id: generateId(),
+      business_id: businessId,
+      branch_id: branchId,
+      product_id: productId,
+      size: overrides.size,
+      quantity: overrides.quantity ?? 0,
+    },
+  });
+}

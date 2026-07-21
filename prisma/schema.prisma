@@ -331,6 +331,7 @@ model products {
   min_stock_level       Decimal?                @db.Decimal(14, 2)
   images                Json                    @default("[]")
   status                RecordStatus            @default(active)
+  version               Int                     @default(0)
   created_at            DateTime                @default(now())
   updated_at            DateTime                @updatedAt
   branch_inventory      branch_inventory[]
