@@ -79,6 +79,14 @@ model businesses {
   phone_prefix                        String
   country_locked_at                   DateTime?
   timezone                            String
+  // Business Day config (Session 3B) -- the single source of truth for Void/Refund
+  // eligibility (never server/UTC midnight). Defaults reproduce the already-locked
+  // "same calendar day in Business.timezone" rule exactly (every timestamp's local
+  // time-of-day is >= 00:00:00). business_day_end_time is stored for future use
+  // (Daily Reports/Cash Closing/Shift Closing) but not yet read by Void/Refund --
+  // those only need the rolling-24h start boundary, see src/lib/businessTime.ts.
+  business_day_start_time             DateTime                @default(dbgenerated("'00:00:00'::time")) @db.Time
+  business_day_end_time               DateTime                @default(dbgenerated("'23:59:59'::time")) @db.Time
   currency                            String
   decimal_places                      Int                     @default(2)
   language                            String                  @default("en")
@@ -227,15 +235,21 @@ model inventory_adjustments {
   reason            String
   adjusted_by       String
   created_at        DateTime       @default(now())
+  // Nullable -- only sale/void-type rows populate this. Added Session 3B so a
+  // sale-driven inventory movement (and its later void reversal) can be joined
+  // directly to the sale that caused it, instead of parsing the `reason` string.
+  sale_id           String?
   users             users          @relation(fields: [adjusted_by], references: [id])
   branches          branches       @relation(fields: [branch_id], references: [id])
   businesses        businesses     @relation(fields: [business_id], references: [id])
   products          products       @relation(fields: [product_id], references: [id])
+  sales             sales?         @relation(fields: [sale_id], references: [id])
 
   @@index([business_id, branch_id])
   @@index([business_id, created_at])
   @@index([business_id])
   @@index([business_id, product_id])
+  @@index([sale_id])
 }
 
 model login_events {
@@ -351,36 +365,37 @@ model products {
 
 /// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
 model sales {
-  id                              String           @id
+  id                              String                  @id
   business_id                     String
   branch_id                       String
   cashier_id                      String
   customer_phone                  String?
   items                           Json
-  subtotal                        Decimal          @db.Decimal(14, 2)
-  discount                        Decimal          @default(0) @db.Decimal(14, 2)
+  subtotal                        Decimal                 @db.Decimal(14, 2)
+  discount                        Decimal                 @default(0) @db.Decimal(14, 2)
   discount_type                   DiscountType?
-  tax_amount                      Decimal          @default(0) @db.Decimal(14, 2)
-  fee_amount                      Decimal          @default(0) @db.Decimal(14, 2)
-  total                           Decimal          @db.Decimal(14, 2)
+  tax_amount                      Decimal                 @default(0) @db.Decimal(14, 2)
+  fee_amount                      Decimal                 @default(0) @db.Decimal(14, 2)
+  total                           Decimal                 @db.Decimal(14, 2)
   payment_method_id               String?
   payment_reference               String?
   confirmed_by                    String?
-  profit                          Decimal          @db.Decimal(14, 2)
+  profit                          Decimal                 @db.Decimal(14, 2)
   receipt_id                      String?
-  status                          SaleStatus       @default(completed)
+  status                          SaleStatus              @default(completed)
   void_reason                     String?
-  timestamp                       DateTime         @default(now())
+  timestamp                       DateTime                @default(now())
   refund_of_sale_id               String?
-  version                         Int              @default(0)
+  version                         Int                     @default(0)
   debts                           debts[]
-  branches                        branches         @relation(fields: [branch_id], references: [id])
-  businesses                      businesses       @relation(fields: [business_id], references: [id])
-  users_sales_cashier_idTousers   users            @relation("sales_cashier_idTousers", fields: [cashier_id], references: [id])
-  users_sales_confirmed_byTousers users?           @relation("sales_confirmed_byTousers", fields: [confirmed_by], references: [id])
-  payment_methods                 payment_methods? @relation(fields: [payment_method_id], references: [id])
-  sales                           sales?           @relation("salesTosales", fields: [refund_of_sale_id], references: [id])
-  other_sales                     sales[]          @relation("salesTosales")
+  inventory_adjustments           inventory_adjustments[]
+  branches                        branches                @relation(fields: [branch_id], references: [id])
+  businesses                      businesses              @relation(fields: [business_id], references: [id])
+  users_sales_cashier_idTousers   users                   @relation("sales_cashier_idTousers", fields: [cashier_id], references: [id])
+  users_sales_confirmed_byTousers users?                  @relation("sales_confirmed_byTousers", fields: [confirmed_by], references: [id])
+  payment_methods                 payment_methods?        @relation(fields: [payment_method_id], references: [id])
+  sales                           sales?                  @relation("salesTosales", fields: [refund_of_sale_id], references: [id])
+  other_sales                     sales[]                 @relation("salesTosales")
 
   @@index([business_id, branch_id])
   @@index([business_id])

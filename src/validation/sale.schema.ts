@@ -41,3 +41,18 @@ export const listSalesQuerySchema = paginationQuerySchema.extend({
   dateTo: z.coerce.date().optional(),
 });
 export type ListSalesQuery = z.infer<typeof listSalesQuerySchema>;
+
+// Reason is required for both -- unlike Products' optimistic-lock actions
+// (versionedActionSchema in product.schema.ts), Void/Refund always need a
+// stated reason, so this isn't reused from there.
+export const voidSaleSchema = z.object({
+  version: z.number().int().nonnegative(),
+  reason: z.string().trim().min(1).max(500),
+});
+export type VoidSaleInput = z.infer<typeof voidSaleSchema>;
+
+export const refundSaleSchema = z.object({
+  version: z.number().int().nonnegative(),
+  reason: z.string().trim().min(1).max(500),
+});
+export type RefundSaleInput = z.infer<typeof refundSaleSchema>;

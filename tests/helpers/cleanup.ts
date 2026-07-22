@@ -3,12 +3,13 @@ import { prisma } from "../../src/lib/prisma";
 // General-purpose cleanup for any test that creates a business and its dependents.
 // Ordered to satisfy every FK in the schema, including the circular ones
 // (businesses.owner_id <-> users.business_id, users.deactivated_by self-ref,
-// branches.manager_id, sales.refund_of_sale_id, categories.parent_id).
+// branches.manager_id, categories.parent_id). sales.refund_of_sale_id is handled
+// by deletion order (reversal rows first), not a null-out, since a reversal row's
+// negative `total` requires the FK to still be set (chk_sales_total_nonneg).
 export async function cleanupTestBusiness(businessId: string): Promise<void> {
   await prisma.businesses.update({ where: { id: businessId }, data: { owner_id: null } }).catch(() => {});
   await prisma.users.updateMany({ where: { business_id: businessId }, data: { deactivated_by: null, branch_id: null } });
   await prisma.branches.updateMany({ where: { business_id: businessId }, data: { manager_id: null } });
-  await prisma.sales.updateMany({ where: { business_id: businessId }, data: { refund_of_sale_id: null } });
   await prisma.categories.updateMany({ where: { business_id: businessId }, data: { parent_id: null } });
 
   await prisma.audit_logs.deleteMany({ where: { business_id: businessId } });
@@ -22,6 +23,12 @@ export async function cleanupTestBusiness(businessId: string): Promise<void> {
   await prisma.inventory_adjustments.deleteMany({ where: { business_id: businessId } });
   await prisma.price_history.deleteMany({ where: { business_id: businessId } });
   await prisma.debts.deleteMany({ where: { business_id: businessId } });
+  // Refund reversal rows self-reference their original sale via refund_of_sale_id
+  // and carry a negative `total` -- chk_sales_total_nonneg only permits that while
+  // the FK is still set, so delete them before their referenced row rather than
+  // nulling the FK first (which would violate the CHECK constraint on a still-
+  // negative-total row).
+  await prisma.sales.deleteMany({ where: { business_id: businessId, refund_of_sale_id: { not: null } } });
   await prisma.sales.deleteMany({ where: { business_id: businessId } });
   await prisma.expenses.deleteMany({ where: { business_id: businessId } });
   await prisma.branch_inventory.deleteMany({ where: { business_id: businessId } });

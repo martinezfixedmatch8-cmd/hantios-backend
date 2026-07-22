@@ -4,10 +4,12 @@ import { generateId } from "../lib/ids";
 import { getOwned } from "../lib/ownership";
 import { writeAuditLog } from "../lib/auditLog";
 import { resolveListQuery, paginate } from "../lib/pagination";
-import { badRequest, conflict } from "../lib/errors";
+import { badRequest, conflict, forbidden } from "../lib/errors";
 import { claimIdempotencyKey, completeIdempotencyKey } from "../lib/idempotency";
 import { getNextReceiptNumber } from "../lib/receiptNumber";
-import type { CreateSaleInput, ListSalesQuery } from "../validation/sale.schema";
+import { isSameBusinessDay } from "../lib/businessTime";
+import { domainEvents } from "../lib/events";
+import type { CreateSaleInput, ListSalesQuery, VoidSaleInput, RefundSaleInput } from "../validation/sale.schema";
 
 interface Actor {
   userId: string;
@@ -16,9 +18,23 @@ interface Actor {
   userRole: string;
 }
 
-// Logical endpoint name for the idempotency_keys unique constraint -- stable
-// even if the actual route path ever changes.
+// Prisma's default interactive-transaction timeout (5s) is too tight for this
+// module specifically: getNextReceiptNumber's atomic per-(business,year) counter
+// row is a deliberate, unavoidable serialization point (that's what "atomic
+// sequential numbering" requires -- see receiptNumber.ts), and every round trip
+// goes over Neon's serverless HTTP driver, not a persistent local connection.
+// Under genuine concurrent load, a transaction queued behind several others
+// waiting on that same row can legitimately take longer than 5s to complete
+// even though nothing is actually stuck -- confirmed by reproducing a real
+// P2028 timeout under 5 truly-concurrent sale creations before raising this.
+const SALE_TRANSACTION_OPTIONS = { timeout: 15000 };
+
+// Logical endpoint names for the idempotency_keys unique constraint -- stable
+// even if the actual route path ever changes. Void/Refund include the sale id
+// so a reused key can never cross-contaminate a different sale's operation.
 export const CREATE_SALE_ENDPOINT = "POST /sales";
+export const voidSaleEndpoint = (saleId: string): string => `POST /sales/${saleId}/void`;
+export const refundSaleEndpoint = (saleId: string): string => `POST /sales/${saleId}/refund`;
 
 interface SaleLineSnapshot {
   productId: string;
@@ -218,6 +234,7 @@ export async function createSale(input: CreateSaleInput, actor: Actor, idempoten
           adjustment_amount: decrement.quantityBefore.minus(decrement.quantityAfter),
           adjustment_type: "sale",
           packaging_level: "each",
+          sale_id: createdSale.id,
           reason: `Sale ${createdSale.id}`,
           adjusted_by: actor.userId,
         },
@@ -254,9 +271,202 @@ export async function createSale(input: CreateSaleInput, actor: Actor, idempoten
     await completeIdempotencyKey(tx, actor.businessId, idempotencyKey, CREATE_SALE_ENDPOINT, 201, responseBody);
 
     return createdSale;
+  }, SALE_TRANSACTION_OPTIONS);
+
+  // Published after commit, never from inside the transaction -- a listener
+  // should never react to data that might still roll back. No subscriber
+  // exists yet (Notification/Analytics/CRM/Accounting are all unbuilt); this
+  // is the publish side of the loose-coupling rule, proven by test coverage.
+  domainEvents.publish("SaleCreated", {
+    saleId: sale.id,
+    businessId: actor.businessId,
+    branchId: sale.branch_id,
+    receiptId: sale.receipt_id,
+    total: sale.total.toString(),
   });
 
   return sale;
+}
+
+export async function voidSale(saleId: string, input: VoidSaleInput, actor: Actor, idempotencyKey: string) {
+  const sale = await getOwned(prisma.sales.findUnique({ where: { id: saleId } }), actor.businessId, "Sale");
+
+  // Route-level requireRole("owner", "cashier") (super_admin bypasses there
+  // too) can't express "only THIS cashier's own sale" -- that ownership check
+  // only makes sense for the cashier role; owner/super_admin skip it entirely.
+  if (actor.userRole === "cashier" && sale.cashier_id !== actor.userId) {
+    throw forbidden("Only the cashier who created this sale can void it");
+  }
+
+  const business = await prisma.businesses.findUniqueOrThrow({ where: { id: actor.businessId } });
+  if (!isSameBusinessDay(business.timezone, business.business_day_start_time, sale.timestamp, new Date())) {
+    throw badRequest("Sale can only be voided on the same business day it was created; use Refund after day-close");
+  }
+
+  const items = sale.items as unknown as SaleLineSnapshot[];
+
+  const voided = await prisma.$transaction(async (tx) => {
+    await claimIdempotencyKey(tx, actor.businessId, idempotencyKey, voidSaleEndpoint(saleId));
+
+    // Single atomic guarded transition enforces Final State Protection: a
+    // sale already voided, already refunded, or modified concurrently by
+    // another request all fail this same WHERE clause identically.
+    const result = await tx.sales.updateMany({
+      where: { id: saleId, business_id: actor.businessId, version: input.version, status: "completed" },
+      data: { status: "void", void_reason: input.reason, version: { increment: 1 } },
+    });
+    if (result.count === 0) {
+      throw conflict("Sale is not in a voidable state (already voided/refunded, or was modified concurrently)");
+    }
+
+    // Restore inventory using the sale's own immutable item snapshot -- never
+    // estimated, never recomputed from current stock (Rule #2).
+    for (const item of items) {
+      const quantity = new Prisma.Decimal(item.quantity);
+      const row = await tx.branch_inventory.findFirst({
+        where: { business_id: actor.businessId, branch_id: sale.branch_id, product_id: item.productId, size: item.size },
+        orderBy: { id: "asc" },
+      });
+      if (!row) {
+        throw conflict(`No stock record found to restore for product "${item.productName}"`);
+      }
+      const restoreResult = await tx.branch_inventory.updateMany({
+        where: { id: row.id },
+        data: { quantity: { increment: quantity }, version: { increment: 1 }, last_updated: new Date() },
+      });
+      if (restoreResult.count === 0) {
+        throw conflict(`Failed to restore stock for product "${item.productName}"`);
+      }
+
+      // adjustment_amount must stay positive (CHECK chk_inventory_adj_amount_positive)
+      // -- quantity_after > quantity_before here, the mirror of the sale's own
+      // decrement where quantity_before > quantity_after.
+      await tx.inventory_adjustments.create({
+        data: {
+          id: generateId(),
+          business_id: actor.businessId,
+          product_id: item.productId,
+          branch_id: sale.branch_id,
+          quantity_before: row.quantity,
+          quantity_after: row.quantity.plus(quantity),
+          adjustment_amount: quantity,
+          adjustment_type: "void",
+          packaging_level: "each",
+          sale_id: sale.id,
+          reason: `Void of sale ${sale.id}`,
+          adjusted_by: actor.userId,
+        },
+      });
+    }
+
+    await writeAuditLog(tx, {
+      businessId: actor.businessId,
+      userId: actor.userId,
+      userName: actor.userName,
+      userRole: actor.userRole,
+      action: "sale.voided",
+      entityType: "sale",
+      entityId: sale.id,
+      reason: input.reason,
+    });
+
+    const updated = await tx.sales.findUniqueOrThrow({ where: { id: saleId } });
+
+    const responseBody = JSON.parse(JSON.stringify({ data: updated })) as unknown;
+    await completeIdempotencyKey(tx, actor.businessId, idempotencyKey, voidSaleEndpoint(saleId), 200, responseBody);
+
+    return updated;
+  }, SALE_TRANSACTION_OPTIONS);
+
+  domainEvents.publish("SaleVoided", { saleId: voided.id, businessId: actor.businessId, reason: input.reason });
+
+  return voided;
+}
+
+export async function refundSale(saleId: string, input: RefundSaleInput, actor: Actor, idempotencyKey: string) {
+  const sale = await getOwned(prisma.sales.findUnique({ where: { id: saleId } }), actor.businessId, "Sale");
+
+  const business = await prisma.businesses.findUniqueOrThrow({ where: { id: actor.businessId } });
+  if (isSameBusinessDay(business.timezone, business.business_day_start_time, sale.timestamp, new Date())) {
+    throw badRequest("Sale cannot be refunded on the same business day it was created; use Void instead");
+  }
+
+  const refund = await prisma.$transaction(async (tx) => {
+    await claimIdempotencyKey(tx, actor.businessId, idempotencyKey, refundSaleEndpoint(saleId));
+
+    // Same atomic guard shape as Void -- covers already-voided, already-
+    // refunded, and concurrent-modification in one statement. The original
+    // row's financial fields (subtotal/discount/tax_amount/total/profit/items)
+    // are never written here; only status + version change (Rule #3's
+    // "never modify the original Sale" is about the financial record, not
+    // lifecycle metadata -- see the Session 3B plan for the full reasoning).
+    const result = await tx.sales.updateMany({
+      where: { id: saleId, business_id: actor.businessId, version: input.version, status: "completed" },
+      data: { status: "refunded", version: { increment: 1 } },
+    });
+    if (result.count === 0) {
+      throw conflict("Sale is not in a refundable state (already voided/refunded, or was modified concurrently)");
+    }
+
+    const receiptNumber = await getNextReceiptNumber(tx, actor.businessId, business.timezone);
+
+    // Financial reversal: a brand-new sales row, self-linked via the
+    // already-existing refund_of_sale_id column, every money figure negated
+    // 1:1 so `total = subtotal - discount + tax` still holds for this row too.
+    // chk_sales_total_nonneg already permits total < 0 specifically when
+    // refund_of_sale_id is set -- confirmed by reading the live constraint
+    // before this session, not assumed.
+    const reversal = await tx.sales.create({
+      data: {
+        id: generateId(),
+        business_id: actor.businessId,
+        branch_id: sale.branch_id,
+        cashier_id: actor.userId,
+        customer_phone: sale.customer_phone,
+        items: sale.items as unknown as Prisma.InputJsonValue,
+        subtotal: sale.subtotal.negated(),
+        discount: sale.discount.negated(),
+        discount_type: sale.discount_type,
+        tax_amount: sale.tax_amount.negated(),
+        total: sale.total.negated(),
+        payment_method_id: sale.payment_method_id,
+        payment_reference: sale.payment_reference,
+        profit: sale.profit.negated(),
+        receipt_id: receiptNumber,
+        status: "refunded",
+        refund_of_sale_id: sale.id,
+      },
+    });
+
+    // No refund_reason column exists (unlike Void's void_reason) -- the
+    // AuditLog's own required `reason` is this repo's canonical "why" record,
+    // so that's where it lives (see Session 3B plan decision #4).
+    await writeAuditLog(tx, {
+      businessId: actor.businessId,
+      userId: actor.userId,
+      userName: actor.userName,
+      userRole: actor.userRole,
+      action: "sale.refunded",
+      entityType: "sale",
+      entityId: sale.id,
+      reason: `${input.reason} (refund receipt ${receiptNumber}, ${reversal.total.toString()} ${business.currency})`,
+    });
+
+    const responseBody = JSON.parse(JSON.stringify({ data: reversal })) as unknown;
+    await completeIdempotencyKey(tx, actor.businessId, idempotencyKey, refundSaleEndpoint(saleId), 201, responseBody);
+
+    return reversal;
+  }, SALE_TRANSACTION_OPTIONS);
+
+  domainEvents.publish("RefundCreated", {
+    saleId: sale.id,
+    refundSaleId: refund.id,
+    businessId: actor.businessId,
+    total: refund.total.toString(),
+    reason: input.reason,
+  });
+
+  return refund;
 }
 
 export async function listSales(query: ListSalesQuery, businessId: string) {
