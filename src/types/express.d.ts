@@ -9,6 +9,7 @@ declare global {
         role: UserRole;
         name: string;
       };
+      idempotencyKey?: string;
     }
   }
 }

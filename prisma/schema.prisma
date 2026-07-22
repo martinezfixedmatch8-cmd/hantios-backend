@@ -102,6 +102,7 @@ model businesses {
   payment_methods                     payment_methods[]
   price_history                       price_history[]
   products                            products[]
+  receipt_counters                    receipt_counters[]
   sales                               sales[]
   sessions                            sessions[]
   staff_invites                       staff_invites[]
@@ -500,6 +501,23 @@ model warehouse_stock {
   @@index([business_id])
 }
 
+// Backs Sale Creation's Receipt Number (customer-facing, e.g. INV-2026-000001) --
+// distinct from Sale Number (sales.id, already immutable/unique/never-reused).
+// One row per (business, calendar year in Business.timezone); last_number is
+// incremented via a single atomic `INSERT ... ON CONFLICT ... DO UPDATE ... RETURNING`
+// statement (src/lib/receiptNumber.ts) inside the sale's own transaction -- never
+// SELECT MAX+1, which would race under concurrent sales.
+model receipt_counters {
+  id          String     @id
+  business_id String
+  year        Int
+  last_number Int        @default(0)
+  businesses  businesses @relation(fields: [business_id], references: [id])
+
+  @@unique([business_id, year])
+  @@index([business_id])
+}
+
 model warehouses {
   id              String            @id
   business_id     String            @unique
@@ -519,6 +537,8 @@ enum AdjustmentType {
   correction
   opening_balance
   transfer
+  sale
+  void
 }
 
 enum AuthProvider {

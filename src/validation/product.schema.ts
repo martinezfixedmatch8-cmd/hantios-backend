@@ -1,19 +1,11 @@
 import { z } from "zod";
 import { AdjustmentType, PackagingLevel } from "@prisma/client";
 import { paginationQuerySchema } from "../lib/pagination";
+import { decimalField } from "./common.schema";
 
 // images is deliberately not exposed anywhere here -- it's a dormant field
 // (no upload feature exists yet, per CLAUDE.md), so there's no meaningful way
 // for a client to populate it. It stays at its DB default ("[]").
-
-// All money/quantity fields are stored as Decimal(14,2) -- reject anything with
-// finer precision than the DB can actually represent, rather than silently
-// rounding (which QA found produces phantom PriceHistory rows and, for
-// stock-adjustment quantities, an unhandled 500 when a sub-cent amount rounds
-// to 0 at write time and trips the quantity_positive CHECK constraint).
-function decimalField<T extends z.ZodType<number>>(base: T) {
-  return base.refine((v) => Math.round(v * 100) / 100 === v, { message: "must have at most 2 decimal places" });
-}
 
 // Deliberately NOT reused between create and update: sizes/unitType/packagingHierarchy
 // carry `.default(...)` here for creation (a brand-new product should start with sane

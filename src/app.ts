@@ -8,6 +8,7 @@ import staffInviteRoutes from "./routes/staffInvite.routes";
 import branchRoutes from "./routes/branch.routes";
 import paymentMethodRoutes from "./routes/paymentMethod.routes";
 import productRoutes from "./routes/product.routes";
+import saleRoutes from "./routes/sale.routes";
 import { notFoundHandler, errorHandler } from "./middleware/errorHandler";
 
 export const app = express();
@@ -30,6 +31,7 @@ app.use("/staff", staffInviteRoutes);
 app.use("/branches", branchRoutes);
 app.use("/payment-methods", paymentMethodRoutes);
 app.use("/products", productRoutes);
+app.use("/sales", saleRoutes);
 
 app.use(notFoundHandler);
 app.use(errorHandler);
