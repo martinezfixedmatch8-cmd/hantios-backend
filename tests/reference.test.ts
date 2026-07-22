@@ -2,6 +2,14 @@ import request from "supertest";
 import { app } from "../src/app";
 
 describe("Reference API (unauthenticated, global lookup data)", () => {
+  it("sends a 7-day public Cache-Control header, plus Express's default ETag, on all three endpoints", async () => {
+    for (const path of ["/reference/countries", "/reference/countries/US/timezones", "/reference/currencies"]) {
+      const res = await request(app).get(path);
+      expect(res.headers["cache-control"]).toBe("public, max-age=604800");
+      expect(res.headers.etag).toBeTruthy();
+    }
+  });
+
   describe("GET /reference/countries", () => {
     it("requires no authentication", async () => {
       const res = await request(app).get("/reference/countries");
