@@ -36,6 +36,7 @@
     "cookie-parser": "^1.4.7",
     "cors": "^2.8.6",
     "countries-and-timezones": "^3.9.0",
+    "currency-codes": "^2.2.0",
     "dotenv": "^17.4.2",
     "express": "^5.2.1",
     "express-rate-limit": "^8.6.0",

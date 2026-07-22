@@ -3,11 +3,11 @@ import { prisma } from "../lib/prisma";
 import { generateId } from "../lib/ids";
 import { hashPassword, verifyPassword, recordPasswordHistory } from "../lib/password";
 import { writeAuditLog } from "../lib/auditLog";
-import { conflict, locked, notFound, unauthorized } from "../lib/errors";
+import { badRequest, conflict, locked, notFound, unauthorized } from "../lib/errors";
 import { CURRENT_TERMS_VERSION, CURRENT_PRIVACY_VERSION } from "../lib/config";
 import { getNotificationProvider } from "../notifications/registry";
 import { getGoogleAuthProvider, type GoogleIdentity } from "../lib/googleAuth";
-import { getCountryDefaults } from "../lib/countryReference";
+import { getCountryDefaults, findCountry, isValidTimezoneForCountry, isValidPhonePrefixForCountry } from "../lib/countryReference";
 import { createOtpChallenge, verifyOtpChallenge } from "../lib/otp";
 import { issueSession, rotateSession, revokeSession } from "../lib/session";
 import { requiresOtpForNewDevices } from "../lib/businessSettings";
@@ -48,6 +48,10 @@ function toAccessToken(user: users): string {
   return signAccessToken({ sub: user.id, businessId: user.business_id, role: user.role, name: user.name });
 }
 
+// A client can override currency/timezone/phonePrefix explicitly (see
+// countryReference.ts's own comment on why), but never trust that override
+// blindly -- validate it's actually consistent with the selected country
+// server-side. Never rely on frontend validation for this.
 async function resolveCountryFields(input: {
   country: string;
   currency?: string;
@@ -55,6 +59,21 @@ async function resolveCountryFields(input: {
   phonePrefix?: string;
 }) {
   const defaults = getCountryDefaults(input.country);
+
+  if (input.timezone && !isValidTimezoneForCountry(input.country, input.timezone)) {
+    throw badRequest("Selected timezone does not belong to the selected country");
+  }
+  if (input.currency) {
+    const country = findCountry(input.country);
+    const validCurrencies = Object.keys(country?.currencies ?? {});
+    if (!validCurrencies.includes(input.currency)) {
+      throw badRequest("Selected currency does not belong to the selected country");
+    }
+  }
+  if (input.phonePrefix && !isValidPhonePrefixForCountry(input.country, input.phonePrefix)) {
+    throw badRequest("Selected phone prefix does not belong to the selected country");
+  }
+
   return {
     currency: input.currency ?? defaults.currency,
     timezone: input.timezone ?? defaults.timezone,

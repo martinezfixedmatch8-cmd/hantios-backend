@@ -66,6 +66,65 @@ describe("POST /auth/signup (email path)", () => {
     expect(res.status).toBe(400);
   });
 
+  it("returns 400 when an explicit timezone override does not belong to the selected country", async () => {
+    // KE (Kenya) selected, but Europe/London supplied as an override -- server
+    // must reject this itself, never trust the client's own consistency.
+    const res = await request(app)
+      .post("/auth/signup")
+      .set("X-Device-Id", "d1")
+      .send(validPayload({ country: "KE", timezone: "Europe/London" }));
+    expect(res.status).toBe(400);
+  });
+
+  it("returns 400 when an explicit currency override does not belong to the selected country", async () => {
+    const res = await request(app)
+      .post("/auth/signup")
+      .set("X-Device-Id", "d1")
+      .send(validPayload({ country: "KE", currency: "JPY" }));
+    expect(res.status).toBe(400);
+  });
+
+  // QA-added (pre-Session-4 audit): resolveCountryFields (src/services/auth.service.ts)
+  // validates timezone/currency overrides against the selected country, but NEVER
+  // validates the phonePrefix override the same way -- the Zod schema
+  // (overridesSchema.phonePrefix, src/validation/auth.schema.ts) only requires a
+  // non-empty trimmed string, and resolveCountryFields passes it straight through
+  // (`phonePrefix: input.phonePrefix ?? defaults.phonePrefix`) with zero
+  // country-consistency check, unlike its currency/timezone siblings immediately
+  // above. This asserts the correct/intended behavior (reject, matching the
+  // currency/timezone pattern) and currently FAILS, proving the gap is real: a
+  // KE (Kenya) signup with an unrelated phonePrefix override is accepted as-is
+  // and permanently stored on Business.phone_prefix.
+  it("returns 400 when an explicit phonePrefix override does not belong to the selected country", async () => {
+    const res = await request(app)
+      .post("/auth/signup")
+      .set("X-Device-Id", "d1")
+      .send(validPayload({ country: "KE", phonePrefix: "+1" }));
+    if (res.status === 201) businessIds.push(res.body.data.business.id);
+    expect(res.status).toBe(400);
+  });
+
+  it("resolves the plain +1 phone prefix for a NANP country (US), not an arbitrary area code", async () => {
+    const payload = validPayload({ country: "US", phone: "+12025551234" });
+    const res = await request(app).post("/auth/signup").set("X-Device-Id", "d1").send(payload);
+    expect(res.status).toBe(201);
+    businessIds.push(res.body.data.business.id);
+
+    const business = await prisma.businesses.findUniqueOrThrow({ where: { id: res.body.data.business.id } });
+    expect(business.phone_prefix).toBe("+1");
+  });
+
+  it("accepts a timezone override that is a valid (even if deprecated/alias) zone for the country", async () => {
+    // Africa/Mogadishu is a real IANA identifier for Somalia, just a deprecated
+    // alias of Africa/Nairobi -- must still be accepted, not just the canonical name.
+    const res = await request(app)
+      .post("/auth/signup")
+      .set("X-Device-Id", "d1")
+      .send(validPayload({ country: "SO", phone: "+252611234567", timezone: "Africa/Mogadishu" }));
+    expect(res.status).toBe(201);
+    businessIds.push(res.body.data.business.id);
+  });
+
   it("creates a business + owner on the happy path", async () => {
     const payload = validPayload();
     const res = await request(app).post("/auth/signup").set("X-Device-Id", "d1").send(payload);
@@ -121,14 +180,24 @@ describe("POST /auth/signup (email path)", () => {
     expect(setCookie.some((c) => c.startsWith("csrf_token=") && !c.includes("HttpOnly"))).toBe(true);
   });
 
-  it("allows overriding currency/timezone/phonePrefix over the country defaults", async () => {
-    const payload = validPayload({ currency: "USD", timezone: "UTC", phonePrefix: "+1" });
+  it("allows overriding currency/timezone/phonePrefix over the country defaults, as long as they're actually consistent with the selected country", async () => {
+    // US has multiple timezones (unlike Kenya, validPayload()'s default
+    // country) -- overriding to a non-first one proves the override is
+    // genuinely respected, not silently falling back to the computed default,
+    // while still passing the country-consistency validation added this session.
+    const payload = validPayload({
+      country: "US",
+      phone: "+12025551234",
+      currency: "USD",
+      timezone: "America/Los_Angeles",
+      phonePrefix: "+1",
+    });
     const res = await request(app).post("/auth/signup").set("X-Device-Id", "d1").send(payload);
 
     expect(res.status).toBe(201);
     businessIds.push(res.body.data.business.id);
     const business = await prisma.businesses.findUnique({ where: { id: res.body.data.business.id } });
-    expect(business).toMatchObject({ currency: "USD", timezone: "UTC", phone_prefix: "+1" });
+    expect(business).toMatchObject({ currency: "USD", timezone: "America/Los_Angeles", phone_prefix: "+1" });
   });
 
   it("returns 409 for a duplicate business email", async () => {
