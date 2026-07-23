@@ -64,3 +64,23 @@ export function getBusinessDay(timezone: string, dayStartTime: Date, date: Date 
 export function isSameBusinessDay(timezone: string, dayStartTime: Date, a: Date, b: Date): boolean {
   return getBusinessDay(timezone, dayStartTime, a) === getBusinessDay(timezone, dayStartTime, b);
 }
+
+// `debts.date_due` is a plain @db.Date -- a calendar date the business meant
+// literally (no time-of-day, no further timezone conversion needed), unlike
+// `timestamp`/`created_at` columns getBusinessDay handles above. Prisma
+// returns it as a Date at UTC midnight of that calendar date, so read it with
+// getUTC*, the same reasoning timeOfDaySeconds above uses for @db.Time.
+export function dateOnlyString(date: Date): string {
+  const y = date.getUTCFullYear();
+  const m = String(date.getUTCMonth() + 1).padStart(2, "0");
+  const d = String(date.getUTCDate()).padStart(2, "0");
+  return `${y}-${m}-${d}`;
+}
+
+// Session 4 (Debts): "today", business-day-aware, compared against a due
+// date -- never raw UTC "now" vs "due date". Overdue = the current business
+// day (per Business.timezone + businessDayStartTime) is later than the debt's
+// due date; equal or earlier is not yet overdue.
+export function isOverdue(dueDate: Date, timezone: string, dayStartTime: Date, now: Date = new Date()): boolean {
+  return getBusinessDay(timezone, dayStartTime, now) > dateOnlyString(dueDate);
+}

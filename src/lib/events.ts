@@ -14,6 +14,13 @@ export interface DomainEventPayloads {
   SaleCreated: { saleId: string; businessId: string; branchId: string; receiptId: string | null; total: string };
   SaleVoided: { saleId: string; businessId: string; reason: string };
   RefundCreated: { saleId: string; refundSaleId: string; businessId: string; total: string; reason: string };
+  DebtCreated: { debtId: string; businessId: string; customerId: string; amountOriginal: string };
+  // Fires per payment action (mirrors RefundCreated's "fires per action" shape,
+  // not a status-transition event) -- a reversal also publishes this with a
+  // negative amount, not a separate event name.
+  DebtPaymentReceived: { debtId: string; businessId: string; paymentId: string; amount: string; amountRemaining: string };
+  DebtDisputed: { debtId: string; businessId: string; reason: string };
+  DebtWrittenOff: { debtId: string; businessId: string; reason: string };
 }
 
 export type DomainEventName = keyof DomainEventPayloads;

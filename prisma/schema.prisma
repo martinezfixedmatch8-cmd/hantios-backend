@@ -102,6 +102,8 @@ model businesses {
   categories                          categories[]
   customers                           customers[]
   debts                               debts[]
+  debt_payments                       debt_payments[]
+  debt_reminders                      debt_reminders[]
   expenses                            expenses[]
   idempotency_keys                    idempotency_keys[]
   inventory_adjustments               inventory_adjustments[]
@@ -140,45 +142,106 @@ model customers {
   name         String?
   email        String?
   total_spent  Decimal      @default(0) @db.Decimal(14, 2)
+  // Derived cache only, kept in sync for cheap reads (CRM dashboards, customer
+  // lists, search) -- debts/debt_payments are always the source of truth. If
+  // this is ever found to have drifted, recalculate it from those two tables;
+  // never trust it over them.
   debt_balance Decimal      @default(0) @db.Decimal(14, 2)
   status       RecordStatus @default(active)
   created_at   DateTime     @default(now())
   businesses   businesses   @relation(fields: [business_id], references: [id])
+  debts        debts[]
 
   @@unique([business_id, phone])
 }
 
 /// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
 model debts {
-  id                    String     @id
-  business_id           String
-  branch_id             String?
-  customer_phone        String
-  customer_name         String?
-  customer_location     String?
-  amount_original       Decimal    @db.Decimal(14, 2)
-  amount_paid           Decimal    @default(0) @db.Decimal(14, 2)
-  amount_remaining      Decimal    @db.Decimal(14, 2)
-  date_taken            DateTime   @db.Date
-  date_due              DateTime   @db.Date
-  interest_enabled      Boolean    @default(false)
-  interest_rate         Decimal?   @db.Decimal(5, 2)
-  notes                 String?
-  status                DebtStatus @default(open)
-  payment_history       Json       @default("[]")
-  reminder_sent_before  Boolean    @default(false)
-  reminder_sent_overdue Boolean    @default(false)
-  disputed              Boolean    @default(false)
-  created_at            DateTime   @default(now())
-  sale_id               String?
-  version               Int        @default(0)
-  branches              branches?  @relation(fields: [branch_id], references: [id])
-  businesses            businesses @relation(fields: [business_id], references: [id])
-  sales                 sales?     @relation(fields: [sale_id], references: [id])
+  id                String           @id
+  business_id       String
+  branch_id         String?
+  // customer_id is the real relationship (Session 4); the three fields below
+  // are an immutable snapshot taken at creation time -- preserves historical
+  // accuracy on this debt even if the customer's own record changes later.
+  customer_id       String
+  customer_phone    String
+  customer_name     String?
+  customer_location String?
+  amount_original   Decimal          @db.Decimal(14, 2)
+  amount_paid       Decimal          @default(0) @db.Decimal(14, 2)
+  amount_remaining  Decimal          @db.Decimal(14, 2)
+  date_taken        DateTime         @db.Date
+  date_due          DateTime         @db.Date
+  interest_enabled  Boolean          @default(false)
+  interest_type     InterestType     @default(none)
+  interest_value    Decimal?         @db.Decimal(14, 2)
+  notes             String?
+  // Sole source of truth for lifecycle state (Session 4) -- the standalone
+  // `disputed` boolean this table used to also carry was dropped as a
+  // redundant second copy of what `status: disputed` already means.
+  status            DebtStatus       @default(open)
+  created_at        DateTime         @default(now())
+  sale_id           String?
+  version           Int              @default(0)
+  customers         customers        @relation(fields: [customer_id], references: [id])
+  branches          branches?        @relation(fields: [branch_id], references: [id])
+  businesses        businesses       @relation(fields: [business_id], references: [id])
+  sales             sales?           @relation(fields: [sale_id], references: [id])
+  debt_payments     debt_payments[]
+  debt_reminders    debt_reminders[]
 
   @@index([business_id, date_due])
   @@index([business_id])
   @@index([business_id, status])
+  @@index([customer_id])
+}
+
+/// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
+/// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
+model debt_payments {
+  id                     String           @id
+  business_id            String
+  debt_id                String
+  amount                 Decimal          @db.Decimal(14, 2)
+  payment_method_id      String?
+  payment_date           DateTime         @db.Date
+  notes                  String?
+  created_by             String
+  // A reversal is a NEW row with a negative amount referencing the original --
+  // never an in-place edit or a hard delete (debt records are financial
+  // history, kept forever). Mirrors exactly how Session 3B modeled Refund as
+  // a new, negated Sale row rather than mutating the original.
+  reversal_of_payment_id String?
+  version                Int              @default(0)
+  created_at             DateTime         @default(now())
+  updated_at             DateTime         @updatedAt
+  debts                  debts            @relation(fields: [debt_id], references: [id])
+  businesses             businesses       @relation(fields: [business_id], references: [id])
+  payment_methods        payment_methods? @relation(fields: [payment_method_id], references: [id])
+  users                  users            @relation(fields: [created_by], references: [id])
+  debt_payments          debt_payments?   @relation("debt_payments_reversal", fields: [reversal_of_payment_id], references: [id])
+  other_debt_payments    debt_payments[]  @relation("debt_payments_reversal")
+
+  @@index([business_id])
+  @@index([debt_id])
+}
+
+model debt_reminders {
+  id            String         @id
+  business_id   String
+  debt_id       String
+  reminder_type ReminderType
+  status        ReminderStatus
+  provider      String
+  error         String?
+  sent_at       DateTime?
+  next_retry    DateTime?
+  created_at    DateTime       @default(now())
+  debts         debts          @relation(fields: [debt_id], references: [id])
+  businesses    businesses     @relation(fields: [business_id], references: [id])
+
+  @@index([business_id])
+  @@index([debt_id])
 }
 
 /// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
@@ -301,16 +364,17 @@ model password_history {
 }
 
 model payment_methods {
-  id             String       @id
+  id             String          @id
   business_id    String
   name           String
   logo_url       String?
   account_number String?
   description    String?
-  status         RecordStatus @default(active)
-  created_at     DateTime     @default(now())
-  businesses     businesses   @relation(fields: [business_id], references: [id])
+  status         RecordStatus    @default(active)
+  created_at     DateTime        @default(now())
+  businesses     businesses      @relation(fields: [business_id], references: [id])
   sales          sales[]
+  debt_payments  debt_payments[]
 
   @@index([business_id])
 }
@@ -479,6 +543,7 @@ model users {
   audit_logs                                    audit_logs[]
   branches_branches_manager_idTousers           branches[]              @relation("branches_manager_idTousers")
   businesses_businesses_owner_idTousers         businesses?             @relation("businesses_owner_idTousers")
+  debt_payments                                 debt_payments[]
   expenses                                      expenses[]
   inventory_adjustments                         inventory_adjustments[]
   login_events                                  login_events[]
@@ -565,6 +630,26 @@ enum DebtStatus {
   partially_paid
   paid
   disputed
+  written_off
+}
+
+// Session 4: replaces the old interest_rate-only model. Interest is optional
+// and configured per individual debt -- none for Islamic businesses, fixed or
+// percentage for jurisdictions where interest is permitted.
+enum InterestType {
+  none
+  fixed
+  percentage
+}
+
+enum ReminderType {
+  before_due
+  overdue
+}
+
+enum ReminderStatus {
+  sent
+  failed
 }
 
 enum DiscountType {

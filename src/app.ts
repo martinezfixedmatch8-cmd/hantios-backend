@@ -10,6 +10,7 @@ import paymentMethodRoutes from "./routes/paymentMethod.routes";
 import productRoutes from "./routes/product.routes";
 import saleRoutes from "./routes/sale.routes";
 import referenceRoutes from "./routes/reference.routes";
+import debtRoutes from "./routes/debt.routes";
 import { notFoundHandler, errorHandler } from "./middleware/errorHandler";
 
 export const app = express();
@@ -34,6 +35,7 @@ app.use("/payment-methods", paymentMethodRoutes);
 app.use("/products", productRoutes);
 app.use("/sales", saleRoutes);
 app.use("/reference", referenceRoutes);
+app.use("/debts", debtRoutes);
 
 app.use(notFoundHandler);
 app.use(errorHandler);
