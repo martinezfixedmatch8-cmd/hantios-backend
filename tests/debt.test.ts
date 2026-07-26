@@ -1,9 +1,11 @@
 import request from "supertest";
 import { randomUUID } from "crypto";
+import { Prisma } from "@prisma/client";
 import type { UserRole } from "@prisma/client";
 import { app } from "../src/app";
 import { prisma } from "../src/lib/prisma";
 import { domainEvents } from "../src/lib/events";
+import { getBusinessDay } from "../src/lib/businessTime";
 import { cleanupTestBusiness } from "./helpers/cleanup";
 import {
   signupTestOwner,
@@ -46,7 +48,6 @@ describe("Debts", () => {
       amountOriginal: 1000,
       dateTaken: isoDate(-20),
       dateDue: isoDate(-10), // overdue by default -- most tests want a real, non-trivial aging state
-      interestEnabled: false,
       ...overrides,
     };
   }
@@ -61,6 +62,23 @@ describe("Debts", () => {
       throw new Error(`createDebtAs failed: ${res.status} ${JSON.stringify(res.body)}`);
     }
     return res.body.data;
+  }
+
+  // Shared by the interest-policy-snapshot tests and the apply-interest
+  // tests below -- temporarily overrides Business Settings' interest policy
+  // for the duration of `fn`, always restoring the prior settings afterward
+  // so tests don't leak configuration into each other.
+  async function withInterestPolicy<T>(policy: Record<string, unknown> | null, fn: () => Promise<T>): Promise<T> {
+    const before = await prisma.businesses.findUniqueOrThrow({ where: { id: businessId } });
+    await prisma.businesses.update({
+      where: { id: businessId },
+      data: { settings: (policy === null ? {} : { debts: { interestPolicy: policy } }) as Prisma.InputJsonValue },
+    });
+    try {
+      return await fn();
+    } finally {
+      await prisma.businesses.update({ where: { id: businessId }, data: { settings: (before.settings ?? {}) as Prisma.InputJsonValue } });
+    }
   }
 
   it("returns 401 with no token", async () => {
@@ -163,32 +181,60 @@ describe("Debts", () => {
     }
   });
 
-  it("returns 400 for invalid interest configuration (enabled but type=none)", async () => {
-    const res = await request(app)
-      .post("/debts")
-      .set("Authorization", `Bearer ${ownerToken}`)
-      .set("Idempotency-Key", idemKey())
-      .send(validDebtPayload({ interestEnabled: true, interestType: "none" }));
-    expect(res.status).toBe(400);
-  });
+  describe("Interest policy snapshot (Business Settings is the sole source of truth)", () => {
+    it("ignores client-supplied interest fields and snapshots Tier 2 defaults when the business has no policy configured", async () => {
+      await withInterestPolicy(null, async () => {
+        const res = await request(app)
+          .post("/debts")
+          .set("Authorization", `Bearer ${ownerToken}`)
+          .set("Idempotency-Key", idemKey())
+          // Client tries to smuggle in interest fields -- createDebtSchema no
+          // longer accepts them; they must be silently stripped, never
+          // trusted, and never surface as a 400 either (unknown keys, not
+          // invalid ones).
+          .send(validDebtPayload({ interestEnabled: true, interestType: "percentage", interestValue: 999 }));
+        expect(res.status).toBe(201);
+        expect(res.body.data.interest_enabled).toBe(false);
+        expect(res.body.data.interest_type).toBe("none");
+        expect(res.body.data.interest_value).toBeNull();
+        expect(res.body.data.calculation_policy).toBe("one_time");
+        expect(res.body.data.formula).toBe("simple");
+        expect(res.body.data.percentage_base).toBe("remaining_balance");
+      });
+    });
 
-  it("returns 400 for percentage interest value over 100", async () => {
-    const res = await request(app)
-      .post("/debts")
-      .set("Authorization", `Bearer ${ownerToken}`)
-      .set("Idempotency-Key", idemKey())
-      .send(validDebtPayload({ interestEnabled: true, interestType: "percentage", interestValue: 150 }));
-    expect(res.status).toBe(400);
-  });
+    it("snapshots the business's currently-configured interest policy onto a new debt", async () => {
+      await withInterestPolicy(
+        { enabled: true, type: "percentage", value: 12, calculationPolicy: "monthly", formula: "compound", percentageBase: "original_amount" },
+        async () => {
+          const debt = await createDebtAs(ownerToken);
+          expect(debt.interest_enabled).toBe(true);
+          expect(debt.interest_type).toBe("percentage");
+          expect(Number(debt.interest_value)).toBe(12);
+          expect(debt.calculation_policy).toBe("monthly");
+          expect(debt.formula).toBe("compound");
+          expect(debt.percentage_base).toBe("original_amount");
+        }
+      );
+    });
 
-  it("accepts a valid fixed-interest debt", async () => {
-    const res = await request(app)
-      .post("/debts")
-      .set("Authorization", `Bearer ${ownerToken}`)
-      .set("Idempotency-Key", idemKey())
-      .send(validDebtPayload({ interestEnabled: true, interestType: "fixed", interestValue: 50 }));
-    expect(res.status).toBe(201);
-    expect(res.body.data.interest_type).toBe("fixed");
+    it("does not let a policy change after creation affect an already-created debt's snapshot (fairness guarantee)", async () => {
+      const debt = await withInterestPolicy(
+        { enabled: true, type: "fixed", value: 50, calculationPolicy: "weekly", formula: "simple", percentageBase: "remaining_balance" },
+        () => createDebtAs(ownerToken)
+      );
+      expect(debt.interest_type).toBe("fixed");
+
+      await withInterestPolicy(
+        { enabled: true, type: "percentage", value: 20, calculationPolicy: "daily", formula: "compound", percentageBase: "original_amount" },
+        async () => {
+          const res = await request(app).get(`/debts/${debt.id}`).set("Authorization", `Bearer ${ownerToken}`);
+          expect(res.body.data.interest_type).toBe("fixed");
+          expect(Number(res.body.data.interest_value)).toBe(50);
+          expect(res.body.data.calculation_policy).toBe("weekly");
+        }
+      );
+    });
   });
 
   it("returns 400 when dateDue is before dateTaken", async () => {
@@ -704,6 +750,255 @@ describe("Debts", () => {
     });
   });
 
+  describe("Apply Interest", () => {
+    it("returns 400 for a debt whose snapshotted policy has interest disabled", async () => {
+      const debt = await withInterestPolicy(null, () => createDebtAs(ownerToken));
+      const res = await request(app)
+        .post(`/debts/${debt.id}/apply-interest`)
+        .set("Authorization", `Bearer ${ownerToken}`)
+        .set("Idempotency-Key", idemKey())
+        .send({ version: debt.version });
+      expect(res.status).toBe(400);
+    });
+
+    it("computes a percentage/monthly/simple charge against remaining balance, writes an immutable debt_transactions row, updates the balance, and publishes InterestApplied", async () => {
+      await withInterestPolicy(
+        { enabled: true, type: "percentage", value: 10, calculationPolicy: "monthly", formula: "simple", percentageBase: "remaining_balance" },
+        async () => {
+          // Taken ~40 days ago -- at least one full calendar month has
+          // elapsed since date_taken, so a first apply-interest call is due.
+          const debt = await createDebtAs(ownerToken, {
+            amountOriginal: 1000,
+            dateTaken: isoDate(-40),
+            dateDue: isoDate(-20),
+          });
+
+          let published: unknown = null;
+          domainEvents.once("InterestApplied", (payload) => {
+            published = payload;
+          });
+
+          const res = await request(app)
+            .post(`/debts/${debt.id}/apply-interest`)
+            .set("Authorization", `Bearer ${ownerToken}`)
+            .set("Idempotency-Key", idemKey())
+            .send({ version: debt.version });
+          expect(res.status).toBe(201);
+          expect(Number(res.body.data.debt.amount_remaining)).toBe(1100);
+          expect(res.body.data.transaction.transaction_type).toBe("interest_applied");
+          expect(Number(res.body.data.transaction.amount)).toBe(100);
+          expect(Number(res.body.data.transaction.balance_after)).toBe(1100);
+          expect(res.body.data.transaction.periods_elapsed).toBeGreaterThanOrEqual(1);
+          expect(published).toMatchObject({ debtId: debt.id, businessId });
+
+          const ledgerRows = await prisma.debt_transactions.findMany({ where: { debt_id: debt.id } });
+          expect(ledgerRows).toHaveLength(1);
+
+          // Scoped to the transaction's own id, not the debt's -- matches the
+          // existing debt.payment_added pattern (entity_id is the payment's
+          // id, not the debt's).
+          const auditRows = await prisma.audit_logs.findMany({ where: { action: "debt.interest_applied", entity_id: res.body.data.transaction.id } });
+          expect(auditRows).toHaveLength(1);
+        }
+      );
+    });
+
+    it("is a safe no-op (200, no new ledger row) when called again immediately -- zero periods have elapsed since the last application", async () => {
+      await withInterestPolicy(
+        { enabled: true, type: "percentage", value: 10, calculationPolicy: "monthly", formula: "simple", percentageBase: "remaining_balance" },
+        async () => {
+          const debt = await createDebtAs(ownerToken, { amountOriginal: 1000, dateTaken: isoDate(-40), dateDue: isoDate(-20) });
+          const first = await request(app)
+            .post(`/debts/${debt.id}/apply-interest`)
+            .set("Authorization", `Bearer ${ownerToken}`)
+            .set("Idempotency-Key", idemKey())
+            .send({ version: debt.version });
+          expect(first.status).toBe(201);
+
+          const second = await request(app)
+            .post(`/debts/${debt.id}/apply-interest`)
+            .set("Authorization", `Bearer ${ownerToken}`)
+            .set("Idempotency-Key", idemKey())
+            .send({ version: first.body.data.debt.version });
+          expect(second.status).toBe(200);
+          expect(second.body.data.transaction).toBeNull();
+
+          const ledgerRows = await prisma.debt_transactions.findMany({ where: { debt_id: debt.id } });
+          expect(ledgerRows).toHaveLength(1); // still just the one from the first call
+        }
+      );
+    });
+
+    it("enforces one_time's 'only ever once' rule even across two separately-idempotency-keyed calls", async () => {
+      await withInterestPolicy(
+        { enabled: true, type: "fixed", value: 25, calculationPolicy: "one_time", formula: "simple", percentageBase: "remaining_balance" },
+        async () => {
+          const debt = await createDebtAs(ownerToken, { amountOriginal: 500, dateTaken: isoDate(-40), dateDue: isoDate(-20) });
+
+          const first = await request(app)
+            .post(`/debts/${debt.id}/apply-interest`)
+            .set("Authorization", `Bearer ${ownerToken}`)
+            .set("Idempotency-Key", idemKey())
+            .send({ version: debt.version });
+          expect(first.status).toBe(201);
+          expect(Number(first.body.data.transaction.amount)).toBe(25);
+
+          const second = await request(app)
+            .post(`/debts/${debt.id}/apply-interest`)
+            .set("Authorization", `Bearer ${ownerToken}`)
+            .set("Idempotency-Key", idemKey())
+            .send({ version: first.body.data.debt.version });
+          expect(second.status).toBe(200);
+          expect(second.body.data.transaction).toBeNull();
+
+          const ledgerRows = await prisma.debt_transactions.findMany({ where: { debt_id: debt.id } });
+          expect(ledgerRows).toHaveLength(1);
+        }
+      );
+    });
+
+    it("rejects a stale-version apply-interest call (optimistic locking)", async () => {
+      await withInterestPolicy(
+        { enabled: true, type: "fixed", value: 25, calculationPolicy: "daily", formula: "simple", percentageBase: "remaining_balance" },
+        async () => {
+          const debt = await createDebtAs(ownerToken, { amountOriginal: 500, dateTaken: isoDate(-10), dateDue: isoDate(-5) });
+          const res = await request(app)
+            .post(`/debts/${debt.id}/apply-interest`)
+            .set("Authorization", `Bearer ${ownerToken}`)
+            .set("Idempotency-Key", idemKey())
+            .send({ version: debt.version + 5 });
+          expect(res.status).toBe(409);
+        }
+      );
+    });
+
+    it("replays the same response for a repeated Idempotency-Key, applying interest only once", async () => {
+      await withInterestPolicy(
+        { enabled: true, type: "fixed", value: 25, calculationPolicy: "one_time", formula: "simple", percentageBase: "remaining_balance" },
+        async () => {
+          const debt = await createDebtAs(ownerToken, { amountOriginal: 500, dateTaken: isoDate(-10), dateDue: isoDate(-5) });
+          const key = idemKey();
+          const body = { version: debt.version };
+
+          const first = await request(app).post(`/debts/${debt.id}/apply-interest`).set("Authorization", `Bearer ${ownerToken}`).set("Idempotency-Key", key).send(body);
+          expect(first.status).toBe(201);
+          const second = await request(app).post(`/debts/${debt.id}/apply-interest`).set("Authorization", `Bearer ${ownerToken}`).set("Idempotency-Key", key).send(body);
+          expect(second.status).toBe(201);
+          expect(second.body.data.transaction.id).toBe(first.body.data.transaction.id);
+
+          const ledgerRows = await prisma.debt_transactions.findMany({ where: { debt_id: debt.id } });
+          expect(ledgerRows).toHaveLength(1);
+        }
+      );
+    });
+
+    it("rejects a cashier applying interest (elevated role only)", async () => {
+      const cashier = await createTestUser(businessId, "cashier");
+      const token = mintAccessToken(cashier);
+      const debt = await withInterestPolicy(
+        { enabled: true, type: "fixed", value: 25, calculationPolicy: "daily", formula: "simple", percentageBase: "remaining_balance" },
+        () => createDebtAs(ownerToken)
+      );
+      const res = await request(app)
+        .post(`/debts/${debt.id}/apply-interest`)
+        .set("Authorization", `Bearer ${token}`)
+        .set("Idempotency-Key", idemKey())
+        .send({ version: debt.version });
+      expect(res.status).toBe(403);
+    });
+
+    // QA (2026-07-26) -- FOUND BUG, fixed: last_interest_applied_at is a real
+    // wall-clock timestamp (unlike date_taken/today, which are already
+    // UTC-midnight-anchored calendar dates), and date-fns'
+    // differenceInCalendarDays/Months (interestEngine.ts) read LOCAL Date
+    // getters -- so periods_elapsed used to silently depend on the SERVER
+    // PROCESS's own local timezone rather than Business.timezone. Fixed by
+    // bucketing last_interest_applied_at through the business's own
+    // getBusinessDay before any date-fns calendar arithmetic, exactly like
+    // `today` already was. This test proves the fix: several wall-clock
+    // timestamps that all land on the exact same business-day (confirmed via
+    // the same getBusinessDay the source code itself uses) must produce the
+    // identical periods_elapsed, regardless of which hour-of-day each one
+    // happens to be stored at.
+    it("computes daily periods_elapsed from the business's own calendar day, independent of last_interest_applied_at's stored wall-clock hour (regression: server-local-timezone leak)", async () => {
+      await withInterestPolicy(
+        { enabled: true, type: "fixed", value: 10, calculationPolicy: "daily", formula: "simple", percentageBase: "remaining_balance" },
+        async () => {
+          const business = await prisma.businesses.findUniqueOrThrow({ where: { id: businessId } });
+          const todayBusinessDay = getBusinessDay(business.timezone, business.business_day_start_time);
+
+          const candidateHours = [1, 5, 9, 13, 17, 21];
+          const candidates = candidateHours
+            .map((h) => {
+              const d = new Date(Date.now() - 30 * 3_600_000); // ~30h ago -- safely "yesterday" for any reasonable timezone offset
+              d.setUTCHours(h, 0, 0, 0);
+              return d;
+            })
+            .filter((d) => {
+              const day = getBusinessDay(business.timezone, business.business_day_start_time, d);
+              const diffDays = Math.round((Date.parse(todayBusinessDay) - Date.parse(day)) / 86_400_000);
+              return diffDays === 1; // exactly one business-day before today
+            });
+          // Sanity check on the sampling itself, not the fix: if this ever
+          // comes back empty/singular the test below would vacuously pass.
+          expect(candidates.length).toBeGreaterThanOrEqual(2);
+
+          const periodsSeen = new Set<number>();
+          for (const candidate of candidates) {
+            const debt = await createDebtAs(ownerToken, { amountOriginal: 500 });
+            await prisma.debts.update({ where: { id: debt.id }, data: { last_interest_applied_at: candidate } });
+            const fresh = await prisma.debts.findUniqueOrThrow({ where: { id: debt.id } });
+
+            const res = await request(app)
+              .post(`/debts/${debt.id}/apply-interest`)
+              .set("Authorization", `Bearer ${ownerToken}`)
+              .set("Idempotency-Key", idemKey())
+              .send({ version: fresh.version });
+            expect(res.status).toBe(201);
+            periodsSeen.add(res.body.data.transaction.periods_elapsed);
+          }
+
+          expect(periodsSeen.size).toBe(1);
+          expect([...periodsSeen][0]).toBe(1);
+        }
+      );
+    }, 30_000);
+
+    // QA (2026-07-26) -- FOUND BUG, fixed: applyInterest updated
+    // amount_remaining without calling recomputeStatus, unlike every other
+    // balance-changing debt mutation (recordPayment/reversePayment). Interest
+    // only ever increases the balance, so a partially_paid debt whose accrued
+    // interest brings amount_remaining back up to/above amount_original kept
+    // the stale partially_paid label instead of reverting to open.
+    it("reverts a partially_paid debt back to open when accrued interest brings amount_remaining back to/above amount_original", async () => {
+      await withInterestPolicy(
+        { enabled: true, type: "fixed", value: 700, calculationPolicy: "one_time", formula: "simple", percentageBase: "remaining_balance" },
+        async () => {
+          const debt = await createDebtAs(ownerToken, { amountOriginal: 1000 });
+          const payRes = await request(app)
+            .post(`/debts/${debt.id}/payments`)
+            .set("Authorization", `Bearer ${ownerToken}`)
+            .set("Idempotency-Key", idemKey())
+            .send({ amount: 600 });
+          expect(payRes.status).toBe(201);
+
+          const afterPayment = await request(app).get(`/debts/${debt.id}`).set("Authorization", `Bearer ${ownerToken}`);
+          expect(afterPayment.body.data.status).toBe("partially_paid");
+          expect(Number(afterPayment.body.data.amount_remaining)).toBe(400);
+
+          const applyRes = await request(app)
+            .post(`/debts/${debt.id}/apply-interest`)
+            .set("Authorization", `Bearer ${ownerToken}`)
+            .set("Idempotency-Key", idemKey())
+            .send({ version: afterPayment.body.data.version });
+          expect(applyRes.status).toBe(201);
+          expect(Number(applyRes.body.data.debt.amount_remaining)).toBe(1100); // 400 + 700
+          expect(applyRes.body.data.debt.status).toBe("open");
+        }
+      );
+    });
+  });
+
   describe("List filtering", () => {
     it("filters by status", async () => {
       const debt = await createDebtAs(ownerToken, { amountOriginal: 50 });
@@ -748,6 +1043,14 @@ describe("Debts", () => {
     // would go completely uncaught. Locks in the same exact boundary days via
     // the list endpoint's own agingBucket filter instead.
     it("buckets aging correctly at the 30/60/90 day boundaries via the list endpoint's raw-SQL CASE (not just the JS decorateDebt path)", async () => {
+      // ~48 sequential HTTP round trips (8 cases x up to 6 requests each),
+      // each several serialized Prisma/Neon-HTTP-driver queries deep -- the
+      // heaviest single test in this file by a wide margin. Observed to
+      // occasionally exceed the suite's global 40s testTimeout under real
+      // Neon latency even though nothing here is actually broken (same
+      // documented per-query-latency risk noted elsewhere in this repo for
+      // Sales' transaction timeout) -- extending just this one test's budget
+      // rather than raising the global default for every other test.
       // Scoped by a unique phone per case (via `search`) rather than a large
       // pageSize -- pageSize is capped at 100 (locked pagination rule), and by
       // this point in the suite many other tests' debts already share the
@@ -787,7 +1090,7 @@ describe("Debts", () => {
           expect(otherRes.body.data.map((d: { id: string }) => d.id)).not.toContain(debt.id);
         }
       }
-    });
+    }, 90_000);
 
     it("keeps pagination.total consistent with the actual filtered row count (LIMIT/OFFSET vs COUNT(*)) when filtering by agingBucket", async () => {
       // Three debts sharing one unique tag (via customerName + `search`), all
@@ -865,13 +1168,14 @@ describe("Debts", () => {
     const deniedRead: UserRole[] = ["storekeeper", "shareholder", "custom"];
     const deniedElevated: UserRole[] = ["cashier", "accountant", "storekeeper", "shareholder", "custom"];
 
-    const cases: { role: UserRole; action: "create" | "list" | "reverse" | "dispute" | "resolve-dispute" | "write-off" }[] = [
+    const cases: { role: UserRole; action: "create" | "list" | "reverse" | "dispute" | "resolve-dispute" | "write-off" | "apply-interest" }[] = [
       ...deniedWrite.map((role) => ({ role, action: "create" as const })),
       ...deniedRead.map((role) => ({ role, action: "list" as const })),
       ...deniedElevated.map((role) => ({ role, action: "reverse" as const })),
       ...deniedElevated.map((role) => ({ role, action: "dispute" as const })),
       ...deniedElevated.map((role) => ({ role, action: "resolve-dispute" as const })),
       ...deniedElevated.map((role) => ({ role, action: "write-off" as const })),
+      ...deniedElevated.map((role) => ({ role, action: "apply-interest" as const })),
     ];
 
     it.each(cases)("denies role=$role action=$action (status, error code, and message)", async ({ role, action }) => {

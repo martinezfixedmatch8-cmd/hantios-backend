@@ -7,6 +7,7 @@ import {
   recordPaymentSchema,
   reversePaymentSchema,
   debtStatusActionSchema,
+  applyInterestSchema,
 } from "../validation/debt.schema";
 import { idParamSchema } from "../validation/common.schema";
 import * as debtService from "../services/debt.service";
@@ -170,6 +171,32 @@ export async function sendReminder(req: Request, res: Response, next: NextFuncti
     const { id } = idParamSchema.parse(req.params);
     const reminder = await debtService.sendReminder(id, actor);
     res.status(201).json({ data: reminder });
+  } catch (err) {
+    next(err);
+  }
+}
+
+export async function applyInterest(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const actor = getActor(req);
+    const { id } = idParamSchema.parse(req.params);
+    const idempotencyKey = getIdempotencyKey(req);
+
+    const replayed = await getReplayedResponse(actor.businessId, idempotencyKey, debtService.applyInterestEndpoint(id));
+    if (replayed) {
+      res.status(replayed.status).json(replayed.body);
+      return;
+    }
+
+    const input = applyInterestSchema.parse(req.body);
+    const result = await debtService.applyInterest(id, input, actor, idempotencyKey);
+    // No new interest was due (e.g. one_time already applied, or not enough
+    // time elapsed) -- not an error, just nothing to record.
+    if (!result.transaction) {
+      res.status(200).json({ data: { debt: result.debt, transaction: null } });
+      return;
+    }
+    res.status(201).json({ data: { debt: result.debt, transaction: result.transaction } });
   } catch (err) {
     next(err);
   }

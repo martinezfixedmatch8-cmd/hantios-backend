@@ -7,7 +7,8 @@ import { paginate } from "../lib/pagination";
 import { badRequest, conflict, notFound } from "../lib/errors";
 import { claimIdempotencyKey, completeIdempotencyKey } from "../lib/idempotency";
 import { getBusinessDay, dateOnlyString } from "../lib/businessTime";
-import { getDebtReminderSchedule } from "../lib/businessSettings";
+import { getDebtReminderSchedule, getDebtInterestPolicy } from "../lib/businessSettings";
+import { getPeriodsElapsed, calculateInterest } from "../lib/interestEngine";
 import { domainEvents } from "../lib/events";
 import { getNotificationProvider } from "../notifications/registry";
 import type {
@@ -16,6 +17,7 @@ import type {
   RecordPaymentInput,
   ReversePaymentInput,
   DebtStatusActionInput,
+  ApplyInterestInput,
 } from "../validation/debt.schema";
 
 interface Actor {
@@ -30,6 +32,7 @@ export const recordPaymentEndpoint = (debtId: string): string => `POST /debts/${
 export const reversePaymentEndpoint = (debtId: string, paymentId: string): string =>
   `POST /debts/${debtId}/payments/${paymentId}/reverse`;
 export const writeOffEndpoint = (debtId: string): string => `POST /debts/${debtId}/write-off`;
+export const applyInterestEndpoint = (debtId: string): string => `POST /debts/${debtId}/apply-interest`;
 
 const DEBT_TRANSACTION_OPTIONS = { timeout: 15000 };
 
@@ -112,7 +115,12 @@ export async function createDebt(input: CreateDebtInput, actor: Actor, idempoten
 
   const business = await prisma.businesses.findUniqueOrThrow({ where: { id: actor.businessId } });
   const amountOriginal = new Prisma.Decimal(input.amountOriginal);
-  const interestValue = input.interestValue !== undefined ? new Prisma.Decimal(input.interestValue) : null;
+  // Policy snapshot (scheduler/interest-engine extension): read the
+  // business's CURRENT interest policy and copy it onto the new debt --
+  // never a live lookup at calculation time. Exactly the same pattern Sales
+  // already uses for costPriceAtSale. A later settings change only affects
+  // debts created after the change.
+  const interestPolicy = getDebtInterestPolicy(business.settings);
 
   const debt = await prisma.$transaction(async (tx) => {
     await claimIdempotencyKey(tx, actor.businessId, idempotencyKey, CREATE_DEBT_ENDPOINT);
@@ -138,9 +146,12 @@ export async function createDebt(input: CreateDebtInput, actor: Actor, idempoten
         amount_remaining: amountOriginal,
         date_taken: input.dateTaken,
         date_due: input.dateDue,
-        interest_enabled: input.interestEnabled,
-        interest_type: input.interestType,
-        interest_value: interestValue,
+        interest_enabled: interestPolicy.enabled,
+        interest_type: interestPolicy.type,
+        interest_value: interestPolicy.enabled ? new Prisma.Decimal(interestPolicy.value) : null,
+        calculation_policy: interestPolicy.calculationPolicy,
+        formula: interestPolicy.formula,
+        percentage_base: interestPolicy.percentageBase,
         notes: input.notes,
         status: "open",
       },
@@ -545,10 +556,66 @@ export async function writeOffDebt(debtId: string, input: DebtStatusActionInput,
   return updated;
 }
 
-// The ONLY implementation of reminder delivery in this repo. When the future
-// Reminder Scheduler (hardening roadmap Session 7+) is built, it must call
-// this exact function on whatever schedule it computes from
-// getDebtReminderSchedule -- never a second, parallel delivery pathway.
+// Claims a (debt_id, reminder_type, business_date) slot for sending, or
+// returns null if it's already spoken for (sent, currently in-flight
+// elsewhere, or a failed attempt not yet eligible for retry). Two distinct
+// atomic paths, both DB-guarded, never a SELECT-then-decide race:
+//   - No row yet: INSERT relies on the table's own unique constraint --
+//     a concurrent claim collides on P2002, not a lost-update.
+//   - A `failed` row past its next_retry: re-claimed via an UPDATE guarded
+//     by `WHERE id = ... AND status = 'failed'` -- if two retry attempts
+//     race, only the first UPDATE actually matches a row (the second sees
+//     status already flipped to 'pending' and updates zero rows), the exact
+//     same atomic-conditional-update pattern used everywhere else in this
+//     codebase (never blindly trust the earlier read).
+// "Retry logic continues to use the existing reminder history table" --
+// there is no separate retry queue/table, debt_reminders is it.
+async function claimReminderSlot(
+  businessId: string,
+  debtId: string,
+  reminderType: "before_due" | "overdue",
+  businessDate: Date
+): Promise<{ id: string } | null> {
+  const existing = await prisma.debt_reminders.findUnique({
+    where: { debt_id_reminder_type_business_date: { debt_id: debtId, reminder_type: reminderType, business_date: businessDate } },
+  });
+
+  if (!existing) {
+    try {
+      return await prisma.debt_reminders.create({
+        data: {
+          id: generateId(),
+          business_id: businessId,
+          debt_id: debtId,
+          reminder_type: reminderType,
+          business_date: businessDate,
+          status: "pending",
+          provider: "whatsapp",
+        },
+      });
+    } catch (err) {
+      if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002") {
+        return null; // another call claimed it first -- already handled.
+      }
+      throw err;
+    }
+  }
+
+  if (existing.status === "sent" || existing.status === "pending") return null;
+  if (existing.next_retry && existing.next_retry > new Date()) return null; // not yet eligible for retry
+
+  const reclaimResult = await prisma.debt_reminders.updateMany({
+    where: { id: existing.id, status: "failed" },
+    data: { status: "pending" },
+  });
+  return reclaimResult.count === 0 ? null : { id: existing.id };
+}
+
+// The ONLY implementation of reminder delivery in this repo -- called by both
+// the manual endpoint (POST /debts/:id/remind) and reminderScheduler.ts's
+// automated discovery loop. There is one send path, full stop; when future
+// queue infrastructure (hardening roadmap Session 7+) replaces node-cron's
+// tick loop, it still calls this exact function, never a second pathway.
 // WhatsApp only, no automatic channel fallback (locked decision) -- a failed
 // send is recorded, not silently retried on a different channel.
 export async function sendReminder(debtId: string, actor: Actor) {
@@ -556,8 +623,19 @@ export async function sendReminder(debtId: string, actor: Actor) {
   const business = await prisma.businesses.findUniqueOrThrow({ where: { id: actor.businessId } });
 
   const today = getBusinessDay(business.timezone, business.business_day_start_time);
+  const todayDate = new Date(today);
   const aging = computeAging(debt.date_due, today);
   const reminderType = aging.isOverdue ? "overdue" : "before_due";
+
+  const claimed = await claimReminderSlot(actor.businessId, debtId, reminderType, todayDate);
+  if (!claimed) {
+    // Already sent today, currently being processed elsewhere, or a failed
+    // attempt not yet due for retry -- skip safely, return current state.
+    return prisma.debt_reminders.findFirstOrThrow({
+      where: { debt_id: debtId, reminder_type: reminderType, business_date: todayDate },
+    });
+  }
+
   const body = aging.isOverdue
     ? `Reminder: your payment of ${debt.amount_remaining.toString()} was due on ${dateOnlyString(debt.date_due)} and is now overdue. Please settle as soon as possible.`
     : `Reminder: your payment of ${debt.amount_remaining.toString()} is due on ${dateOnlyString(debt.date_due)}.`;
@@ -572,14 +650,10 @@ export async function sendReminder(debtId: string, actor: Actor) {
   }
 
   const reminder = await prisma.$transaction(async (tx) => {
-    const created = await tx.debt_reminders.create({
+    const completed = await tx.debt_reminders.update({
+      where: { id: claimed.id },
       data: {
-        id: generateId(),
-        business_id: actor.businessId,
-        debt_id: debtId,
-        reminder_type: reminderType,
         status,
-        provider: "whatsapp",
         error,
         sent_at: status === "sent" ? new Date() : null,
         // Do not automatically switch channels -- only a fixed retry delay
@@ -595,12 +669,128 @@ export async function sendReminder(debtId: string, actor: Actor) {
       userRole: actor.userRole,
       action: status === "sent" ? "debt.reminder_sent" : "debt.reminder_failed",
       entityType: "debt_reminder",
-      entityId: created.id,
+      entityId: completed.id,
       reason: `${reminderType} reminder ${status} for debt ${debtId}${error ? `: ${error}` : ""}`,
     });
 
-    return created;
+    return completed;
   });
 
   return reminder;
+}
+
+// Read Business Policy -> Calculate -> Audit -> Save. Uses the debt's OWN
+// snapshotted policy fields (never a live Business Settings lookup -- see
+// createDebt's snapshot comment). Manual trigger this session
+// (POST /debts/:id/apply-interest) -- see the plan for why an automated
+// accrual scheduler isn't built alongside the reminder one.
+export async function applyInterest(debtId: string, input: ApplyInterestInput, actor: Actor, idempotencyKey: string) {
+  const debt = await getOwned(prisma.debts.findUnique({ where: { id: debtId } }), actor.businessId, "Debt");
+  if (debt.status === "paid" || debt.status === "written_off") {
+    throw badRequest(`Cannot apply interest to a debt that is already ${debt.status}`);
+  }
+  if (!debt.interest_enabled || debt.interest_type === "none" || !debt.interest_value) {
+    throw badRequest("Interest is not enabled for this debt");
+  }
+
+  const business = await prisma.businesses.findUniqueOrThrow({ where: { id: actor.businessId } });
+  const today = new Date(getBusinessDay(business.timezone, business.business_day_start_time));
+  // last_interest_applied_at is a real wall-clock timestamp (unlike
+  // date_taken/today, which are already UTC-midnight-anchored calendar
+  // dates) -- date-fns' differenceInCalendarDays/Months (interestEngine.ts)
+  // read local Date getters, so handing it in raw would make periodsElapsed
+  // silently depend on the SERVER PROCESS's own local timezone instead of
+  // Business.timezone. QA caught this. Bucket it into its own business-day
+  // first, the same way `today` already is, before any calendar arithmetic.
+  const lastAppliedOrTaken = debt.last_interest_applied_at
+    ? new Date(getBusinessDay(business.timezone, business.business_day_start_time, debt.last_interest_applied_at))
+    : debt.date_taken;
+  const periodsElapsed = getPeriodsElapsed({
+    calculationPolicy: debt.calculation_policy,
+    lastAppliedOrTaken,
+    today,
+    alreadyAppliedOnce: debt.last_interest_applied_at !== null,
+  });
+
+  const interestAmount = calculateInterest({
+    principal: debt.amount_original,
+    remainingBalance: debt.amount_remaining,
+    rate: debt.interest_value,
+    type: debt.interest_type,
+    formula: debt.formula,
+    percentageBase: debt.percentage_base,
+    periodsElapsed,
+  });
+
+  if (interestAmount.lessThanOrEqualTo(0)) {
+    // Nothing due yet (e.g. one_time already applied, or not enough time
+    // elapsed for the next period) -- not an error, just nothing to do.
+    return { debt, transaction: null, periodsElapsed };
+  }
+
+  const result = await prisma.$transaction(async (tx) => {
+    await claimIdempotencyKey(tx, actor.businessId, idempotencyKey, applyInterestEndpoint(debtId));
+
+    const newRemaining = debt.amount_remaining.plus(interestAmount);
+    // Interest only ever increases the balance, but a partially_paid debt
+    // whose accrued interest pushes amount_remaining back up to/above
+    // amount_original must revert to open -- status is purely derived from
+    // the amounts (recomputeStatus), same rule every other balance-changing
+    // debt mutation (recordPayment/reversePayment) already follows. QA caught
+    // this being the one balance-changing path that skipped it.
+    const newStatus = recomputeStatus(debt.status, newRemaining, debt.amount_original);
+
+    const updateResult = await tx.debts.updateMany({
+      where: { id: debtId, business_id: actor.businessId, version: input.version },
+      data: { amount_remaining: newRemaining, status: newStatus, last_interest_applied_at: new Date(), version: { increment: 1 } },
+    });
+    if (updateResult.count === 0) {
+      throw conflict("Debt was modified concurrently, please retry with the latest version");
+    }
+
+    const transaction = await tx.debt_transactions.create({
+      data: {
+        id: generateId(),
+        business_id: actor.businessId,
+        debt_id: debtId,
+        transaction_type: "interest_applied",
+        amount: interestAmount,
+        balance_after: newRemaining,
+        interest_type: debt.interest_type,
+        interest_formula: debt.formula,
+        percentage_base: debt.percentage_base,
+        calculation_policy: debt.calculation_policy,
+        interest_rate_applied: debt.interest_value,
+        periods_elapsed: periodsElapsed,
+        created_by: actor.userId,
+      },
+    });
+
+    await writeAuditLog(tx, {
+      businessId: actor.businessId,
+      userId: actor.userId,
+      userName: actor.userName,
+      userRole: actor.userRole,
+      action: "debt.interest_applied",
+      entityType: "debt_transaction",
+      entityId: transaction.id,
+      reason: `Interest of ${interestAmount.toString()} applied to debt ${debtId} (${debt.interest_type}/${debt.formula}, ${periodsElapsed} period(s))`,
+    });
+
+    const updatedDebt = await tx.debts.findUniqueOrThrow({ where: { id: debtId } });
+    const responseBody = JSON.parse(JSON.stringify({ data: { debt: updatedDebt, transaction } })) as unknown;
+    await completeIdempotencyKey(tx, actor.businessId, idempotencyKey, applyInterestEndpoint(debtId), 201, responseBody);
+
+    return { debt: updatedDebt, transaction };
+  }, DEBT_TRANSACTION_OPTIONS);
+
+  domainEvents.publish("InterestApplied", {
+    debtId,
+    businessId: actor.businessId,
+    transactionId: result.transaction.id,
+    amount: interestAmount.toString(),
+    amountRemaining: result.debt.amount_remaining.toString(),
+  });
+
+  return { ...result, periodsElapsed };
 }

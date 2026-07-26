@@ -12,6 +12,7 @@ import {
   resolveDisputeDebt,
   writeOffDebt,
   sendReminder,
+  applyInterest,
 } from "../controllers/debt.controller";
 
 const router = Router();
@@ -37,5 +38,8 @@ router.post("/:id/resolve-dispute", requireRole(...elevatedRoles), requireIdempo
 router.post("/:id/write-off", requireRole(...elevatedRoles), requireIdempotencyKey, writeOffDebt);
 // Manual remind trigger: operational, low-risk -- same roles as create/payment.
 router.post("/:id/remind", requireRole(...writeRoles), sendReminder);
+// Manual interest-application trigger: mirrors Refund's elevated bar -- a
+// real financial calculation with real consequences, not routine data entry.
+router.post("/:id/apply-interest", requireRole(...elevatedRoles), requireIdempotencyKey, applyInterest);
 
 export default router;

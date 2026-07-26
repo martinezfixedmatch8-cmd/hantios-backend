@@ -104,6 +104,7 @@ model businesses {
   debts                               debts[]
   debt_payments                       debt_payments[]
   debt_reminders                      debt_reminders[]
+  debt_transactions                   debt_transactions[]
   expenses                            expenses[]
   idempotency_keys                    idempotency_keys[]
   inventory_adjustments               inventory_adjustments[]
@@ -157,38 +158,51 @@ model customers {
 
 /// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
 model debts {
-  id                String           @id
-  business_id       String
-  branch_id         String?
+  id                       String              @id
+  business_id              String
+  branch_id                String?
   // customer_id is the real relationship (Session 4); the three fields below
   // are an immutable snapshot taken at creation time -- preserves historical
   // accuracy on this debt even if the customer's own record changes later.
-  customer_id       String
-  customer_phone    String
-  customer_name     String?
-  customer_location String?
-  amount_original   Decimal          @db.Decimal(14, 2)
-  amount_paid       Decimal          @default(0) @db.Decimal(14, 2)
-  amount_remaining  Decimal          @db.Decimal(14, 2)
-  date_taken        DateTime         @db.Date
-  date_due          DateTime         @db.Date
-  interest_enabled  Boolean          @default(false)
-  interest_type     InterestType     @default(none)
-  interest_value    Decimal?         @db.Decimal(14, 2)
-  notes             String?
+  customer_id              String
+  customer_phone           String
+  customer_name            String?
+  customer_location        String?
+  amount_original          Decimal             @db.Decimal(14, 2)
+  amount_paid              Decimal             @default(0) @db.Decimal(14, 2)
+  amount_remaining         Decimal             @db.Decimal(14, 2)
+  date_taken               DateTime            @db.Date
+  date_due                 DateTime            @db.Date
+  // Interest policy is a snapshot copied from Business.settings at creation
+  // time (getDebtInterestPolicy, businessSettings.ts) -- exactly the same
+  // "lock it in at the moment it mattered" pattern Sales already uses for
+  // costPriceAtSale. Never re-read live from settings at calculation time: a
+  // business changing its policy later must only affect debts created after
+  // the change, never retroactively change what's owed on an existing debt.
+  interest_enabled         Boolean             @default(false)
+  interest_type            InterestType        @default(none)
+  interest_value           Decimal?            @db.Decimal(14, 2)
+  calculation_policy       CalculationPolicy   @default(one_time)
+  formula                  InterestFormula     @default(simple)
+  percentage_base          PercentageBase      @default(remaining_balance)
+  // Null until the first applyInterest call. Drives both period-elapsed math
+  // for recurring policies and the one_time "only ever once" guard.
+  last_interest_applied_at DateTime?
+  notes                    String?
   // Sole source of truth for lifecycle state (Session 4) -- the standalone
   // `disputed` boolean this table used to also carry was dropped as a
   // redundant second copy of what `status: disputed` already means.
-  status            DebtStatus       @default(open)
-  created_at        DateTime         @default(now())
-  sale_id           String?
-  version           Int              @default(0)
-  customers         customers        @relation(fields: [customer_id], references: [id])
-  branches          branches?        @relation(fields: [branch_id], references: [id])
-  businesses        businesses       @relation(fields: [business_id], references: [id])
-  sales             sales?           @relation(fields: [sale_id], references: [id])
-  debt_payments     debt_payments[]
-  debt_reminders    debt_reminders[]
+  status                   DebtStatus          @default(open)
+  created_at               DateTime            @default(now())
+  sale_id                  String?
+  version                  Int                 @default(0)
+  customers                customers           @relation(fields: [customer_id], references: [id])
+  branches                 branches?           @relation(fields: [branch_id], references: [id])
+  businesses               businesses          @relation(fields: [business_id], references: [id])
+  sales                    sales?              @relation(fields: [sale_id], references: [id])
+  debt_payments            debt_payments[]
+  debt_reminders           debt_reminders[]
+  debt_transactions        debt_transactions[]
 
   @@index([business_id, date_due])
   @@index([business_id])
@@ -196,7 +210,6 @@ model debts {
   @@index([customer_id])
 }
 
-/// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
 /// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
 model debt_payments {
   id                     String           @id
@@ -226,6 +239,12 @@ model debt_payments {
   @@index([debt_id])
 }
 
+// Scheduler idempotency (Session 4 extension) -- @@unique below is the real
+// guard, enforced by the DB, not application logic: a claim INSERT here is
+// the atomic "has this exact debt+type+day already been handled" check.
+// Concurrent scheduler ticks, multiple server instances, and a manual click
+// racing an automatic send all collide on the same constraint and can never
+// produce two real sends for the same (debt, type, business day).
 model debt_reminders {
   id            String         @id
   business_id   String
@@ -236,9 +255,57 @@ model debt_reminders {
   error         String?
   sent_at       DateTime?
   next_retry    DateTime?
+  // The business-local calendar date (getBusinessDay) this reminder logically
+  // belongs to -- not the row's own created_at, which is a real timestamp and
+  // wouldn't dedupe correctly across a business-day boundary that doesn't
+  // align with UTC midnight.
+  business_date DateTime       @db.Date
   created_at    DateTime       @default(now())
   debts         debts          @relation(fields: [debt_id], references: [id])
   businesses    businesses     @relation(fields: [business_id], references: [id])
+
+  @@unique([debt_id, reminder_type, business_date])
+  @@index([business_id])
+  @@index([debt_id])
+}
+
+// Session 4 extension: immutable interest ledger. Structured (typed) columns
+// rather than a JSON blob specifically so Reports/Analytics/BI/Accounting can
+// query this directly with plain SQL -- the same structured-over-JSON
+// reasoning already applied to debt_payments/debt_reminders. Built against a
+// general-purpose DebtTransactionType (see its own comment) but this session
+// only ever writes interest_applied rows -- payment/payment_reversal/
+// write_off/refund/discount/debt_created stay exactly where Session 4 already
+// correctly put them (debt_payments, audit_logs), not migrated here.
+// Never updated or deleted, same rule as audit_logs -- no update/delete code
+// path should ever be written for this model.
+/// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
+model debt_transactions {
+  id                    String              @id
+  business_id           String
+  debt_id               String
+  transaction_type      DebtTransactionType
+  amount                Decimal             @db.Decimal(14, 2)
+  // The resulting debts.amount_remaining immediately after this entry --
+  // history is reconstructable without recomputing from scratch.
+  balance_after         Decimal             @db.Decimal(14, 2)
+  // Populated on interest_applied/interest_adjustment rows only -- the exact
+  // policy values used for THIS calculation (independent of whatever the
+  // debt's own snapshot says now, though today they're always identical since
+  // debts never change policy after creation -- this makes the ledger
+  // self-contained regardless).
+  interest_type         InterestType?
+  interest_formula      InterestFormula?
+  percentage_base       PercentageBase?
+  calculation_policy    CalculationPolicy?
+  interest_rate_applied Decimal?            @db.Decimal(14, 2)
+  periods_elapsed       Int?
+  notes                 String?
+  created_by            String
+  created_at            DateTime            @default(now())
+  debts                 debts               @relation(fields: [debt_id], references: [id])
+  businesses            businesses          @relation(fields: [business_id], references: [id])
+  users                 users               @relation(fields: [created_by], references: [id])
 
   @@index([business_id])
   @@index([debt_id])
@@ -544,6 +611,7 @@ model users {
   branches_branches_manager_idTousers           branches[]              @relation("branches_manager_idTousers")
   businesses_businesses_owner_idTousers         businesses?             @relation("businesses_owner_idTousers")
   debt_payments                                 debt_payments[]
+  debt_transactions                             debt_transactions[]
   expenses                                      expenses[]
   inventory_adjustments                         inventory_adjustments[]
   login_events                                  login_events[]
@@ -633,13 +701,41 @@ enum DebtStatus {
   written_off
 }
 
-// Session 4: replaces the old interest_rate-only model. Interest is optional
-// and configured per individual debt -- none for Islamic businesses, fixed or
-// percentage for jurisdictions where interest is permitted.
+// Session 4: replaces the old interest_rate-only model. Global-ERP financial
+// policy (Session 4 extension) -- none for Islamic businesses, fixed or
+// percentage for jurisdictions where interest is permitted. Never hardcoded:
+// each business configures its own via Business.settings (see
+// getDebtInterestPolicy in businessSettings.ts), snapshotted onto each debt
+// at creation time (see debts.interest_type below) -- a later settings change
+// never retroactively changes what an already-existing debt owes.
 enum InterestType {
   none
   fixed
   percentage
+}
+
+// How often interest accrues -- one_time is a single flat charge, ever;
+// daily/weekly/monthly recur each time applyInterest is called and a full
+// period has elapsed since the debt's own last_interest_applied_at.
+enum CalculationPolicy {
+  one_time
+  daily
+  weekly
+  monthly
+}
+
+enum InterestFormula {
+  simple
+  compound
+}
+
+// Which amount a percentage-type charge is computed against -- original_amount
+// never changes across the debt's life; remaining_balance shrinks as payments
+// land, so percentage-of-remaining-balance interest declines over time (a
+// common declining-balance convention).
+enum PercentageBase {
+  original_amount
+  remaining_balance
 }
 
 enum ReminderType {
@@ -647,9 +743,30 @@ enum ReminderType {
   overdue
 }
 
+// pending is the atomic claim placeholder (see debt_reminders.business_date's
+// own comment) -- a row a scheduler/manual-trigger race can never turn into
+// two real sends, only ever resolves to sent or failed.
 enum ReminderStatus {
+  pending
   sent
   failed
+}
+
+// Session 4 extension: what a debt_transactions row records. Deliberately a
+// full, general-purpose enum (not just the two interest-related values this
+// session actually writes) so this ledger can become the single home for
+// every debt-affecting financial event later without a second schema
+// migration -- see debt_transactions' own comment for what's actually wired
+// up now vs. reserved for later.
+enum DebtTransactionType {
+  debt_created
+  interest_applied
+  interest_adjustment
+  payment
+  payment_reversal
+  discount
+  write_off
+  refund
 }
 
 enum DiscountType {

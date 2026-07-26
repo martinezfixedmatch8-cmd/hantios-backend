@@ -23,6 +23,7 @@ export async function cleanupTestBusiness(businessId: string): Promise<void> {
   await prisma.inventory_adjustments.deleteMany({ where: { business_id: businessId } });
   await prisma.price_history.deleteMany({ where: { business_id: businessId } });
   await prisma.debt_reminders.deleteMany({ where: { business_id: businessId } });
+  await prisma.debt_transactions.deleteMany({ where: { business_id: businessId } });
   // Same reasoning as sales' refund reversal rows: a debt_payments reversal
   // row self-references the original payment it reverses via
   // reversal_of_payment_id, so delete reversal rows before the rows they

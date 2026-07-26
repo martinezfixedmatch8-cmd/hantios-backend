@@ -1,8 +1,15 @@
 import { z } from "zod";
-import { InterestType, DebtStatus } from "@prisma/client";
+import { DebtStatus } from "@prisma/client";
 import { decimalField } from "./common.schema";
 import { paginationQuerySchema } from "../lib/pagination";
 
+// Interest fields are deliberately NOT accepted here (removed in the
+// scheduler/interest-engine extension) -- Business Settings is the sole
+// source of truth for financial policy (locked decision), so createDebt
+// reads and snapshots the business's own configured policy instead of
+// trusting a client-supplied value. A client-suppliable override here would
+// silently violate "no module owns or hardcodes its own copy of financial
+// rules."
 export const createDebtSchema = z
   .object({
     branchId: z.string().uuid().optional(),
@@ -13,21 +20,9 @@ export const createDebtSchema = z
     amountOriginal: decimalField(z.coerce.number().positive()),
     dateTaken: z.coerce.date(),
     dateDue: z.coerce.date(),
-    interestEnabled: z.boolean().optional().default(false),
-    interestType: z.nativeEnum(InterestType).optional().default("none"),
-    interestValue: decimalField(z.coerce.number().nonnegative()).optional(),
     notes: z.string().trim().max(1000).optional(),
   })
   .superRefine((data, ctx) => {
-    if (data.interestEnabled && data.interestType === "none") {
-      ctx.addIssue({ code: "custom", message: "interestType must be fixed or percentage when interestEnabled is true", path: ["interestType"] });
-    }
-    if (data.interestEnabled && data.interestType !== "none" && data.interestValue === undefined) {
-      ctx.addIssue({ code: "custom", message: "interestValue is required when interest is enabled", path: ["interestValue"] });
-    }
-    if (data.interestType === "percentage" && data.interestValue !== undefined && data.interestValue > 100) {
-      ctx.addIssue({ code: "custom", message: "Percentage interest value cannot exceed 100", path: ["interestValue"] });
-    }
     if (data.dateDue < data.dateTaken) {
       ctx.addIssue({ code: "custom", message: "dateDue cannot be before dateTaken", path: ["dateDue"] });
     }
@@ -64,3 +59,13 @@ export const debtStatusActionSchema = z.object({
   reason: z.string().trim().min(1).max(500),
 });
 export type DebtStatusActionInput = z.infer<typeof debtStatusActionSchema>;
+
+// No "reason" field here unlike dispute/resolve/write-off -- those are human
+// judgment calls; applying interest is a policy-driven calculation, and its
+// own "why" is already fully captured by the resulting debt_transactions
+// row's typed columns (interest_type/formula/percentageBase/etc.), not a
+// free-text justification.
+export const applyInterestSchema = z.object({
+  version: z.number().int().nonnegative(),
+});
+export type ApplyInterestInput = z.infer<typeof applyInterestSchema>;
