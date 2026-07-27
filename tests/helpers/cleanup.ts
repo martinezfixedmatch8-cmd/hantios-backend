@@ -38,11 +38,16 @@ export async function cleanupTestBusiness(businessId: string): Promise<void> {
   // negative-total row).
   await prisma.sales.deleteMany({ where: { business_id: businessId, refund_of_sale_id: { not: null } } });
   await prisma.sales.deleteMany({ where: { business_id: businessId } });
-  // expense_attachments FKs to expenses -- delete before it.
+  // expense_attachments/expense_tags/expense_recurrence all FK to expenses --
+  // delete before it. expense_tags has no direct business_id column (a pure
+  // junction table), so it's scoped via the expenses relation instead.
   await prisma.expense_attachments.deleteMany({ where: { business_id: businessId } });
+  await prisma.expense_tags.deleteMany({ where: { expenses: { business_id: businessId } } });
+  await prisma.expense_recurrence.deleteMany({ where: { business_id: businessId } });
   await prisma.expenses.deleteMany({ where: { business_id: businessId } });
   await prisma.expense_categories.deleteMany({ where: { business_id: businessId } });
   await prisma.expense_counters.deleteMany({ where: { business_id: businessId } });
+  await prisma.tags.deleteMany({ where: { business_id: businessId } });
   await prisma.branch_inventory.deleteMany({ where: { business_id: businessId } });
   await prisma.warehouse_stock.deleteMany({ where: { business_id: businessId } });
   await prisma.products.deleteMany({ where: { business_id: businessId } });

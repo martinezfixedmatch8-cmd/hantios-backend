@@ -10,6 +10,11 @@ import {
   archiveExpense,
   restoreExpense,
   addAttachments,
+  deleteAttachment,
+  approveExpense,
+  rejectExpense,
+  markExpensePaid,
+  updateRecurrence,
 } from "../controllers/expense.controller";
 
 const router = Router();
@@ -33,5 +38,14 @@ router.patch("/:id", requireRole(...writeRoles), requireIdempotencyKey, updateEx
 router.post("/:id/archive", requireRole(...writeRoles), requireIdempotencyKey, archiveExpense);
 router.post("/:id/restore", requireRole(...writeRoles), requireIdempotencyKey, restoreExpense);
 router.post("/:id/attachments", requireRole(...writeRoles), requireIdempotencyKey, addAttachments);
+router.delete("/:id/attachments/:attachmentId", requireRole(...writeRoles), requireIdempotencyKey, deleteAttachment);
+// Session 5B status workflow -- single-step transitions only, owner+manager
+// (matching every other elevated Expenses action; not explicitly stated in
+// the spec, flagged as the assumed default in CLAUDE.md).
+router.post("/:id/approve", requireRole(...writeRoles), requireIdempotencyKey, approveExpense);
+router.post("/:id/reject", requireRole(...writeRoles), requireIdempotencyKey, rejectExpense);
+router.post("/:id/mark-paid", requireRole(...writeRoles), requireIdempotencyKey, markExpensePaid);
+// Recurrence schedule management -- architecture-only, no scheduler reads it.
+router.patch("/:id/recurrence", requireRole(...writeRoles), requireIdempotencyKey, updateRecurrence);
 
 export default router;

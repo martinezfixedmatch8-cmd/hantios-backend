@@ -109,6 +109,8 @@ model businesses {
   expense_categories                  expense_categories[]
   expense_counters                    expense_counters?
   expense_attachments                 expense_attachments[]
+  expense_recurrence                  expense_recurrence[]
+  tags                                tags[]
   idempotency_keys                    idempotency_keys[]
   inventory_adjustments               inventory_adjustments[]
   login_events                        login_events[]
@@ -325,64 +327,84 @@ model debt_transactions {
 // table's `status`, which stays archive/restore only).
 /// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
 model expenses {
-  id                  String                @id
-  business_id         String
-  branch_id           String?
-  scope               ExpenseScope
-  category_id         String
+  id                                String                @id
+  business_id                       String
+  branch_id                         String?
+  scope                             ExpenseScope
+  category_id                       String
   // Snapshot, same reasoning as debts.customer_name -- historical accuracy
   // even if the category is later renamed.
-  category_name       String
-  amount              Decimal               @db.Decimal(14, 2)
+  category_name                     String
+  amount                            Decimal               @db.Decimal(14, 2)
   // Snapshotted from Business.currency (+ src/lib/currencyReference.ts's
   // getCurrency()) at creation time, same pattern as costPriceAtSale --
   // fields only, no conversion logic (Module 19's job).
-  currency_code       String?
-  currency_symbol     String?
+  currency_code                     String?
+  currency_symbol                   String?
   // Tax Snapshot -- same "fields only, no calculation logic" pattern as the
   // currency snapshot above: manually entered per expense, never derived
   // from amount/rate or vice versa. A real Tax Engine (auto-calculation,
   // tax-code lookup) is a later phase's job, not built here.
-  tax_amount          Decimal?              @db.Decimal(14, 2)
-  tax_rate            Decimal?              @db.Decimal(5, 2)
-  tax_included        Boolean?
-  payment_method_id   String?
+  tax_amount                        Decimal?              @db.Decimal(14, 2)
+  tax_rate                          Decimal?              @db.Decimal(5, 2)
+  tax_included                      Boolean?
+  payment_method_id                 String?
   // "When it happened" (renamed from the old `date` column) vs recorded_at
   // "when entered" -- two separate fields, per spec.
-  expense_date        DateTime              @db.Date
-  recorded_at         DateTime              @default(now())
+  expense_date                      DateTime              @db.Date
+  recorded_at                       DateTime              @default(now())
   // NOT a real FK yet -- no vendors/suppliers table exists anywhere in this
   // schema (confirmed). Becomes a real relation once that module ships.
-  vendor_id           String?
-  vendor_name         String?
-  reference_number    String?
-  description         String?
-  notes               String?
-  source              ExpenseSource         @default(manual)
-  recurring           Boolean               @default(false)
-  recurrence_rule     String?
-  created_by          String
+  vendor_id                         String?
+  vendor_name                       String?
+  reference_number                  String?
+  description                       String?
+  notes                             String?
+  source                            ExpenseSource         @default(manual)
+  // Session 5B: workflow_status is the sole source of truth for "is this
+  // recurring" going forward -- an expense_recurrence row referencing this
+  // expense as its template answers that, structurally, so the old
+  // recurring/recurrence_rule (free-text) fields were dropped rather than
+  // kept alongside the new table (confirmed zero live rows before dropping).
+  workflow_status                   ExpenseWorkflowStatus @default(pending)
+  approved_by                       String?
+  approved_at                       DateTime?
+  rejected_by                       String?
+  rejected_at                       DateTime?
+  paid_by                           String?
+  paid_at                           DateTime?
+  created_by                        String
   // Unique PER BUSINESS, not globally -- expense_counters resets each
   // business to its own 1-based sequence, so "EXP-000001" legitimately
   // recurs across different businesses. A bare @unique here was a real bug
   // (caught by the cross-business test suite): the second business's first
   // expense would collide with the first business's own "EXP-000001".
-  expense_number      String
-  version             Int                   @default(0)
-  status              RecordStatus          @default(active)
-  archived_reason     String?
-  created_at          DateTime              @default(now())
-  businesses          businesses            @relation(fields: [business_id], references: [id])
-  branches            branches?             @relation(fields: [branch_id], references: [id])
-  expense_categories  expense_categories    @relation(fields: [category_id], references: [id])
-  payment_methods     payment_methods?      @relation(fields: [payment_method_id], references: [id])
-  users               users                 @relation(fields: [created_by], references: [id])
-  expense_attachments expense_attachments[]
+  expense_number                    String
+  version                           Int                   @default(0)
+  status                            RecordStatus          @default(active)
+  archived_reason                   String?
+  created_at                        DateTime              @default(now())
+  businesses                        businesses            @relation(fields: [business_id], references: [id])
+  branches                          branches?             @relation(fields: [branch_id], references: [id])
+  expense_categories                expense_categories    @relation(fields: [category_id], references: [id])
+  payment_methods                   payment_methods?      @relation(fields: [payment_method_id], references: [id])
+  // Four distinct relations to `users` now (created/approved/rejected/paid)
+  // -- Prisma requires every one of them named once a model has more than
+  // one relation to the same target, same shape sales.confirmed_by already
+  // established (users_sales_confirmed_byTousers).
+  users_expenses_created_byTousers  users                 @relation("expenses_created_byTousers", fields: [created_by], references: [id])
+  users_expenses_approved_byTousers users?                @relation("expenses_approved_byTousers", fields: [approved_by], references: [id])
+  users_expenses_rejected_byTousers users?                @relation("expenses_rejected_byTousers", fields: [rejected_by], references: [id])
+  users_expenses_paid_byTousers     users?                @relation("expenses_paid_byTousers", fields: [paid_by], references: [id])
+  expense_attachments               expense_attachments[]
+  expense_recurrence                expense_recurrence?
+  expense_tags                      expense_tags[]
 
   @@unique([business_id, expense_number])
   @@index([business_id, branch_id])
   @@index([business_id, category_id])
   @@index([business_id, expense_date])
+  @@index([business_id, workflow_status])
   @@index([business_id])
 }
 
@@ -433,6 +455,58 @@ model expense_attachments {
 
   @@index([expense_id])
   @@index([business_id])
+}
+
+// Session 5B. Architecture-only -- no scheduler exists yet to actually
+// generate new expenses from this schedule (same "ready but not automated"
+// boundary the Debt Reminder Scheduler used correctly before it was built).
+// One schedule per template expense (@unique) -- to change frequency/
+// interval, update this row, not create a second one. `interval` expresses
+// "every N periods" (every 2 weeks = frequency: weekly, interval: 2). When a
+// real scheduler eventually reads this table and generates a new expense,
+// it should audit-log that generation as "expense.recurring_generated" --
+// no such action is written by any code path yet.
+model expense_recurrence {
+  id                  String              @id
+  business_id         String
+  template_expense_id String              @unique
+  frequency           RecurrenceFrequency
+  interval            Int                 @default(1)
+  next_run            DateTime?           @db.Date
+  last_run            DateTime?           @db.Date
+  active              Boolean             @default(true)
+  created_at          DateTime            @default(now())
+  businesses          businesses          @relation(fields: [business_id], references: [id])
+  expenses            expenses            @relation(fields: [template_expense_id], references: [id])
+
+  @@index([business_id])
+}
+
+// Session 5B. The first true many-to-many relation in this schema (checked:
+// every existing "many" relation elsewhere -- categories/sales/users/
+// debt_payments self-relations -- is one-to-many via a plain FK, not a real
+// junction table). Filter-only, deliberately does not replace the required
+// Category field on expenses.
+model tags {
+  id           String         @id
+  business_id  String
+  name         String
+  created_at   DateTime       @default(now())
+  businesses   businesses     @relation(fields: [business_id], references: [id])
+  expense_tags expense_tags[]
+
+  @@unique([business_id, name])
+  @@index([business_id])
+}
+
+model expense_tags {
+  expense_id String
+  tag_id     String
+  expenses   expenses @relation(fields: [expense_id], references: [id])
+  tags       tags     @relation(fields: [tag_id], references: [id])
+
+  @@id([expense_id, tag_id])
+  @@index([tag_id])
 }
 
 model idempotency_keys {
@@ -711,7 +785,10 @@ model users {
   businesses_businesses_owner_idTousers         businesses?             @relation("businesses_owner_idTousers")
   debt_payments                                 debt_payments[]
   debt_transactions                             debt_transactions[]
-  expenses                                      expenses[]
+  expenses_expenses_created_byTousers           expenses[]              @relation("expenses_created_byTousers")
+  expenses_expenses_approved_byTousers          expenses[]              @relation("expenses_approved_byTousers")
+  expenses_expenses_rejected_byTousers          expenses[]              @relation("expenses_rejected_byTousers")
+  expenses_expenses_paid_byTousers              expenses[]              @relation("expenses_paid_byTousers")
   expense_attachments                           expense_attachments[]
   inventory_adjustments                         inventory_adjustments[]
   login_events                                  login_events[]
@@ -895,6 +972,27 @@ enum ExpenseSource {
   recurring
   import
   api
+}
+
+// Session 5B. `draft` is intentionally unreachable this session -- the spec
+// named only create/approve/reject/mark-paid as actions, with no "submit,"
+// so createExpense always creates directly in `pending` (confirmed with the
+// user). Kept in the enum for schema completeness; a later session wires up
+// a real draft-saving flow if wanted.
+enum ExpenseWorkflowStatus {
+  draft
+  pending
+  approved
+  rejected
+  paid
+}
+
+enum RecurrenceFrequency {
+  daily
+  weekly
+  monthly
+  quarterly
+  yearly
 }
 
 enum OtpPurpose {

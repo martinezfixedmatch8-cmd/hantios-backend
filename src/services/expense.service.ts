@@ -2,7 +2,7 @@ import { Prisma } from "@prisma/client";
 import { prisma } from "../lib/prisma";
 import { generateId } from "../lib/ids";
 import { getOwned } from "../lib/ownership";
-import { badRequest, conflict } from "../lib/errors";
+import { badRequest, conflict, notFound } from "../lib/errors";
 import { writeAuditLog } from "../lib/auditLog";
 import { domainEvents } from "../lib/events";
 import { claimIdempotencyKey, completeIdempotencyKey } from "../lib/idempotency";
@@ -16,6 +16,10 @@ import {
   ArchiveExpenseInput,
   RestoreExpenseInput,
   AddAttachmentsInput,
+  ApproveExpenseInput,
+  RejectExpenseInput,
+  MarkPaidExpenseInput,
+  UpdateRecurrenceInput,
   MAX_ATTACHMENTS,
 } from "../validation/expense.schema";
 
@@ -32,6 +36,15 @@ interface Actor {
 // audit log + idempotency completion, several sequential round trips deep.
 const EXPENSE_TRANSACTION_OPTIONS = { timeout: 15000 };
 
+// Shared shape for every response that returns an expense -- tags/
+// recurrence are new in Session 5B, included everywhere an expense is
+// returned so a client never needs a second round trip for them.
+const EXPENSE_INCLUDE = {
+  expense_attachments: true,
+  expense_tags: { include: { tags: true } },
+  expense_recurrence: true,
+} as const;
+
 export const CREATE_EXPENSE_ENDPOINT = "POST /expenses";
 export function updateExpenseEndpoint(id: string): string {
   return `PATCH /expenses/${id}`;
@@ -44,6 +57,29 @@ export function restoreExpenseEndpoint(id: string): string {
 }
 export function addAttachmentsEndpoint(id: string): string {
   return `POST /expenses/${id}/attachments`;
+}
+export function deleteAttachmentEndpoint(id: string, attachmentId: string): string {
+  return `DELETE /expenses/${id}/attachments/${attachmentId}`;
+}
+export function approveExpenseEndpoint(id: string): string {
+  return `POST /expenses/${id}/approve`;
+}
+export function rejectExpenseEndpoint(id: string): string {
+  return `POST /expenses/${id}/reject`;
+}
+export function markPaidExpenseEndpoint(id: string): string {
+  return `POST /expenses/${id}/mark-paid`;
+}
+export function updateRecurrenceEndpoint(id: string): string {
+  return `PATCH /expenses/${id}/recurrence`;
+}
+
+async function validateTagIds(tagIds: string[] | undefined, businessId: string): Promise<void> {
+  if (!tagIds || tagIds.length === 0) return;
+  const found = await prisma.tags.count({ where: { id: { in: tagIds }, business_id: businessId } });
+  if (found !== tagIds.length) {
+    throw badRequest("One or more tagIds are invalid or belong to a different business");
+  }
 }
 
 export async function createExpense(input: CreateExpenseInput, actor: Actor, idempotencyKey: string) {
@@ -59,6 +95,7 @@ export async function createExpense(input: CreateExpenseInput, actor: Actor, ide
     const pm = await getOwned(prisma.payment_methods.findUnique({ where: { id: input.paymentMethodId } }), actor.businessId, "Payment method");
     if (pm.status !== "active") throw badRequest("Payment method is archived");
   }
+  await validateTagIds(input.tagIds, actor.businessId);
 
   const amount = new Prisma.Decimal(input.amount);
   // Snapshotted at creation time -- fields only, no conversion logic (Module
@@ -93,8 +130,10 @@ export async function createExpense(input: CreateExpenseInput, actor: Actor, ide
         description: input.description,
         notes: input.notes,
         source: input.source,
-        recurring: input.recurring,
-        recurrence_rule: input.recurrenceRule,
+        // Spec named only create/approve/reject/mark-paid as actions, with no
+        // "submit" -- createExpense always creates directly in `pending`
+        // (confirmed with the user). `draft` stays in the enum, unreachable.
+        workflow_status: "pending",
         created_by: actor.userId,
         expense_number: expenseNumber,
         status: "active",
@@ -116,6 +155,25 @@ export async function createExpense(input: CreateExpenseInput, actor: Actor, ide
       });
     }
 
+    if (input.tagIds && input.tagIds.length > 0) {
+      await tx.expense_tags.createMany({
+        data: input.tagIds.map((tagId) => ({ expense_id: created.id, tag_id: tagId })),
+      });
+    }
+
+    if (input.recurrence) {
+      await tx.expense_recurrence.create({
+        data: {
+          id: generateId(),
+          business_id: actor.businessId,
+          template_expense_id: created.id,
+          frequency: input.recurrence.frequency,
+          interval: input.recurrence.interval,
+          next_run: input.recurrence.nextRun,
+        },
+      });
+    }
+
     await writeAuditLog(tx, {
       businessId: actor.businessId,
       userId: actor.userId,
@@ -127,11 +185,11 @@ export async function createExpense(input: CreateExpenseInput, actor: Actor, ide
       reason: `Expense ${expenseNumber} of ${amount.toString()} recorded (${category.name})`,
     });
 
-    const withAttachments = await tx.expenses.findUniqueOrThrow({ where: { id: created.id }, include: { expense_attachments: true } });
-    const responseBody = JSON.parse(JSON.stringify({ data: withAttachments })) as unknown;
+    const withRelations = await tx.expenses.findUniqueOrThrow({ where: { id: created.id }, include: EXPENSE_INCLUDE });
+    const responseBody = JSON.parse(JSON.stringify({ data: withRelations })) as unknown;
     await completeIdempotencyKey(tx, actor.businessId, idempotencyKey, CREATE_EXPENSE_ENDPOINT, 201, responseBody);
 
-    return withAttachments;
+    return withRelations;
   }, EXPENSE_TRANSACTION_OPTIONS);
 
   domainEvents.publish("ExpenseCreated", {
@@ -155,9 +213,11 @@ export async function listExpenses(query: ListExpensesQuery, businessId: string)
   const where: Prisma.expensesWhereInput = {
     business_id: businessId,
     ...(query.status ? { status: query.status } : {}),
+    ...(query.workflowStatus ? { workflow_status: query.workflowStatus } : {}),
     ...(query.branchId ? { branch_id: query.branchId } : {}),
     ...(query.categoryId ? { category_id: query.categoryId } : {}),
     ...(query.source ? { source: query.source } : {}),
+    ...(query.tagId ? { expense_tags: { some: { tag_id: query.tagId } } } : {}),
     ...(resolved.searchWhere ?? {}),
   };
   if (query.dateFrom || query.dateTo) {
@@ -168,7 +228,7 @@ export async function listExpenses(query: ListExpensesQuery, businessId: string)
   }
 
   const [rows, total] = await Promise.all([
-    prisma.expenses.findMany({ where, orderBy: resolved.orderBy, skip: resolved.skip, take: resolved.take, include: { expense_attachments: true } }),
+    prisma.expenses.findMany({ where, orderBy: resolved.orderBy, skip: resolved.skip, take: resolved.take, include: EXPENSE_INCLUDE }),
     prisma.expenses.count({ where }),
   ]);
 
@@ -176,7 +236,7 @@ export async function listExpenses(query: ListExpensesQuery, businessId: string)
 }
 
 export async function getExpense(id: string, businessId: string) {
-  return getOwned(prisma.expenses.findUnique({ where: { id }, include: { expense_attachments: true } }), businessId, "Expense");
+  return getOwned(prisma.expenses.findUnique({ where: { id }, include: EXPENSE_INCLUDE }), businessId, "Expense");
 }
 
 export async function updateExpense(id: string, input: UpdateExpenseInput, actor: Actor, idempotencyKey: string) {
@@ -192,18 +252,6 @@ export async function updateExpense(id: string, input: UpdateExpenseInput, actor
   if (nextScope === "business" && nextBranchId) throw badRequest("branchId must not be set when scope is business");
   if (nextScope === "branch" && !nextBranchId) throw badRequest("branchId is required when scope is branch");
 
-  // Same reasoning as scope/branchId -- re-check the create-time "recurring
-  // requires recurrenceRule" rule against the row's actual current state
-  // merged with whatever's being changed this call, not just what's provided
-  // (the Zod schema can't see stored state). Unlike scope/branchId, flipping
-  // recurring back to false does NOT require also clearing recurrenceRule --
-  // an orphaned rule string on a non-recurring expense is inert (nothing
-  // reads it), not a real data-integrity question the way a stray branch_id
-  // on a business-scoped expense would be.
-  const nextRecurring = input.recurring ?? expense.recurring;
-  const nextRecurrenceRule = input.recurrenceRule !== undefined ? input.recurrenceRule : expense.recurrence_rule;
-  if (nextRecurring && !nextRecurrenceRule) throw badRequest("recurrenceRule is required when recurring is true");
-
   if (input.branchId) {
     const branch = await getOwned(prisma.branches.findUnique({ where: { id: input.branchId } }), actor.businessId, "Branch");
     if (branch.status !== "active") throw badRequest("Branch is archived");
@@ -218,6 +266,7 @@ export async function updateExpense(id: string, input: UpdateExpenseInput, actor
     const pm = await getOwned(prisma.payment_methods.findUnique({ where: { id: input.paymentMethodId } }), actor.businessId, "Payment method");
     if (pm.status !== "active") throw badRequest("Payment method is archived");
   }
+  await validateTagIds(input.tagIds, actor.businessId);
 
   const result = await prisma.$transaction(async (tx) => {
     await claimIdempotencyKey(tx, actor.businessId, idempotencyKey, updateExpenseEndpoint(id));
@@ -240,13 +289,21 @@ export async function updateExpense(id: string, input: UpdateExpenseInput, actor
         reference_number: input.referenceNumber,
         description: input.description,
         notes: input.notes,
-        recurring: nextRecurring,
-        recurrence_rule: nextRecurrenceRule,
         version: { increment: 1 },
       },
     });
     if (updateResult.count === 0) {
       throw conflict("Expense was modified concurrently, please retry with the latest version");
+    }
+
+    // Full-replace semantics: omitted = untouched, [] = clear all, a list =
+    // the complete desired set. expense_tags carries no data beyond the two
+    // FKs, so delete-then-recreate is simplest and correct here.
+    if (input.tagIds !== undefined) {
+      await tx.expense_tags.deleteMany({ where: { expense_id: id } });
+      if (input.tagIds.length > 0) {
+        await tx.expense_tags.createMany({ data: input.tagIds.map((tagId) => ({ expense_id: id, tag_id: tagId })) });
+      }
     }
 
     await writeAuditLog(tx, {
@@ -260,7 +317,7 @@ export async function updateExpense(id: string, input: UpdateExpenseInput, actor
       reason: `Expense ${expense.expense_number} updated`,
     });
 
-    const updated = await tx.expenses.findUniqueOrThrow({ where: { id }, include: { expense_attachments: true } });
+    const updated = await tx.expenses.findUniqueOrThrow({ where: { id }, include: EXPENSE_INCLUDE });
     const responseBody = JSON.parse(JSON.stringify({ data: updated })) as unknown;
     await completeIdempotencyKey(tx, actor.businessId, idempotencyKey, updateExpenseEndpoint(id), 200, responseBody);
 
@@ -385,6 +442,203 @@ export async function addAttachments(id: string, input: AddAttachmentsInput, act
     const updated = await tx.expenses.findUniqueOrThrow({ where: { id }, include: { expense_attachments: true } });
     const responseBody = JSON.parse(JSON.stringify({ data: updated })) as unknown;
     await completeIdempotencyKey(tx, actor.businessId, idempotencyKey, addAttachmentsEndpoint(id), 201, responseBody);
+    return updated;
+  }, EXPENSE_TRANSACTION_OPTIONS);
+
+  return result;
+}
+
+export async function deleteAttachment(id: string, attachmentId: string, actor: Actor, idempotencyKey: string) {
+  const expense = await getOwned(prisma.expenses.findUnique({ where: { id } }), actor.businessId, "Expense");
+  if (expense.status === "archived") throw badRequest("Cannot delete attachments from an archived expense");
+
+  const attachment = await getOwned(prisma.expense_attachments.findUnique({ where: { id: attachmentId } }), actor.businessId, "Attachment");
+  if (attachment.expense_id !== id) throw notFound("Attachment not found");
+
+  const result = await prisma.$transaction(async (tx) => {
+    await claimIdempotencyKey(tx, actor.businessId, idempotencyKey, deleteAttachmentEndpoint(id, attachmentId));
+
+    await tx.expense_attachments.delete({ where: { id: attachmentId } });
+
+    await writeAuditLog(tx, {
+      businessId: actor.businessId,
+      userId: actor.userId,
+      userName: actor.userName,
+      userRole: actor.userRole,
+      action: "expense.attachment_deleted",
+      entityType: "expense_attachment",
+      entityId: attachmentId,
+      reason: `Attachment "${attachment.filename}" deleted from expense ${expense.expense_number}`,
+    });
+
+    const updated = await tx.expenses.findUniqueOrThrow({ where: { id }, include: { expense_attachments: true } });
+    const responseBody = JSON.parse(JSON.stringify({ data: updated })) as unknown;
+    await completeIdempotencyKey(tx, actor.businessId, idempotencyKey, deleteAttachmentEndpoint(id, attachmentId), 200, responseBody);
+    return updated;
+  }, EXPENSE_TRANSACTION_OPTIONS);
+
+  return result;
+}
+
+// --- Status workflow (Session 5B) ---
+// Single-step transitions only, matching the locked spec -- no multi-level
+// approval chains. `rejected` is terminal this session (confirmed, not
+// silently assumed): no resubmit/reopen path, correcting a rejected expense
+// means creating a new one.
+
+export async function approveExpense(id: string, input: ApproveExpenseInput, actor: Actor, idempotencyKey: string) {
+  const expense = await getOwned(prisma.expenses.findUnique({ where: { id } }), actor.businessId, "Expense");
+  if (expense.workflow_status !== "pending") {
+    throw badRequest(`Cannot approve an expense with workflow status "${expense.workflow_status}"`);
+  }
+
+  const result = await prisma.$transaction(async (tx) => {
+    await claimIdempotencyKey(tx, actor.businessId, idempotencyKey, approveExpenseEndpoint(id));
+
+    const updateResult = await tx.expenses.updateMany({
+      where: { id, business_id: actor.businessId, version: input.version, workflow_status: "pending" },
+      data: { workflow_status: "approved", approved_by: actor.userId, approved_at: new Date(), version: { increment: 1 } },
+    });
+    if (updateResult.count === 0) {
+      throw conflict("Expense was modified concurrently, please retry with the latest version");
+    }
+
+    await writeAuditLog(tx, {
+      businessId: actor.businessId,
+      userId: actor.userId,
+      userName: actor.userName,
+      userRole: actor.userRole,
+      action: "expense.approved",
+      entityType: "expense",
+      entityId: id,
+      reason: `Expense ${expense.expense_number} approved`,
+    });
+
+    const updated = await tx.expenses.findUniqueOrThrow({ where: { id } });
+    const responseBody = JSON.parse(JSON.stringify({ data: updated })) as unknown;
+    await completeIdempotencyKey(tx, actor.businessId, idempotencyKey, approveExpenseEndpoint(id), 200, responseBody);
+    return updated;
+  }, EXPENSE_TRANSACTION_OPTIONS);
+
+  domainEvents.publish("ExpenseApproved", { expenseId: id, businessId: actor.businessId, approvedBy: actor.userId });
+
+  return result;
+}
+
+export async function rejectExpense(id: string, input: RejectExpenseInput, actor: Actor, idempotencyKey: string) {
+  const expense = await getOwned(prisma.expenses.findUnique({ where: { id } }), actor.businessId, "Expense");
+  if (expense.workflow_status !== "pending") {
+    throw badRequest(`Cannot reject an expense with workflow status "${expense.workflow_status}"`);
+  }
+
+  const result = await prisma.$transaction(async (tx) => {
+    await claimIdempotencyKey(tx, actor.businessId, idempotencyKey, rejectExpenseEndpoint(id));
+
+    const updateResult = await tx.expenses.updateMany({
+      where: { id, business_id: actor.businessId, version: input.version, workflow_status: "pending" },
+      data: { workflow_status: "rejected", rejected_by: actor.userId, rejected_at: new Date(), version: { increment: 1 } },
+    });
+    if (updateResult.count === 0) {
+      throw conflict("Expense was modified concurrently, please retry with the latest version");
+    }
+
+    await writeAuditLog(tx, {
+      businessId: actor.businessId,
+      userId: actor.userId,
+      userName: actor.userName,
+      userRole: actor.userRole,
+      action: "expense.rejected",
+      entityType: "expense",
+      entityId: id,
+      reason: input.reason,
+    });
+
+    const updated = await tx.expenses.findUniqueOrThrow({ where: { id } });
+    const responseBody = JSON.parse(JSON.stringify({ data: updated })) as unknown;
+    await completeIdempotencyKey(tx, actor.businessId, idempotencyKey, rejectExpenseEndpoint(id), 200, responseBody);
+    return updated;
+  }, EXPENSE_TRANSACTION_OPTIONS);
+
+  domainEvents.publish("ExpenseRejected", { expenseId: id, businessId: actor.businessId, rejectedBy: actor.userId, reason: input.reason });
+
+  return result;
+}
+
+export async function markExpensePaid(id: string, input: MarkPaidExpenseInput, actor: Actor, idempotencyKey: string) {
+  const expense = await getOwned(prisma.expenses.findUnique({ where: { id } }), actor.businessId, "Expense");
+  if (expense.workflow_status !== "approved") {
+    throw badRequest(`Cannot mark paid an expense with workflow status "${expense.workflow_status}"`);
+  }
+
+  const result = await prisma.$transaction(async (tx) => {
+    await claimIdempotencyKey(tx, actor.businessId, idempotencyKey, markPaidExpenseEndpoint(id));
+
+    const updateResult = await tx.expenses.updateMany({
+      where: { id, business_id: actor.businessId, version: input.version, workflow_status: "approved" },
+      data: { workflow_status: "paid", paid_by: actor.userId, paid_at: new Date(), version: { increment: 1 } },
+    });
+    if (updateResult.count === 0) {
+      throw conflict("Expense was modified concurrently, please retry with the latest version");
+    }
+
+    await writeAuditLog(tx, {
+      businessId: actor.businessId,
+      userId: actor.userId,
+      userName: actor.userName,
+      userRole: actor.userRole,
+      action: "expense.paid",
+      entityType: "expense",
+      entityId: id,
+      reason: `Expense ${expense.expense_number} marked paid`,
+    });
+
+    const updated = await tx.expenses.findUniqueOrThrow({ where: { id } });
+    const responseBody = JSON.parse(JSON.stringify({ data: updated })) as unknown;
+    await completeIdempotencyKey(tx, actor.businessId, idempotencyKey, markPaidExpenseEndpoint(id), 200, responseBody);
+    return updated;
+  }, EXPENSE_TRANSACTION_OPTIONS);
+
+  domainEvents.publish("ExpensePaid", { expenseId: id, businessId: actor.businessId, paidBy: actor.userId });
+
+  return result;
+}
+
+// --- Recurrence schedule management (Session 5B, architecture-only) ---
+
+export async function updateRecurrence(id: string, input: UpdateRecurrenceInput, actor: Actor, idempotencyKey: string) {
+  await getOwned(prisma.expenses.findUnique({ where: { id } }), actor.businessId, "Expense");
+  const recurrence = await getOwned(
+    prisma.expense_recurrence.findUnique({ where: { template_expense_id: id } }),
+    actor.businessId,
+    "Expense recurrence schedule"
+  );
+
+  const result = await prisma.$transaction(async (tx) => {
+    await claimIdempotencyKey(tx, actor.businessId, idempotencyKey, updateRecurrenceEndpoint(id));
+
+    const updated = await tx.expense_recurrence.update({
+      where: { id: recurrence.id },
+      data: {
+        frequency: input.frequency,
+        interval: input.interval,
+        next_run: input.nextRun,
+        active: input.active,
+      },
+    });
+
+    await writeAuditLog(tx, {
+      businessId: actor.businessId,
+      userId: actor.userId,
+      userName: actor.userName,
+      userRole: actor.userRole,
+      action: "expense_recurrence.updated",
+      entityType: "expense_recurrence",
+      entityId: updated.id,
+      reason: `Recurrence schedule for expense ${id} updated`,
+    });
+
+    const responseBody = JSON.parse(JSON.stringify({ data: updated })) as unknown;
+    await completeIdempotencyKey(tx, actor.businessId, idempotencyKey, updateRecurrenceEndpoint(id), 200, responseBody);
     return updated;
   }, EXPENSE_TRANSACTION_OPTIONS);
 

@@ -409,41 +409,6 @@ describe("Expenses", () => {
       expect(res.body.data.vendor_name).toBeNull();
     });
 
-    // QA (2026-07-26) -- FOUND GAP, fixed: createExpenseSchema's "recurring
-    // requires recurrenceRule" rule had no equivalent on update -- a PATCH
-    // could silently produce recurring:true with a null/stale
-    // recurrence_rule. Also: the create-time rule itself had zero test
-    // coverage before this.
-    it("returns 400 creating a recurring expense without a recurrenceRule", async () => {
-      const res = await request(app)
-        .post("/expenses")
-        .set("Authorization", `Bearer ${ownerToken}`)
-        .set("Idempotency-Key", idemKey())
-        .send(validExpensePayload({ recurring: true }));
-      expect(res.status).toBe(400);
-    });
-
-    it("returns 400 flipping recurring to true on update without a recurrenceRule, merged against stored state", async () => {
-      const expense = await createExpenseAs(ownerToken);
-      const res = await request(app)
-        .patch(`/expenses/${expense.id}`)
-        .set("Authorization", `Bearer ${ownerToken}`)
-        .set("Idempotency-Key", idemKey())
-        .send({ version: expense.version, recurring: true });
-      expect(res.status).toBe(400);
-    });
-
-    it("allows flipping recurring back to false without needing to also clear recurrenceRule (an orphaned rule string is inert, not enforced)", async () => {
-      const expense = await createExpenseAs(ownerToken, { recurring: true, recurrenceRule: "monthly" });
-      const res = await request(app)
-        .patch(`/expenses/${expense.id}`)
-        .set("Authorization", `Bearer ${ownerToken}`)
-        .set("Idempotency-Key", idemKey())
-        .send({ version: expense.version, recurring: false });
-      expect(res.status).toBe(200);
-      expect(res.body.data.recurring).toBe(false);
-    });
-
     it("returns 400 updating an archived expense", async () => {
       const expense = await createExpenseAs(ownerToken);
       await request(app)
@@ -583,6 +548,448 @@ describe("Expenses", () => {
 
       const res = await request(app).get(`/expenses/${otherExpense.body.data.id}`).set("Authorization", `Bearer ${ownerToken}`);
       expect(res.status).toBe(404);
+    });
+  });
+
+  describe("Recurrence (architecture-only -- no scheduler exists yet)", () => {
+    it("creates an expense_recurrence row when recurrence is provided at creation, referencing the new expense as template", async () => {
+      const expense = await createExpenseAs(ownerToken, {
+        recurrence: { frequency: "monthly", interval: 2, nextRun: isoDate(30) },
+      });
+      expect(expense.expense_recurrence).toMatchObject({
+        template_expense_id: expense.id,
+        frequency: "monthly",
+        interval: 2,
+        active: true,
+      });
+      expect(expense.expense_recurrence.last_run).toBeNull();
+
+      const row = await prisma.expense_recurrence.findUnique({ where: { template_expense_id: expense.id } });
+      expect(row).not.toBeNull();
+    });
+
+    it("defaults interval to 1 when omitted", async () => {
+      const expense = await createExpenseAs(ownerToken, { recurrence: { frequency: "weekly" } });
+      expect(expense.expense_recurrence.interval).toBe(1);
+    });
+
+    it("leaves expense_recurrence null when no recurrence is provided", async () => {
+      const expense = await createExpenseAs(ownerToken);
+      expect(expense.expense_recurrence).toBeNull();
+    });
+
+    it("updates an existing recurrence schedule's frequency/interval/active via PATCH", async () => {
+      const expense = await createExpenseAs(ownerToken, { recurrence: { frequency: "daily", interval: 1 } });
+
+      const res = await request(app)
+        .patch(`/expenses/${expense.id}/recurrence`)
+        .set("Authorization", `Bearer ${ownerToken}`)
+        .set("Idempotency-Key", idemKey())
+        .send({ frequency: "yearly", interval: 3, active: false });
+      expect(res.status).toBe(200);
+      expect(res.body.data.frequency).toBe("yearly");
+      expect(res.body.data.interval).toBe(3);
+      expect(res.body.data.active).toBe(false);
+
+      const auditRows = await prisma.audit_logs.findMany({ where: { action: "expense_recurrence.updated", entity_id: res.body.data.id } });
+      expect(auditRows).toHaveLength(1);
+    });
+
+    it("returns 404 updating recurrence on an expense that has none", async () => {
+      const expense = await createExpenseAs(ownerToken);
+      const res = await request(app)
+        .patch(`/expenses/${expense.id}/recurrence`)
+        .set("Authorization", `Bearer ${ownerToken}`)
+        .set("Idempotency-Key", idemKey())
+        .send({ active: false });
+      expect(res.status).toBe(404);
+    });
+
+    it("returns 404 updating recurrence on an expense from a different business", async () => {
+      const otherOwner = await signupTestOwner();
+      businessIds.push(otherOwner.businessId);
+      const otherLogin = await loginTestOwner(otherOwner.email, otherOwner.password, otherOwner.deviceId);
+      const otherCategories = await request(app).get("/expense-categories?pageSize=50").set("Authorization", `Bearer ${otherLogin.accessToken}`);
+      const otherCreated = await request(app)
+        .post("/expenses")
+        .set("Authorization", `Bearer ${otherLogin.accessToken}`)
+        .set("Idempotency-Key", idemKey())
+        .send({ scope: "business", categoryId: otherCategories.body.data[0].id, amount: 10, expenseDate: isoDate(-1), recurrence: { frequency: "daily" } });
+
+      const res = await request(app)
+        .patch(`/expenses/${otherCreated.body.data.id}/recurrence`)
+        .set("Authorization", `Bearer ${ownerToken}`)
+        .set("Idempotency-Key", idemKey())
+        .send({ active: false });
+      expect(res.status).toBe(404);
+    });
+  });
+
+  describe("Status workflow (single-step transitions only)", () => {
+    it("creates directly in pending -- draft is unreachable this session (confirmed design)", async () => {
+      const expense = await createExpenseAs(ownerToken);
+      expect(expense.workflow_status).toBe("pending");
+    });
+
+    it("approves a pending expense, sets approvedBy/approvedAt, publishes ExpenseApproved, and blocks a second approve", async () => {
+      const expense = await createExpenseAs(ownerToken);
+      let published: unknown = null;
+      domainEvents.once("ExpenseApproved", (payload) => {
+        published = payload;
+      });
+
+      const res = await request(app)
+        .post(`/expenses/${expense.id}/approve`)
+        .set("Authorization", `Bearer ${ownerToken}`)
+        .set("Idempotency-Key", idemKey())
+        .send({ version: expense.version });
+      expect(res.status).toBe(200);
+      expect(res.body.data.workflow_status).toBe("approved");
+      expect(res.body.data.approved_by).toBeTruthy();
+      expect(res.body.data.approved_at).toBeTruthy();
+      expect(published).toMatchObject({ expenseId: expense.id, businessId });
+
+      const second = await request(app)
+        .post(`/expenses/${expense.id}/approve`)
+        .set("Authorization", `Bearer ${ownerToken}`)
+        .set("Idempotency-Key", idemKey())
+        .send({ version: res.body.data.version });
+      expect(second.status).toBe(400);
+
+      const auditRows = await prisma.audit_logs.findMany({ where: { action: "expense.approved", entity_id: expense.id } });
+      expect(auditRows).toHaveLength(1);
+    });
+
+    it("rejects a pending expense with a required reason, sets rejectedBy/rejectedAt, publishes ExpenseRejected, and is terminal (no path back to pending)", async () => {
+      const expense = await createExpenseAs(ownerToken);
+      let published: unknown = null;
+      domainEvents.once("ExpenseRejected", (payload) => {
+        published = payload;
+      });
+
+      const noReason = await request(app)
+        .post(`/expenses/${expense.id}/reject`)
+        .set("Authorization", `Bearer ${ownerToken}`)
+        .set("Idempotency-Key", idemKey())
+        .send({ version: expense.version });
+      expect(noReason.status).toBe(400);
+
+      const res = await request(app)
+        .post(`/expenses/${expense.id}/reject`)
+        .set("Authorization", `Bearer ${ownerToken}`)
+        .set("Idempotency-Key", idemKey())
+        .send({ version: expense.version, reason: "Missing receipt" });
+      expect(res.status).toBe(200);
+      expect(res.body.data.workflow_status).toBe("rejected");
+      expect(res.body.data.rejected_by).toBeTruthy();
+      expect(res.body.data.rejected_at).toBeTruthy();
+      expect(published).toMatchObject({ expenseId: expense.id, businessId, reason: "Missing receipt" });
+
+      // Terminal: approving a rejected expense must fail -- no resubmit path this session.
+      const approveAfterReject = await request(app)
+        .post(`/expenses/${expense.id}/approve`)
+        .set("Authorization", `Bearer ${ownerToken}`)
+        .set("Idempotency-Key", idemKey())
+        .send({ version: res.body.data.version });
+      expect(approveAfterReject.status).toBe(400);
+
+      const auditRows = await prisma.audit_logs.findMany({ where: { action: "expense.rejected", entity_id: expense.id } });
+      expect(auditRows).toHaveLength(1);
+    });
+
+    it("marks an approved expense paid, sets paidBy/paidAt, and publishes ExpensePaid -- only reachable from approved", async () => {
+      const expense = await createExpenseAs(ownerToken);
+
+      const tooSoon = await request(app)
+        .post(`/expenses/${expense.id}/mark-paid`)
+        .set("Authorization", `Bearer ${ownerToken}`)
+        .set("Idempotency-Key", idemKey())
+        .send({ version: expense.version });
+      expect(tooSoon.status).toBe(400); // still pending, not approved yet
+
+      const approved = await request(app)
+        .post(`/expenses/${expense.id}/approve`)
+        .set("Authorization", `Bearer ${ownerToken}`)
+        .set("Idempotency-Key", idemKey())
+        .send({ version: expense.version });
+
+      let published: unknown = null;
+      domainEvents.once("ExpensePaid", (payload) => {
+        published = payload;
+      });
+
+      const res = await request(app)
+        .post(`/expenses/${expense.id}/mark-paid`)
+        .set("Authorization", `Bearer ${ownerToken}`)
+        .set("Idempotency-Key", idemKey())
+        .send({ version: approved.body.data.version });
+      expect(res.status).toBe(200);
+      expect(res.body.data.workflow_status).toBe("paid");
+      expect(res.body.data.paid_by).toBeTruthy();
+      expect(res.body.data.paid_at).toBeTruthy();
+      expect(published).toMatchObject({ expenseId: expense.id, businessId });
+
+      const auditRows = await prisma.audit_logs.findMany({ where: { action: "expense.paid", entity_id: expense.id } });
+      expect(auditRows).toHaveLength(1);
+    });
+
+    it("rejects a stale-version approve (optimistic locking)", async () => {
+      const expense = await createExpenseAs(ownerToken);
+      const res = await request(app)
+        .post(`/expenses/${expense.id}/approve`)
+        .set("Authorization", `Bearer ${ownerToken}`)
+        .set("Idempotency-Key", idemKey())
+        .send({ version: expense.version + 5 });
+      expect(res.status).toBe(409);
+    });
+
+    // The loser of this race can legitimately land on EITHER 400 or 409,
+    // not deterministically 409: approveExpense's pre-transaction guard
+    // (`workflow_status !== "pending"`) reads state BEFORE the transaction,
+    // so if the winner's transaction has already committed by the time the
+    // loser's pre-check runs, the loser fails fast with 400 instead of
+    // reaching the atomic updateMany's 409. Both outcomes correctly reject
+    // the loser -- only the layer that catches it is timing-dependent. Found
+    // by running this test under the full suite's heavier concurrent load
+    // (it passed with a narrower [200,409]-only assertion in isolation,
+    // which was the real bug: an assertion too narrow for the actual race,
+    // not a code defect -- exactly one 200 and exactly one audit row is the
+    // invariant that actually matters).
+    it("only lets one of two concurrent approve requests win (real concurrency, not just sequential stale-version)", async () => {
+      const expense = await createExpenseAs(ownerToken);
+      const body = { version: expense.version };
+
+      const [first, second] = await Promise.all([
+        request(app).post(`/expenses/${expense.id}/approve`).set("Authorization", `Bearer ${ownerToken}`).set("Idempotency-Key", idemKey()).send(body),
+        request(app).post(`/expenses/${expense.id}/approve`).set("Authorization", `Bearer ${ownerToken}`).set("Idempotency-Key", idemKey()).send(body),
+      ]);
+      const statuses = [first.status, second.status];
+      expect(statuses.filter((s) => s === 200)).toHaveLength(1);
+      const loserStatus = statuses.find((s) => s !== 200);
+      expect([400, 409]).toContain(loserStatus);
+
+      const auditRows = await prisma.audit_logs.findMany({ where: { action: "expense.approved", entity_id: expense.id } });
+      expect(auditRows).toHaveLength(1);
+    });
+
+    it("only lets one of two concurrent mark-paid requests win", async () => {
+      const expense = await createExpenseAs(ownerToken);
+      const approved = await request(app)
+        .post(`/expenses/${expense.id}/approve`)
+        .set("Authorization", `Bearer ${ownerToken}`)
+        .set("Idempotency-Key", idemKey())
+        .send({ version: expense.version });
+      const body = { version: approved.body.data.version };
+
+      const [first, second] = await Promise.all([
+        request(app).post(`/expenses/${expense.id}/mark-paid`).set("Authorization", `Bearer ${ownerToken}`).set("Idempotency-Key", idemKey()).send(body),
+        request(app).post(`/expenses/${expense.id}/mark-paid`).set("Authorization", `Bearer ${ownerToken}`).set("Idempotency-Key", idemKey()).send(body),
+      ]);
+      const statuses = [first.status, second.status];
+      expect(statuses.filter((s) => s === 200)).toHaveLength(1);
+      const loserStatus = statuses.find((s) => s !== 200);
+      expect([400, 409]).toContain(loserStatus);
+    });
+
+    it("replays the same response for a repeated Idempotency-Key on approve", async () => {
+      const expense = await createExpenseAs(ownerToken);
+      const key = idemKey();
+      const body = { version: expense.version };
+
+      const first = await request(app).post(`/expenses/${expense.id}/approve`).set("Authorization", `Bearer ${ownerToken}`).set("Idempotency-Key", key).send(body);
+      expect(first.status).toBe(200);
+      const second = await request(app).post(`/expenses/${expense.id}/approve`).set("Authorization", `Bearer ${ownerToken}`).set("Idempotency-Key", key).send(body);
+      expect(second.status).toBe(200);
+      expect(second.body.data.version).toBe(first.body.data.version);
+    });
+
+    it("filters by workflowStatus", async () => {
+      const expense = await createExpenseAs(ownerToken);
+      await request(app)
+        .post(`/expenses/${expense.id}/approve`)
+        .set("Authorization", `Bearer ${ownerToken}`)
+        .set("Idempotency-Key", idemKey())
+        .send({ version: expense.version });
+
+      const res = await request(app).get("/expenses?workflowStatus=approved").set("Authorization", `Bearer ${ownerToken}`);
+      expect(res.status).toBe(200);
+      expect(res.body.data.some((e: { id: string }) => e.id === expense.id)).toBe(true);
+      expect(res.body.data.every((e: { workflow_status: string }) => e.workflow_status === "approved")).toBe(true);
+    });
+
+    it("returns 404 approving/rejecting/marking paid an expense from a different business", async () => {
+      const otherOwner = await signupTestOwner();
+      businessIds.push(otherOwner.businessId);
+      const otherLogin = await loginTestOwner(otherOwner.email, otherOwner.password, otherOwner.deviceId);
+      const otherCategories = await request(app).get("/expense-categories?pageSize=50").set("Authorization", `Bearer ${otherLogin.accessToken}`);
+      const otherCreated = await request(app)
+        .post("/expenses")
+        .set("Authorization", `Bearer ${otherLogin.accessToken}`)
+        .set("Idempotency-Key", idemKey())
+        .send({ scope: "business", categoryId: otherCategories.body.data[0].id, amount: 10, expenseDate: isoDate(-1) });
+      const otherId = otherCreated.body.data.id;
+
+      const approveRes = await request(app).post(`/expenses/${otherId}/approve`).set("Authorization", `Bearer ${ownerToken}`).set("Idempotency-Key", idemKey()).send({ version: 0 });
+      expect(approveRes.status).toBe(404);
+      const rejectRes = await request(app).post(`/expenses/${otherId}/reject`).set("Authorization", `Bearer ${ownerToken}`).set("Idempotency-Key", idemKey()).send({ version: 0, reason: "x" });
+      expect(rejectRes.status).toBe(404);
+      const paidRes = await request(app).post(`/expenses/${otherId}/mark-paid`).set("Authorization", `Bearer ${ownerToken}`).set("Idempotency-Key", idemKey()).send({ version: 0 });
+      expect(paidRes.status).toBe(404);
+    });
+
+    describe("RBAC on approve/reject/mark-paid", () => {
+      const deniedRoles: UserRole[] = ["accountant", "cashier", "storekeeper", "shareholder", "custom"];
+
+      it.each(deniedRoles)("denies role=%s approving, rejecting, and marking paid", async (role) => {
+        const expense = await createExpenseAs(ownerToken);
+        const user = await createTestUser(businessId, role);
+        const token = mintAccessToken(user);
+
+        const approveRes = await request(app).post(`/expenses/${expense.id}/approve`).set("Authorization", `Bearer ${token}`).set("Idempotency-Key", idemKey()).send({ version: expense.version });
+        expect(approveRes.status).toBe(403);
+        const rejectRes = await request(app).post(`/expenses/${expense.id}/reject`).set("Authorization", `Bearer ${token}`).set("Idempotency-Key", idemKey()).send({ version: expense.version, reason: "x" });
+        expect(rejectRes.status).toBe(403);
+        const paidRes = await request(app).post(`/expenses/${expense.id}/mark-paid`).set("Authorization", `Bearer ${token}`).set("Idempotency-Key", idemKey()).send({ version: expense.version });
+        expect(paidRes.status).toBe(403);
+      });
+
+      it("allows manager to approve", async () => {
+        const expense = await createExpenseAs(ownerToken);
+        const manager = await createTestUser(businessId, "manager");
+        const token = mintAccessToken(manager);
+        const res = await request(app).post(`/expenses/${expense.id}/approve`).set("Authorization", `Bearer ${token}`).set("Idempotency-Key", idemKey()).send({ version: expense.version });
+        expect(res.status).toBe(200);
+      });
+    });
+  });
+
+  describe("Attachment deletion", () => {
+    const validAttachment = (overrides: Record<string, unknown> = {}) => ({
+      filename: "receipt.jpg",
+      mimeType: "image/jpeg",
+      size: 1024,
+      storageKey: `test/${randomUUID()}`,
+      ...overrides,
+    });
+
+    it("deletes an attachment and audit-logs it", async () => {
+      const expense = await createExpenseAs(ownerToken, { attachments: [validAttachment()] });
+      const attachmentId = expense.expense_attachments[0].id;
+
+      const res = await request(app)
+        .delete(`/expenses/${expense.id}/attachments/${attachmentId}`)
+        .set("Authorization", `Bearer ${ownerToken}`)
+        .set("Idempotency-Key", idemKey());
+      expect(res.status).toBe(200);
+      expect(res.body.data.expense_attachments).toHaveLength(0);
+
+      const auditRows = await prisma.audit_logs.findMany({ where: { action: "expense.attachment_deleted", entity_id: attachmentId } });
+      expect(auditRows).toHaveLength(1);
+
+      const row = await prisma.expense_attachments.findUnique({ where: { id: attachmentId } });
+      expect(row).toBeNull();
+    });
+
+    it("returns 400 deleting an attachment from an archived expense", async () => {
+      const expense = await createExpenseAs(ownerToken, { attachments: [validAttachment()] });
+      await request(app)
+        .post(`/expenses/${expense.id}/archive`)
+        .set("Authorization", `Bearer ${ownerToken}`)
+        .set("Idempotency-Key", idemKey())
+        .send({ version: expense.version, reason: "x" });
+
+      const res = await request(app)
+        .delete(`/expenses/${expense.id}/attachments/${expense.expense_attachments[0].id}`)
+        .set("Authorization", `Bearer ${ownerToken}`)
+        .set("Idempotency-Key", idemKey());
+      expect(res.status).toBe(400);
+    });
+
+    it("returns 404 deleting an attachment that belongs to a different expense", async () => {
+      const expenseA = await createExpenseAs(ownerToken, { attachments: [validAttachment()] });
+      const expenseB = await createExpenseAs(ownerToken);
+
+      const res = await request(app)
+        .delete(`/expenses/${expenseB.id}/attachments/${expenseA.expense_attachments[0].id}`)
+        .set("Authorization", `Bearer ${ownerToken}`)
+        .set("Idempotency-Key", idemKey());
+      expect(res.status).toBe(404);
+    });
+
+    it("rejects a cashier deleting an attachment (elevated role only)", async () => {
+      const expense = await createExpenseAs(ownerToken, { attachments: [validAttachment()] });
+      const cashier = await createTestUser(businessId, "cashier");
+      const token = mintAccessToken(cashier);
+      const res = await request(app)
+        .delete(`/expenses/${expense.id}/attachments/${expense.expense_attachments[0].id}`)
+        .set("Authorization", `Bearer ${token}`)
+        .set("Idempotency-Key", idemKey());
+      expect(res.status).toBe(403);
+    });
+  });
+
+  describe("Tags (many-to-many, filter-only)", () => {
+    async function createTagAs(token: string, name = `Tag ${randomUUID()}`) {
+      const res = await request(app).post("/tags").set("Authorization", `Bearer ${token}`).send({ name });
+      if (res.status !== 201) throw new Error(`createTagAs failed: ${res.status} ${JSON.stringify(res.body)}`);
+      return res.body.data;
+    }
+
+    it("attaches tags at creation and returns them nested on the expense", async () => {
+      const tagA = await createTagAs(ownerToken);
+      const tagB = await createTagAs(ownerToken);
+
+      const expense = await createExpenseAs(ownerToken, { tagIds: [tagA.id, tagB.id] });
+      const tagIds = expense.expense_tags.map((et: { tags: { id: string } }) => et.tags.id).sort();
+      expect(tagIds).toEqual([tagA.id, tagB.id].sort());
+    });
+
+    it("returns 400 for a tagId that belongs to a different business", async () => {
+      const otherOwner = await signupTestOwner();
+      businessIds.push(otherOwner.businessId);
+      const otherLogin = await loginTestOwner(otherOwner.email, otherOwner.password, otherOwner.deviceId);
+      const otherTag = await createTagAs(otherLogin.accessToken);
+
+      const res = await request(app)
+        .post("/expenses")
+        .set("Authorization", `Bearer ${ownerToken}`)
+        .set("Idempotency-Key", idemKey())
+        .send(validExpensePayload({ tagIds: [otherTag.id] }));
+      expect(res.status).toBe(400);
+    });
+
+    it("full-replaces tags on update, and clears them all with an empty array", async () => {
+      const tagA = await createTagAs(ownerToken);
+      const tagB = await createTagAs(ownerToken);
+      const expense = await createExpenseAs(ownerToken, { tagIds: [tagA.id] });
+
+      const replaced = await request(app)
+        .patch(`/expenses/${expense.id}`)
+        .set("Authorization", `Bearer ${ownerToken}`)
+        .set("Idempotency-Key", idemKey())
+        .send({ version: expense.version, tagIds: [tagB.id] });
+      expect(replaced.status).toBe(200);
+      expect(replaced.body.data.expense_tags.map((et: { tag_id: string }) => et.tag_id)).toEqual([tagB.id]);
+
+      const cleared = await request(app)
+        .patch(`/expenses/${expense.id}`)
+        .set("Authorization", `Bearer ${ownerToken}`)
+        .set("Idempotency-Key", idemKey())
+        .send({ version: replaced.body.data.version, tagIds: [] });
+      expect(cleared.status).toBe(200);
+      expect(cleared.body.data.expense_tags).toHaveLength(0);
+    });
+
+    it("filters expenses by tagId", async () => {
+      const tag = await createTagAs(ownerToken);
+      const tagged = await createExpenseAs(ownerToken, { tagIds: [tag.id] });
+      const untagged = await createExpenseAs(ownerToken);
+
+      const res = await request(app).get(`/expenses?tagId=${tag.id}`).set("Authorization", `Bearer ${ownerToken}`);
+      expect(res.status).toBe(200);
+      const ids = res.body.data.map((e: { id: string }) => e.id);
+      expect(ids).toContain(tagged.id);
+      expect(ids).not.toContain(untagged.id);
     });
   });
 

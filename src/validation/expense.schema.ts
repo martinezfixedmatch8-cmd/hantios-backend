@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { ExpenseScope, ExpenseSource } from "@prisma/client";
+import { ExpenseScope, ExpenseSource, ExpenseWorkflowStatus, RecurrenceFrequency } from "@prisma/client";
 import { decimalField, idParamSchema } from "./common.schema";
 import { paginationQuerySchema } from "../lib/pagination";
 
@@ -12,6 +12,7 @@ export { idParamSchema };
 const MAX_ATTACHMENT_SIZE_BYTES = 10 * 1024 * 1024;
 const MAX_ATTACHMENTS_PER_EXPENSE = 5;
 const ALLOWED_ATTACHMENT_MIME_TYPES = ["image/jpeg", "image/png", "image/webp", "image/heic", "application/pdf"] as const;
+const MAX_TAGS_PER_EXPENSE = 20;
 
 export const attachmentInputSchema = z.object({
   filename: z.string().trim().min(1).max(255),
@@ -20,6 +21,24 @@ export const attachmentInputSchema = z.object({
   storageKey: z.string().trim().min(1).max(500),
 });
 export type AttachmentInput = z.infer<typeof attachmentInputSchema>;
+
+// Session 5B -- architecture-only (no scheduler reads this yet). Setup is
+// folded into createExpenseSchema rather than a separate endpoint; changing
+// an existing schedule goes through updateRecurrenceSchema below.
+export const recurrenceInputSchema = z.object({
+  frequency: z.nativeEnum(RecurrenceFrequency),
+  interval: z.number().int().positive().optional().default(1),
+  nextRun: z.coerce.date().optional(),
+});
+export type RecurrenceInput = z.infer<typeof recurrenceInputSchema>;
+
+export const updateRecurrenceSchema = z.object({
+  frequency: z.nativeEnum(RecurrenceFrequency).optional(),
+  interval: z.number().int().positive().optional(),
+  nextRun: z.coerce.date().optional().nullable(),
+  active: z.boolean().optional(),
+});
+export type UpdateRecurrenceInput = z.infer<typeof updateRecurrenceSchema>;
 
 function withScopeRefine<T extends z.ZodType<{ scope?: ExpenseScope; branchId?: string | null }>>(schema: T) {
   return schema.superRefine((data, ctx) => {
@@ -33,6 +52,10 @@ function withScopeRefine<T extends z.ZodType<{ scope?: ExpenseScope; branchId?: 
   });
 }
 
+// recurring/recurrenceRule (5A's simple boolean+free-text fields) are gone --
+// deprecated in favor of the recurrence object below, whose mere presence on
+// an expense_recurrence row is now the sole source of truth for "is this
+// expense recurring" (see schema.prisma's expenses model comment).
 export const createExpenseSchema = withScopeRefine(
   z.object({
     branchId: z.string().uuid().optional(),
@@ -53,27 +76,23 @@ export const createExpenseSchema = withScopeRefine(
     description: z.string().trim().max(500).optional(),
     notes: z.string().trim().max(5000).optional(),
     source: z.nativeEnum(ExpenseSource).optional().default("manual"),
-    recurring: z.boolean().optional().default(false),
-    recurrenceRule: z.string().trim().min(1).max(200).optional(),
     attachments: z.array(attachmentInputSchema).max(MAX_ATTACHMENTS_PER_EXPENSE).optional(),
+    tagIds: z.array(z.string().uuid()).max(MAX_TAGS_PER_EXPENSE).optional(),
+    recurrence: recurrenceInputSchema.optional(),
   })
-).superRefine((data, ctx) => {
-  if (data.recurring && !data.recurrenceRule) {
-    ctx.addIssue({ code: "custom", message: "recurrenceRule is required when recurring is true", path: ["recurrenceRule"] });
-  }
-});
+);
 export type CreateExpenseInput = z.infer<typeof createExpenseSchema>;
 
 // Every genuinely-nullable-in-DB field below is `.nullable()` here, unlike
 // createExpenseSchema -- an update needs a way to explicitly CLEAR a
-// previously-set value (e.g. flip scope back to "business", or turn off
-// recurring), which a bare `.optional()` can never express: omitting the key
-// means "leave unchanged," but there was previously no way to send an
-// explicit `null` either, since `.optional()` alone rejects it at the base
-// type check. QA caught this for branchId specifically; the same structural
-// gap applied to every other clearable field, fixed here uniformly. Prisma's
-// own update semantics already do the right thing once the type allows
-// null through: undefined -> skip, null -> clear, a value -> set it.
+// previously-set value (e.g. flip scope back to "business"), which a bare
+// `.optional()` can never express: omitting the key means "leave unchanged,"
+// but there was previously no way to send an explicit `null` either, since
+// `.optional()` alone rejects it at the base type check. QA caught this for
+// branchId specifically (Session 5A); the same structural gap applied to
+// every other clearable field, fixed here uniformly. Prisma's own update
+// semantics already do the right thing once the type allows null through:
+// undefined -> skip, null -> clear, a value -> set it.
 export const updateExpenseSchema = withScopeRefine(
   z.object({
     version: z.number().int().nonnegative(),
@@ -91,8 +110,10 @@ export const updateExpenseSchema = withScopeRefine(
     referenceNumber: z.string().trim().min(1).max(100).optional().nullable(),
     description: z.string().trim().max(500).optional().nullable(),
     notes: z.string().trim().max(5000).optional().nullable(),
-    recurring: z.boolean().optional(),
-    recurrenceRule: z.string().trim().min(1).max(200).optional().nullable(),
+    // Full-replace semantics: omitted = tags untouched, [] = clear all tags,
+    // a list = the complete desired tag set (diffed into adds/removes
+    // server-side, not merged with whatever was there before).
+    tagIds: z.array(z.string().uuid()).max(MAX_TAGS_PER_EXPENSE).optional(),
   })
 );
 export type UpdateExpenseInput = z.infer<typeof updateExpenseSchema>;
@@ -113,11 +134,33 @@ export const restoreExpenseSchema = z.object({
 });
 export type RestoreExpenseInput = z.infer<typeof restoreExpenseSchema>;
 
+// No "reason" here -- approving is just "yes, this is fine," unlike reject.
+export const approveExpenseSchema = z.object({
+  version: z.number().int().nonnegative(),
+});
+export type ApproveExpenseInput = z.infer<typeof approveExpenseSchema>;
+
+// Reason required though not explicitly asked in the 5B spec -- every other
+// negative/blocking action in this repo (write-off, dispute, archive)
+// requires one; rejecting an expense is exactly that kind of judgment call.
+export const rejectExpenseSchema = z.object({
+  version: z.number().int().nonnegative(),
+  reason: z.string().trim().min(1).max(500),
+});
+export type RejectExpenseInput = z.infer<typeof rejectExpenseSchema>;
+
+export const markPaidExpenseSchema = z.object({
+  version: z.number().int().nonnegative(),
+});
+export type MarkPaidExpenseInput = z.infer<typeof markPaidExpenseSchema>;
+
 export const listExpensesQuerySchema = paginationQuerySchema.extend({
   status: z.enum(["active", "archived"]).optional(),
+  workflowStatus: z.nativeEnum(ExpenseWorkflowStatus).optional(),
   branchId: z.string().uuid().optional(),
   categoryId: z.string().uuid().optional(),
   source: z.nativeEnum(ExpenseSource).optional(),
+  tagId: z.string().uuid().optional(),
   dateFrom: z.coerce.date().optional(),
   dateTo: z.coerce.date().optional(),
 });
@@ -125,3 +168,4 @@ export type ListExpensesQuery = z.infer<typeof listExpensesQuerySchema>;
 
 export const MAX_ATTACHMENT_SIZE = MAX_ATTACHMENT_SIZE_BYTES;
 export const MAX_ATTACHMENTS = MAX_ATTACHMENTS_PER_EXPENSE;
+export const MAX_TAGS = MAX_TAGS_PER_EXPENSE;
