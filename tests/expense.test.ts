@@ -93,6 +93,65 @@ describe("Expenses", () => {
     expect(auditRows).toHaveLength(1);
   });
 
+  describe("Tax Snapshot (fields only, no calculation logic)", () => {
+    it("stores taxAmount/taxRate/taxIncluded exactly as provided, never derived from amount", async () => {
+      const expense = await createExpenseAs(ownerToken, { amount: 1000, taxAmount: 160, taxRate: 16, taxIncluded: false });
+      expect(Number(expense.tax_amount)).toBe(160);
+      expect(Number(expense.tax_rate)).toBe(16);
+      expect(expense.tax_included).toBe(false);
+      // No calculation logic -- amount is exactly what was sent, not
+      // amount-minus-tax or amount-plus-tax.
+      expect(Number(expense.amount)).toBe(1000);
+    });
+
+    it("leaves all three tax fields null when none are provided", async () => {
+      const expense = await createExpenseAs(ownerToken);
+      expect(expense.tax_amount).toBeNull();
+      expect(expense.tax_rate).toBeNull();
+      expect(expense.tax_included).toBeNull();
+    });
+
+    it("returns 400 for a negative taxAmount or an out-of-range taxRate", async () => {
+      const negativeAmount = await request(app)
+        .post("/expenses")
+        .set("Authorization", `Bearer ${ownerToken}`)
+        .set("Idempotency-Key", idemKey())
+        .send(validExpensePayload({ taxAmount: -5 }));
+      expect(negativeAmount.status).toBe(400);
+
+      const outOfRangeRate = await request(app)
+        .post("/expenses")
+        .set("Authorization", `Bearer ${ownerToken}`)
+        .set("Idempotency-Key", idemKey())
+        .send(validExpensePayload({ taxRate: 101 }));
+      expect(outOfRangeRate.status).toBe(400);
+    });
+
+    it("updates tax fields and clears them via explicit null", async () => {
+      const expense = await createExpenseAs(ownerToken, { taxAmount: 50, taxRate: 5, taxIncluded: true });
+
+      const updated = await request(app)
+        .patch(`/expenses/${expense.id}`)
+        .set("Authorization", `Bearer ${ownerToken}`)
+        .set("Idempotency-Key", idemKey())
+        .send({ version: expense.version, taxAmount: 75, taxRate: 7.5 });
+      expect(updated.status).toBe(200);
+      expect(Number(updated.body.data.tax_amount)).toBe(75);
+      expect(Number(updated.body.data.tax_rate)).toBe(7.5);
+      expect(updated.body.data.tax_included).toBe(true); // untouched field stays as-is
+
+      const cleared = await request(app)
+        .patch(`/expenses/${expense.id}`)
+        .set("Authorization", `Bearer ${ownerToken}`)
+        .set("Idempotency-Key", idemKey())
+        .send({ version: updated.body.data.version, taxAmount: null, taxRate: null, taxIncluded: null });
+      expect(cleared.status).toBe(200);
+      expect(cleared.body.data.tax_amount).toBeNull();
+      expect(cleared.body.data.tax_rate).toBeNull();
+      expect(cleared.body.data.tax_included).toBeNull();
+    });
+  });
+
   it("increments the expense number sequentially per business", async () => {
     const first = await createExpenseAs(ownerToken);
     const second = await createExpenseAs(ownerToken);

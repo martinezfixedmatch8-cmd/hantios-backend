@@ -39,6 +39,12 @@ export const createExpenseSchema = withScopeRefine(
     scope: z.nativeEnum(ExpenseScope),
     categoryId: z.string().uuid(),
     amount: decimalField(z.coerce.number().positive()),
+    // Tax Snapshot -- fields only, manually entered, no calculation logic
+    // (matches the currency snapshot's own "fields only" pattern). Never
+    // derived from `amount`, and never used to derive it either.
+    taxAmount: decimalField(z.coerce.number().nonnegative()).optional(),
+    taxRate: decimalField(z.coerce.number().min(0).max(100)).optional(),
+    taxIncluded: z.boolean().optional(),
     paymentMethodId: z.string().uuid().optional(),
     expenseDate: z.coerce.date(),
     vendorId: z.string().trim().min(1).max(100).optional(),
@@ -75,6 +81,9 @@ export const updateExpenseSchema = withScopeRefine(
     scope: z.nativeEnum(ExpenseScope).optional(),
     categoryId: z.string().uuid().optional(),
     amount: decimalField(z.coerce.number().positive()).optional(),
+    taxAmount: decimalField(z.coerce.number().nonnegative()).optional().nullable(),
+    taxRate: decimalField(z.coerce.number().min(0).max(100)).optional().nullable(),
+    taxIncluded: z.boolean().optional().nullable(),
     paymentMethodId: z.string().uuid().optional().nullable(),
     expenseDate: z.coerce.date().optional(),
     vendorId: z.string().trim().min(1).max(100).optional().nullable(),

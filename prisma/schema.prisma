@@ -339,6 +339,13 @@ model expenses {
   // fields only, no conversion logic (Module 19's job).
   currency_code       String?
   currency_symbol     String?
+  // Tax Snapshot -- same "fields only, no calculation logic" pattern as the
+  // currency snapshot above: manually entered per expense, never derived
+  // from amount/rate or vice versa. A real Tax Engine (auto-calculation,
+  // tax-code lookup) is a later phase's job, not built here.
+  tax_amount          Decimal?              @db.Decimal(14, 2)
+  tax_rate            Decimal?              @db.Decimal(5, 2)
+  tax_included        Boolean?
   payment_method_id   String?
   // "When it happened" (renamed from the old `date` column) vs recorded_at
   // "when entered" -- two separate fields, per spec.
