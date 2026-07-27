@@ -11,6 +11,8 @@ import productRoutes from "./routes/product.routes";
 import saleRoutes from "./routes/sale.routes";
 import referenceRoutes from "./routes/reference.routes";
 import debtRoutes from "./routes/debt.routes";
+import expenseRoutes from "./routes/expense.routes";
+import expenseCategoryRoutes from "./routes/expenseCategory.routes";
 import { notFoundHandler, errorHandler } from "./middleware/errorHandler";
 
 export const app = express();
@@ -36,6 +38,8 @@ app.use("/products", productRoutes);
 app.use("/sales", saleRoutes);
 app.use("/reference", referenceRoutes);
 app.use("/debts", debtRoutes);
+app.use("/expenses", expenseRoutes);
+app.use("/expense-categories", expenseCategoryRoutes);
 
 app.use(notFoundHandler);
 app.use(errorHandler);

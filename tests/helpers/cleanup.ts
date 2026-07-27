@@ -38,7 +38,11 @@ export async function cleanupTestBusiness(businessId: string): Promise<void> {
   // negative-total row).
   await prisma.sales.deleteMany({ where: { business_id: businessId, refund_of_sale_id: { not: null } } });
   await prisma.sales.deleteMany({ where: { business_id: businessId } });
+  // expense_attachments FKs to expenses -- delete before it.
+  await prisma.expense_attachments.deleteMany({ where: { business_id: businessId } });
   await prisma.expenses.deleteMany({ where: { business_id: businessId } });
+  await prisma.expense_categories.deleteMany({ where: { business_id: businessId } });
+  await prisma.expense_counters.deleteMany({ where: { business_id: businessId } });
   await prisma.branch_inventory.deleteMany({ where: { business_id: businessId } });
   await prisma.warehouse_stock.deleteMany({ where: { business_id: businessId } });
   await prisma.products.deleteMany({ where: { business_id: businessId } });

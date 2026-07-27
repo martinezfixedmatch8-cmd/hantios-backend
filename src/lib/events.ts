@@ -22,6 +22,9 @@ export interface DomainEventPayloads {
   DebtDisputed: { debtId: string; businessId: string; reason: string };
   DebtWrittenOff: { debtId: string; businessId: string; reason: string };
   InterestApplied: { debtId: string; businessId: string; transactionId: string; amount: string; amountRemaining: string };
+  ExpenseCreated: { expenseId: string; businessId: string; branchId: string | null; categoryId: string; amount: string };
+  ExpenseUpdated: { expenseId: string; businessId: string };
+  ExpenseArchived: { expenseId: string; businessId: string; reason: string };
 }
 
 export type DomainEventName = keyof DomainEventPayloads;
