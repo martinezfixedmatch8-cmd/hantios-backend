@@ -9,6 +9,8 @@ import { claimIdempotencyKey, completeIdempotencyKey } from "../lib/idempotency"
 import { getNextReceiptNumber } from "../lib/receiptNumber";
 import { isSameBusinessDay } from "../lib/businessTime";
 import { domainEvents } from "../lib/events";
+import { applyStockAlertTransition } from "../lib/stockAlerts";
+import type { PendingStockAlertEvent } from "../lib/stockAlerts";
 import type { CreateSaleInput, ListSalesQuery, VoidSaleInput, RefundSaleInput } from "../validation/sale.schema";
 
 interface Actor {
@@ -159,6 +161,11 @@ export async function createSale(input: CreateSaleInput, actor: Actor, idempoten
     });
   });
 
+  // Populated inside the transaction below, published after it commits --
+  // declared out here (not inside the $transaction callback) so it's still
+  // reachable once the transaction has resolved.
+  const stockAlertEvents: PendingStockAlertEvent[] = [];
+
   const sale = await prisma.$transaction(async (tx) => {
     // Claim first: the unique constraint on (business_id, key, endpoint) is the
     // real guard against a concurrent duplicate submission -- a collision here
@@ -189,12 +196,36 @@ export async function createSale(input: CreateSaleInput, actor: Actor, idempoten
       if (result.count === 0) {
         throw conflict(`Insufficient stock for product "${product.name}"`);
       }
+
+      // Re-read the row's TRUE post-write state within this same transaction
+      // rather than computing quantityAfter/wasActive from the pre-write
+      // `row` snapshot above. Postgres always serializes the actual UPDATE
+      // via row locking, so the DB-side quantity itself is correct even
+      // under concurrency -- but `row` (read before this line's own write)
+      // goes stale the instant another concurrent sale's decrement commits
+      // in between. QA reproduced this live under real concurrent sales: the
+      // stale snapshot fed a wrong quantity_before/quantity_after pair into
+      // inventory_adjustments AND a stale wasActive into
+      // applyStockAlertTransition, double-firing StockLow for one episode.
+      const committedRow = await tx.branch_inventory.findUniqueOrThrow({ where: { id: row.id } });
+      const quantityAfter = committedRow.quantity;
       decrements.push({
         productId: product.id,
         size: line.size ?? null,
-        quantityBefore: row.quantity,
-        quantityAfter: row.quantity.minus(line.quantity),
+        quantityBefore: quantityAfter.plus(line.quantity),
+        quantityAfter,
       });
+      const stockEvent = await applyStockAlertTransition(tx, {
+        businessId: actor.businessId,
+        branchId: input.branchId,
+        productId: product.id,
+        branchInventoryId: row.id,
+        wasActive: committedRow.low_stock_alert_active,
+        minStockLevel: product.min_stock_level,
+        quantityAfter,
+        direction: "decrease",
+      });
+      if (stockEvent) stockAlertEvents.push(stockEvent);
     }
 
     const receiptNumber = await getNextReceiptNumber(tx, actor.businessId, business.timezone);
@@ -274,9 +305,10 @@ export async function createSale(input: CreateSaleInput, actor: Actor, idempoten
   }, SALE_TRANSACTION_OPTIONS);
 
   // Published after commit, never from inside the transaction -- a listener
-  // should never react to data that might still roll back. No subscriber
-  // exists yet (Notification/Analytics/CRM/Accounting are all unbuilt); this
-  // is the publish side of the loose-coupling rule, proven by test coverage.
+  // should never react to data that might still roll back. SaleCreated still
+  // has no subscriber (Notification/Analytics/CRM/Accounting are all
+  // unbuilt); StockLow/StockRecovered below do -- src/lib/stockAlertSubscriber.ts,
+  // the first real production subscriber in this repo.
   domainEvents.publish("SaleCreated", {
     saleId: sale.id,
     businessId: actor.businessId,
@@ -284,6 +316,9 @@ export async function createSale(input: CreateSaleInput, actor: Actor, idempoten
     receiptId: sale.receipt_id,
     total: sale.total.toString(),
   });
+  for (const event of stockAlertEvents) {
+    domainEvents.publish(event.name, event.payload);
+  }
 
   return sale;
 }
@@ -304,6 +339,12 @@ export async function voidSale(saleId: string, input: VoidSaleInput, actor: Acto
   }
 
   const items = sale.items as unknown as SaleLineSnapshot[];
+  // Batch-fetched upfront, same reasoning as createSale's own productMap --
+  // min_stock_level is needed per line to check for a stock recovery, and
+  // the sale's own item snapshot doesn't carry it.
+  const voidProducts = await prisma.products.findMany({ where: { id: { in: items.map((item) => item.productId) } } });
+  const voidProductMap = new Map(voidProducts.map((p) => [p.id, p]));
+  const stockAlertEvents: PendingStockAlertEvent[] = [];
 
   const voided = await prisma.$transaction(async (tx) => {
     await claimIdempotencyKey(tx, actor.businessId, idempotencyKey, voidSaleEndpoint(saleId));
@@ -338,6 +379,26 @@ export async function voidSale(saleId: string, input: VoidSaleInput, actor: Acto
         throw conflict(`Failed to restore stock for product "${item.productName}"`);
       }
 
+      // Re-read the TRUE post-write state within this same transaction --
+      // same fix, same reasoning as createSale's decrement loop (see comment
+      // there): `row` was read before this write and goes stale under real
+      // concurrency, corrupting both the ledger and the debounce decision.
+      const committedRow = await tx.branch_inventory.findUniqueOrThrow({ where: { id: row.id } });
+      const restoredQuantity = committedRow.quantity;
+      const quantityBefore = restoredQuantity.minus(quantity);
+      const voidProduct = voidProductMap.get(item.productId);
+      const stockEvent = await applyStockAlertTransition(tx, {
+        businessId: actor.businessId,
+        branchId: sale.branch_id,
+        productId: item.productId,
+        branchInventoryId: row.id,
+        wasActive: committedRow.low_stock_alert_active,
+        minStockLevel: voidProduct?.min_stock_level ?? null,
+        quantityAfter: restoredQuantity,
+        direction: "increase",
+      });
+      if (stockEvent) stockAlertEvents.push(stockEvent);
+
       // adjustment_amount must stay positive (CHECK chk_inventory_adj_amount_positive)
       // -- quantity_after > quantity_before here, the mirror of the sale's own
       // decrement where quantity_before > quantity_after.
@@ -347,8 +408,8 @@ export async function voidSale(saleId: string, input: VoidSaleInput, actor: Acto
           business_id: actor.businessId,
           product_id: item.productId,
           branch_id: sale.branch_id,
-          quantity_before: row.quantity,
-          quantity_after: row.quantity.plus(quantity),
+          quantity_before: quantityBefore,
+          quantity_after: restoredQuantity,
           adjustment_amount: quantity,
           adjustment_type: "void",
           packaging_level: "each",
@@ -379,6 +440,9 @@ export async function voidSale(saleId: string, input: VoidSaleInput, actor: Acto
   }, SALE_TRANSACTION_OPTIONS);
 
   domainEvents.publish("SaleVoided", { saleId: voided.id, businessId: actor.businessId, reason: input.reason });
+  for (const event of stockAlertEvents) {
+    domainEvents.publish(event.name, event.payload);
+  }
 
   return voided;
 }

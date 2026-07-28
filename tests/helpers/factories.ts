@@ -193,7 +193,7 @@ export async function createTestPaymentMethod(
 
 export async function createTestProduct(
   businessId: string,
-  overrides: Partial<{ name: string; costPrice: number; sellingPrice: number; categoryId: string }> = {}
+  overrides: Partial<{ name: string; costPrice: number; sellingPrice: number; categoryId: string; minStockLevel: number }> = {}
 ) {
   return prisma.products.create({
     data: {
@@ -203,6 +203,7 @@ export async function createTestProduct(
       cost_price: overrides.costPrice ?? 10,
       selling_price: overrides.sellingPrice ?? 20,
       category_id: overrides.categoryId,
+      min_stock_level: overrides.minStockLevel,
     },
   });
 }

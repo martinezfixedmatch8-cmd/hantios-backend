@@ -5,6 +5,9 @@ import { getOwned } from "../lib/ownership";
 import { writeAuditLog } from "../lib/auditLog";
 import { resolveListQuery, paginate } from "../lib/pagination";
 import { badRequest, conflict } from "../lib/errors";
+import { domainEvents } from "../lib/events";
+import { applyStockAlertTransition } from "../lib/stockAlerts";
+import type { PendingStockAlertEvent } from "../lib/stockAlerts";
 import type {
   CreateProductInput,
   UpdateProductInput,
@@ -18,6 +21,14 @@ interface Actor {
   userName: string;
   userRole: string;
 }
+
+// Same fix, same reasoning as sale.service.ts's SALE_TRANSACTION_OPTIONS:
+// adjustProductStock now does one extra query (and, on a debounce
+// transition, one extra write) inside the transaction versus before this
+// session, and Neon's serverless HTTP driver adds real per-query latency --
+// the default 5s interactive-transaction timeout can legitimately be tight
+// under load with nothing actually deadlocked.
+const STOCK_ADJUSTMENT_TRANSACTION_OPTIONS = { timeout: 15000 };
 
 async function assertCategoryBelongsToBusiness(categoryId: string, businessId: string): Promise<void> {
   await getOwned(prisma.categories.findUnique({ where: { id: categoryId } }), businessId, "Category");
@@ -188,8 +199,18 @@ export async function restoreProduct(id: string, expectedVersion: number, actor:
 }
 
 export async function adjustProductStock(productId: string, input: AdjustStockInput, actor: Actor) {
-  await getOwned(prisma.products.findUnique({ where: { id: productId } }), actor.businessId, "Product");
+  const product = await getOwned(prisma.products.findUnique({ where: { id: productId } }), actor.businessId, "Product");
   await getOwned(prisma.branches.findUnique({ where: { id: input.branchId } }), actor.businessId, "Branch");
+
+  // Published after the transaction commits, same rule every domain event in
+  // this repo follows. Only ever pushed to from the `existing` branch below
+  // -- a brand-new opening-balance row (the !existing branch) can never have
+  // had an active low-stock episode, and per the locked requirement,
+  // increases never trigger StockLow (only decreases do) -- see the comment
+  // at the call site for why calling the shared helper unconditionally there
+  // would still be safe, but skipping it entirely is the more direct match
+  // to that requirement's literal wording.
+  const stockAlertEvents: PendingStockAlertEvent[] = [];
 
   const adjustment = await prisma.$transaction(async (tx) => {
     const existing = await tx.branch_inventory.findFirst({
@@ -247,6 +268,23 @@ export async function adjustProductStock(productId: string, input: AdjustStockIn
       if (result.count === 0) {
         throw conflict("Stock record changed concurrently, please retry");
       }
+
+      // Safe to call for both directions: applyStockAlertTransition itself
+      // refuses to report "entered" when direction is "increase" (a hard
+      // gate, not just relying on severity being monotonic -- QA found that
+      // assumption breaks if min_stock_level is edited mid-episode via
+      // PATCH /products/:id, see stockAlerts.ts).
+      const stockEvent = await applyStockAlertTransition(tx, {
+        businessId: actor.businessId,
+        branchId: input.branchId,
+        productId,
+        branchInventoryId: existing.id,
+        wasActive: existing.low_stock_alert_active,
+        minStockLevel: product.min_stock_level,
+        quantityAfter,
+        direction: input.direction,
+      });
+      if (stockEvent) stockAlertEvents.push(stockEvent);
     }
 
     const created = await tx.inventory_adjustments.create({
@@ -277,7 +315,11 @@ export async function adjustProductStock(productId: string, input: AdjustStockIn
     });
 
     return created;
-  });
+  }, STOCK_ADJUSTMENT_TRANSACTION_OPTIONS);
+
+  for (const event of stockAlertEvents) {
+    domainEvents.publish(event.name, event.payload);
+  }
 
   return adjustment;
 }

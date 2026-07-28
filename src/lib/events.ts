@@ -1,4 +1,5 @@
 import { EventEmitter } from "events";
+import type { StockSeverity } from "./stockAlerts";
 
 // Real, minimal in-process domain-event publisher (Session 3B). Sales code
 // must never call Notification/Analytics/CRM/Accounting directly -- those
@@ -28,6 +29,32 @@ export interface DomainEventPayloads {
   ExpenseApproved: { expenseId: string; businessId: string; approvedBy: string };
   ExpenseRejected: { expenseId: string; businessId: string; rejectedBy: string; reason: string };
   ExpensePaid: { expenseId: string; businessId: string; paidBy: string };
+  // Module 02 (Inventory) -- the first domain events in this repo with a
+  // real production subscriber (src/lib/stockAlertSubscriber.ts); every
+  // other event above still has zero subscribers, only ephemeral test
+  // listeners. Same rich payload shape for both, per the locked requirement
+  // -- StockRecovered's severity is always null (no longer low, so there's
+  // nothing to classify), kept as a real field rather than omitted so a
+  // future Notification Center subscriber can build per-user records from
+  // either event without a redesign.
+  StockLow: {
+    businessId: string;
+    branchId: string;
+    productId: string;
+    currentQuantity: string;
+    minStockLevel: string;
+    severity: StockSeverity;
+    occurredAt: string;
+  };
+  StockRecovered: {
+    businessId: string;
+    branchId: string;
+    productId: string;
+    currentQuantity: string;
+    minStockLevel: string;
+    severity: null;
+    occurredAt: string;
+  };
 }
 
 export type DomainEventName = keyof DomainEventPayloads;

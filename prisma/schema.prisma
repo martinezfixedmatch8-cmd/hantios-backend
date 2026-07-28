@@ -33,17 +33,25 @@ model audit_logs {
 
 /// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
 model branch_inventory {
-  id           String     @id
-  business_id  String
-  branch_id    String
-  product_id   String
-  size         String?
-  quantity     Decimal    @default(0) @db.Decimal(14, 2)
-  last_updated DateTime   @default(now())
-  version      Int        @default(0)
-  branches     branches   @relation(fields: [branch_id], references: [id])
-  businesses   businesses @relation(fields: [business_id], references: [id])
-  products     products   @relation(fields: [product_id], references: [id])
+  id                     String     @id
+  business_id            String
+  branch_id              String
+  product_id             String
+  size                   String?
+  quantity               Decimal    @default(0) @db.Decimal(14, 2)
+  last_updated           DateTime   @default(now())
+  version                Int        @default(0)
+  // Low Stock Alert debounce (Module 02) -- persisted per-row state, not a
+  // query against event/audit history, so a notification fires exactly once
+  // per low-stock episode. Written atomically in the SAME transaction as the
+  // quantity change that crosses the threshold, so this half is never wrong
+  // or duplicated -- only the notification delivery itself (fire-and-forget,
+  // after commit) is best-effort. See CLAUDE.md for the full tradeoff.
+  low_stock_alert_active Boolean    @default(false)
+  low_stock_alerted_at   DateTime?
+  branches               branches   @relation(fields: [branch_id], references: [id])
+  businesses             businesses @relation(fields: [business_id], references: [id])
+  products               products   @relation(fields: [product_id], references: [id])
 
   @@unique([branch_id, product_id, size])
   @@index([business_id])
