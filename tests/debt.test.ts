@@ -109,7 +109,7 @@ describe("Debts", () => {
     expect(debt.customer_id).toBeTruthy();
 
     const customer = await prisma.customers.findUniqueOrThrow({ where: { id: debt.customer_id } });
-    expect(customer.phone).toBe(phone);
+    expect(customer.phone_original).toBe(phone);
     expect(Number(customer.debt_balance)).toBe(1000);
 
     // A second debt for the SAME phone number reuses the same customer --

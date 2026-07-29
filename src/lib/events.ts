@@ -55,6 +55,15 @@ export interface DomainEventPayloads {
     severity: null;
     occurredAt: string;
   };
+  // Module 05 (Customer Records). No CustomerRestored -- the locked
+  // domain-events list names only Created/Updated/Archived; Restored is an
+  // audit-log action only. `phone` is the normalized (E.164) form, not the
+  // raw display string -- a future subscriber consuming this
+  // programmatically (e.g. a notification) would want the dialable,
+  // canonical form.
+  CustomerCreated: { businessId: string; customerId: string; customerNumber: string; phone: string; occurredAt: string };
+  CustomerUpdated: { businessId: string; customerId: string; customerNumber: string; phone: string; occurredAt: string };
+  CustomerArchived: { businessId: string; customerId: string; customerNumber: string; phone: string; occurredAt: string };
 }
 
 export type DomainEventName = keyof DomainEventPayloads;

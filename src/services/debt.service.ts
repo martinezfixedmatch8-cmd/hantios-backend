@@ -11,6 +11,7 @@ import { getDebtReminderSchedule, getDebtInterestPolicy } from "../lib/businessS
 import { getPeriodsElapsed, calculateInterest } from "../lib/interestEngine";
 import { domainEvents } from "../lib/events";
 import { getNotificationProvider } from "../notifications/registry";
+import { findOrCreateCustomer } from "./customer.service";
 import type {
   CreateDebtInput,
   ListDebtsQuery,
@@ -72,26 +73,6 @@ async function decorateDebt<T extends { date_due: Date; customer_id: string }>(d
   };
 }
 
-async function findOrCreateCustomer(
-  tx: Prisma.TransactionClient,
-  businessId: string,
-  phone: string,
-  name: string | undefined
-) {
-  const existing = await tx.customers.findFirst({ where: { business_id: businessId, phone } });
-  if (existing) return existing;
-  try {
-    return await tx.customers.create({
-      data: { id: generateId(), business_id: businessId, phone, name, status: "active" },
-    });
-  } catch (err) {
-    if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002") {
-      return await tx.customers.findFirstOrThrow({ where: { business_id: businessId, phone } });
-    }
-    throw err;
-  }
-}
-
 // Preserves a dispute hold: a routine payment/reversal doesn't silently clear
 // `disputed` -- only the explicit resolve-dispute action does. Otherwise
 // derived purely from the amounts, matching Requirement #9 (OVERDUE is never
@@ -125,11 +106,15 @@ export async function createDebt(input: CreateDebtInput, actor: Actor, idempoten
   const debt = await prisma.$transaction(async (tx) => {
     await claimIdempotencyKey(tx, actor.businessId, idempotencyKey, CREATE_DEBT_ENDPOINT);
 
-    // Customers has no CRUD module yet (see Session 4 plan) -- find-or-create
-    // by (business_id, phone), its own existing unique constraint. A real
-    // Customers API, whenever built, can supersede this with an explicit
-    // customerId input without any change here.
-    const customer = await findOrCreateCustomer(tx, actor.businessId, input.customerPhone, input.customerName);
+    // Module 05: real find-or-create, shared with Sales -- an archived
+    // customer holding this phone is never reused/reactivated (active-only
+    // lookup), a brand-new active customer is created instead.
+    const customer = await findOrCreateCustomer(tx, {
+      businessId: actor.businessId,
+      phoneRaw: input.customerPhone,
+      name: input.customerName,
+      defaultCountry: business.country,
+    });
 
     const created = await tx.debts.create({
       data: {
@@ -160,7 +145,18 @@ export async function createDebt(input: CreateDebtInput, actor: Actor, idempoten
     // customers.debt_balance is a derived cache only (never authoritative --
     // debts/debt_payments are the source of truth), kept in sync here purely
     // for cheap reads elsewhere (CRM dashboards, customer lists, search).
-    await tx.customers.updateMany({ where: { id: customer.id }, data: { debt_balance: { increment: amountOriginal } } });
+    // total_debts/last_debt_at/last_activity_at use the just-created row's
+    // own created_at, not a fresh new Date(), so the cache is byte-identical
+    // to what the Timeline query will show for this same event.
+    await tx.customers.updateMany({
+      where: { id: customer.id },
+      data: {
+        debt_balance: { increment: amountOriginal },
+        total_debts: { increment: 1 },
+        last_debt_at: created.created_at,
+        last_activity_at: created.created_at,
+      },
+    });
 
     await writeAuditLog(tx, {
       businessId: actor.businessId,
@@ -323,7 +319,18 @@ export async function recordPayment(debtId: string, input: RecordPaymentInput, a
       },
     });
 
-    await tx.customers.updateMany({ where: { id: debt.customer_id }, data: { debt_balance: { decrement: amount } } });
+    // A genuine new payment -- total_payments increments here only, never on
+    // a reversal (see reversePayment below), matching purchase_count's own
+    // "only a real new occurrence counts" rule.
+    await tx.customers.updateMany({
+      where: { id: debt.customer_id },
+      data: {
+        debt_balance: { decrement: amount },
+        total_payments: { increment: 1 },
+        last_payment_at: payment.created_at,
+        last_activity_at: payment.created_at,
+      },
+    });
 
     await writeAuditLog(tx, {
       businessId: actor.businessId,
@@ -413,7 +420,14 @@ export async function reversePayment(
       throw conflict("Debt was modified concurrently, please retry with the latest version");
     }
 
-    await tx.customers.updateMany({ where: { id: debt.customer_id }, data: { debt_balance: { increment: payment.amount } } });
+    // total_payments/last_payment_at deliberately untouched -- a reversal
+    // corrects an existing payment rather than being a new one (mirrors how
+    // voidSale never touches purchase_count either). last_activity_at still
+    // moves forward: a real event happened, even though it's a correction.
+    await tx.customers.updateMany({
+      where: { id: debt.customer_id },
+      data: { debt_balance: { increment: payment.amount }, last_activity_at: reversal.created_at },
+    });
 
     await writeAuditLog(tx, {
       businessId: actor.businessId,
@@ -477,7 +491,10 @@ async function transitionDebtStatus(
     // visible/traceable, never deleted or zeroed, per this module's own
     // "financial history, never physically deleted" principle).
     if (resolvedTarget === "written_off") {
-      await tx.customers.updateMany({ where: { id: debt.customer_id }, data: { debt_balance: { decrement: debt.amount_remaining } } });
+      await tx.customers.updateMany({
+        where: { id: debt.customer_id },
+        data: { debt_balance: { decrement: debt.amount_remaining }, last_activity_at: new Date() },
+      });
     }
 
     await writeAuditLog(tx, {

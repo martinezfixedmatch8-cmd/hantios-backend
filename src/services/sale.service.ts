@@ -11,6 +11,7 @@ import { isSameBusinessDay } from "../lib/businessTime";
 import { domainEvents } from "../lib/events";
 import { applyStockAlertTransition } from "../lib/stockAlerts";
 import type { PendingStockAlertEvent } from "../lib/stockAlerts";
+import { findOrCreateCustomer } from "./customer.service";
 import type { CreateSaleInput, ListSalesQuery, VoidSaleInput, RefundSaleInput } from "../validation/sale.schema";
 
 interface Actor {
@@ -173,6 +174,21 @@ export async function createSale(input: CreateSaleInput, actor: Actor, idempoten
     // retry if the earlier attempt genuinely failed.
     await claimIdempotencyKey(tx, actor.businessId, idempotencyKey, CREATE_SALE_ENDPOINT);
 
+    // Module 05: real customer link, shared with Debts -- an archived
+    // customer holding this phone is never reused/reactivated (active-only
+    // lookup). Absent customerPhone, customerId stays null -- byte-identical
+    // to this sale's behavior before Module 05 existed.
+    let customerId: string | null = null;
+    if (input.customerPhone) {
+      const customer = await findOrCreateCustomer(tx, {
+        businessId: actor.businessId,
+        phoneRaw: input.customerPhone,
+        name: input.customerName,
+        defaultCountry: business.country,
+      });
+      customerId = customer.id;
+    }
+
     // Atomic conditional decrement per line -- see plan decision #5. findFirst
     // only picks *which* row to target (unavoidable given the documented
     // NULL-size dedup gap on branch_inventory); the accept/reject decision is
@@ -237,6 +253,7 @@ export async function createSale(input: CreateSaleInput, actor: Actor, idempoten
         branch_id: input.branchId,
         cashier_id: actor.userId,
         customer_phone: input.customerPhone,
+        customer_id: customerId,
         items: items as unknown as Prisma.InputJsonValue,
         subtotal: subtotal.toDecimalPlaces(2),
         discount: discountAmount,
@@ -250,6 +267,18 @@ export async function createSale(input: CreateSaleInput, actor: Actor, idempoten
         status: "completed",
       },
     });
+
+    if (customerId) {
+      await tx.customers.updateMany({
+        where: { id: customerId },
+        data: {
+          total_spent: { increment: createdSale.total },
+          purchase_count: { increment: 1 },
+          last_purchase_at: createdSale.timestamp,
+          last_activity_at: createdSale.timestamp,
+        },
+      });
+    }
 
     // One unified ledger row per line -- extends inventory_adjustments (see
     // Session 3A plan's #11 decision) rather than a parallel movements table.
@@ -358,6 +387,18 @@ export async function voidSale(saleId: string, input: VoidSaleInput, actor: Acto
     });
     if (result.count === 0) {
       throw conflict("Sale is not in a voidable state (already voided/refunded, or was modified concurrently)");
+    }
+
+    // A void means the money wasn't really spent -- total_spent is corrected
+    // back out. purchase_count/last_purchase_at deliberately do NOT move: the
+    // purchase still happened as an event, it's only the balance that's wrong
+    // now (same distinction debt_balance's write-off correction already
+    // draws against total_debts staying untouched).
+    if (sale.customer_id) {
+      await tx.customers.updateMany({
+        where: { id: sale.customer_id },
+        data: { total_spent: { decrement: sale.total }, last_activity_at: new Date() },
+      });
     }
 
     // Restore inventory using the sale's own immutable item snapshot -- never
@@ -487,6 +528,7 @@ export async function refundSale(saleId: string, input: RefundSaleInput, actor: 
         branch_id: sale.branch_id,
         cashier_id: actor.userId,
         customer_phone: sale.customer_phone,
+        customer_id: sale.customer_id,
         items: sale.items as unknown as Prisma.InputJsonValue,
         subtotal: sale.subtotal.negated(),
         discount: sale.discount.negated(),
@@ -501,6 +543,17 @@ export async function refundSale(saleId: string, input: RefundSaleInput, actor: 
         refund_of_sale_id: sale.id,
       },
     });
+
+    // reversal.total is already negated -- incrementing by it naturally nets
+    // total_spent back down by the refunded amount. No fresh customer lookup
+    // here: customer_id is copied straight from the original sale above,
+    // never re-derived from customer_phone.
+    if (reversal.customer_id) {
+      await tx.customers.updateMany({
+        where: { id: reversal.customer_id },
+        data: { total_spent: { increment: reversal.total }, last_activity_at: new Date() },
+      });
+    }
 
     // No refund_reason column exists (unlike Void's void_reason) -- the
     // AuditLog's own required `reason` is this repo's canonical "why" record,

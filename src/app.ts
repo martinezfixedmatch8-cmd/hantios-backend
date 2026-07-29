@@ -14,6 +14,7 @@ import debtRoutes from "./routes/debt.routes";
 import expenseRoutes from "./routes/expense.routes";
 import expenseCategoryRoutes from "./routes/expenseCategory.routes";
 import tagRoutes from "./routes/tag.routes";
+import customerRoutes from "./routes/customer.routes";
 import { notFoundHandler, errorHandler } from "./middleware/errorHandler";
 
 export const app = express();
@@ -42,6 +43,7 @@ app.use("/debts", debtRoutes);
 app.use("/expenses", expenseRoutes);
 app.use("/expense-categories", expenseCategoryRoutes);
 app.use("/tags", tagRoutes);
+app.use("/customers", customerRoutes);
 
 app.use(notFoundHandler);
 app.use(errorHandler);

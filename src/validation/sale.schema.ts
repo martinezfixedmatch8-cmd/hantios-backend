@@ -22,6 +22,10 @@ export const createSaleSchema = z
   .object({
     branchId: z.string().uuid(),
     customerPhone: z.string().trim().min(1).max(30).optional(),
+    // Module 05: mirrors Debt's own customerName field -- without it, every
+    // customer auto-provisioned via a Sale would be permanently stuck with a
+    // null name until manually edited through PATCH /customers/:id.
+    customerName: z.string().trim().min(1).max(200).optional(),
     paymentMethodId: z.string().uuid().optional(),
     paymentReference: z.string().trim().min(1).max(200).optional(),
     discount: discountSchema.optional(),

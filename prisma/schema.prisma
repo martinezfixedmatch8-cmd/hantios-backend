@@ -109,6 +109,7 @@ model businesses {
   users_businesses_owner_idTousers    users?                  @relation("businesses_owner_idTousers", fields: [owner_id], references: [id])
   categories                          categories[]
   customers                           customers[]
+  customer_counters                   customer_counters?
   debts                               debts[]
   debt_payments                       debt_payments[]
   debt_reminders                      debt_reminders[]
@@ -149,24 +150,81 @@ model categories {
   @@index([business_id])
 }
 
+/// Module 05 (Customer Records): (business_id, phone_normalized) uniqueness
+/// only applies to ACTIVE customers -- Prisma has no partial/filtered unique
+/// index syntax, so that constraint lives only in migration SQL (a raw
+/// CREATE UNIQUE INDEX ... WHERE status = 'active'), not as an @@unique
+/// below. `prisma db pull` will re-introspect it as a comment noting it
+/// can't be represented -- expected, same class of gap as this schema's
+/// existing hand-added CHECK constraints. Do not "fix" that by adding a
+/// plain @@unique here; that would forbid reusing a phone number an
+/// archived customer still holds, which is explicitly allowed.
 model customers {
-  id           String       @id
-  business_id  String
-  phone        String
-  name         String?
-  email        String?
-  total_spent  Decimal      @default(0) @db.Decimal(14, 2)
+  id               String       @id
+  business_id      String
+  // CUS-000001, sequential per business, immutable, never reused -- mirrors
+  // expenseNumber.ts exactly (no year dimension). See customerNumber.ts.
+  customer_number  String
+  // phone_original: raw, as-entered, display-only, never used for lookups.
+  // phone_normalized: E.164 via libphonenumber-js -- the only field
+  // uniqueness/search/find-or-create ever key off.
+  phone_original   String
+  phone_normalized String
+  name             String?
+  email            String?
+  notes            String?
+  // Derived caches, same trust model as debt_balance below -- never
+  // authoritative, always recalculable from sales/debts/debt_payments.
+  // total_spent/debt_balance are money balances, corrected on
+  // void/refund/reversal/write-off. purchase_count/total_debts/
+  // total_payments are lifetime event counters -- they only ever increment
+  // on a genuine new occurrence (sale created, debt created, payment
+  // recorded) and are never touched by a later void/refund/reversal/
+  // write-off, since the event itself still happened even if its balance
+  // impact was later corrected.
+  total_spent      Decimal      @default(0) @db.Decimal(14, 2)
+  purchase_count   Int          @default(0)
+  total_debts      Int          @default(0)
+  total_payments   Int          @default(0)
+  last_purchase_at DateTime?
+  last_debt_at     DateTime?
+  last_payment_at  DateTime?
+  // The occurred-at of the most recent event touching this customer across
+  // Sales (create/void/refund) and Debts (create/payment/reversal/write-off)
+  // -- only ever moves forward, never decremented.
+  last_activity_at DateTime?
   // Derived cache only, kept in sync for cheap reads (CRM dashboards, customer
   // lists, search) -- debts/debt_payments are always the source of truth. If
   // this is ever found to have drifted, recalculate it from those two tables;
   // never trust it over them.
-  debt_balance Decimal      @default(0) @db.Decimal(14, 2)
-  status       RecordStatus @default(active)
-  created_at   DateTime     @default(now())
-  businesses   businesses   @relation(fields: [business_id], references: [id])
-  debts        debts[]
+  debt_balance     Decimal      @default(0) @db.Decimal(14, 2)
+  status           RecordStatus @default(active)
+  archived_reason  String?
+  version          Int          @default(0)
+  created_at       DateTime     @default(now())
+  updated_at       DateTime     @updatedAt
+  businesses       businesses   @relation(fields: [business_id], references: [id])
+  debts            debts[]
+  sales            sales[]
 
-  @@unique([business_id, phone])
+  @@unique([business_id, customer_number])
+  // Plain, non-partial -- backs search/lookup across BOTH active and
+  // archived rows (archived customers stay fully searchable). The partial
+  // unique index that actually enforces active-only uniqueness is raw SQL,
+  // hand-added to the migration -- it cannot appear as an @@index here.
+  @@index([business_id, phone_normalized])
+  @@index([business_id, name])
+  @@index([business_id, last_activity_at])
+  @@index([business_id, debt_balance])
+}
+
+// Customer Number sequence (Module 05) -- mirrors expense_counters exactly,
+// no year dimension.
+model customer_counters {
+  id          String     @id
+  business_id String     @unique
+  last_number Int        @default(0)
+  businesses  businesses @relation(fields: [business_id], references: [id])
 }
 
 /// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
@@ -682,6 +740,11 @@ model sales {
   branch_id                       String
   cashier_id                      String
   customer_phone                  String?
+  // Module 05: real relationship key (never phone, per the merge-ready
+  // architecture requirement) -- nullable, since customerPhone itself stays
+  // optional. Populated via the shared findOrCreateCustomer whenever a sale
+  // is created with a customerPhone; null forever for anonymous sales.
+  customer_id                     String?
   items                           Json
   subtotal                        Decimal                 @db.Decimal(14, 2)
   discount                        Decimal                 @default(0) @db.Decimal(14, 2)
@@ -708,11 +771,13 @@ model sales {
   payment_methods                 payment_methods?        @relation(fields: [payment_method_id], references: [id])
   sales                           sales?                  @relation("salesTosales", fields: [refund_of_sale_id], references: [id])
   other_sales                     sales[]                 @relation("salesTosales")
+  customers                       customers?              @relation(fields: [customer_id], references: [id])
 
   @@index([business_id, branch_id])
   @@index([business_id])
   @@index([business_id, status])
   @@index([business_id, timestamp])
+  @@index([customer_id])
 }
 
 model sessions {

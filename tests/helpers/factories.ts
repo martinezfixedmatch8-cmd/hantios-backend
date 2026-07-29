@@ -218,6 +218,29 @@ export async function createTestCategory(businessId: string, overrides: Partial<
   });
 }
 
+export async function createTestCustomer(
+  businessId: string,
+  overrides: Partial<{ phone: string; phoneNormalized: string; name: string; email: string; status: "active" | "archived" }> = {}
+) {
+  const phone = overrides.phone ?? `+2547${Math.floor(10000000 + Math.random() * 89999999)}`;
+  return prisma.customers.create({
+    data: {
+      id: generateId(),
+      business_id: businessId,
+      // Bypasses the real customer_counters sequence for factory convenience
+      // (matching how createTestProduct/etc. don't drive through their own
+      // real service functions either) -- never asserted against in tests
+      // that actually exercise the real numbering sequence themselves.
+      customer_number: `CUS-TEST-${randomUUID().slice(0, 8)}`,
+      phone_original: phone,
+      phone_normalized: overrides.phoneNormalized ?? phone,
+      name: overrides.name,
+      email: overrides.email,
+      status: overrides.status ?? "active",
+    },
+  });
+}
+
 export async function createTestBranchInventory(
   businessId: string,
   branchId: string,
