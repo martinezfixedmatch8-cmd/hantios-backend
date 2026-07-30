@@ -210,7 +210,7 @@ describe("Purchase Orders", () => {
       expect(res.status).toBe(404);
     });
 
-    it("rejects a product from a different business", async () => {
+    it("rejects a product from a different business (404, consistent with supplier/branch)", async () => {
       const otherOwner = await signupTestOwner();
       businessIds.push(otherOwner.businessId);
       const otherProduct = await createTestProduct(otherOwner.businessId);
@@ -221,7 +221,20 @@ describe("Purchase Orders", () => {
         .set("Authorization", `Bearer ${ownerToken}`)
         .set("Idempotency-Key", idemKey())
         .send(poPayload(supplier.id, otherProduct.id, { items: [{ productId: otherProduct.id, quantityOrdered: 1, unitCostSnapshot: 10 }] }));
-      expect([400, 404]).toContain(res.status);
+      expect(res.status).toBe(404);
+    });
+
+    it("rejects a cross-business product on PATCH while still DRAFT (404)", async () => {
+      const otherOwner = await signupTestOwner();
+      businessIds.push(otherOwner.businessId);
+      const otherProduct = await createTestProduct(otherOwner.businessId);
+      const { po } = await createDraftPo();
+
+      const res = await request(app)
+        .patch(`/purchase-orders/${po.id}`)
+        .set("Authorization", `Bearer ${ownerToken}`)
+        .send({ version: po.version, items: [{ productId: otherProduct.id, quantityOrdered: 1, unitCostSnapshot: 10 }] });
+      expect(res.status).toBe(404);
     });
   });
 

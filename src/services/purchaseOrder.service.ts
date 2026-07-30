@@ -1,7 +1,7 @@
 import { Prisma } from "@prisma/client";
 import { prisma } from "../lib/prisma";
 import { generateId } from "../lib/ids";
-import { getOwned } from "../lib/ownership";
+import { assertOwned, getOwned } from "../lib/ownership";
 import { writeAuditLog } from "../lib/auditLog";
 import { resolveListQuery, paginate } from "../lib/pagination";
 import { badRequest, conflict } from "../lib/errors";
@@ -50,9 +50,14 @@ interface ResolvedLine {
 }
 
 // Shared by create and PATCH-while-DRAFT's item replacement. Validates every
-// line's product belongs to the same business and is active (mirrors
-// createSale's identical per-line validation), computes each line's total,
-// and returns the resolved rows ready to insert plus the summed PO total.
+// line's product belongs to the same business (via assertOwned, same
+// same-404-either-way guarantee as the module's own supplier/branch checks
+// -- kept consistent within Purchase Orders even though Sales' own
+// analogous batch-fetch check still returns 400 for a missing/cross-
+// business product; fixing that asymmetry in Sales is a separate, later
+// exercise, not bundled into this module) and is active, computes each
+// line's total, and returns the resolved rows ready to insert plus the
+// summed PO total.
 //
 // unitCostSnapshot is interpreted as the NEGOTIATED purchase price the
 // business is agreeing to pay this supplier for this order -- client-
@@ -77,10 +82,7 @@ async function resolveLineItems(
 
   let total = new Prisma.Decimal(0);
   const lines: ResolvedLine[] = items.map((item) => {
-    const product = productMap.get(item.productId);
-    if (!product) {
-      throw badRequest(`Product ${item.productId} was not found`);
-    }
+    const product = assertOwned(productMap.get(item.productId), businessId, "Product");
     if (product.status !== "active") {
       throw badRequest(`Product "${product.name}" is archived`);
     }
