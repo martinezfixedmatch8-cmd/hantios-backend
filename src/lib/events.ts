@@ -64,6 +64,19 @@ export interface DomainEventPayloads {
   CustomerCreated: { businessId: string; customerId: string; customerNumber: string; phone: string; occurredAt: string };
   CustomerUpdated: { businessId: string; customerId: string; customerNumber: string; phone: string; occurredAt: string };
   CustomerArchived: { businessId: string; customerId: string; customerNumber: string; phone: string; occurredAt: string };
+  // Module 11 (Purchase Orders) prerequisite. No SupplierRestored -- same
+  // Created/Updated/Archived-only asymmetry as Customer Records.
+  SupplierCreated: { businessId: string; supplierId: string; name: string; occurredAt: string };
+  SupplierUpdated: { businessId: string; supplierId: string; name: string; occurredAt: string };
+  SupplierArchived: { businessId: string; supplierId: string; name: string; occurredAt: string };
+  // Module 11 (Purchase Orders) core. No PurchaseOrderUpdated event -- the
+  // locked spec's audit-action list (5: Created/Sent/Confirmed/Updated/
+  // Cancelled) and domain-event list (4: no Updated) intentionally differ in
+  // count; PO Updated is audit-log-only, matching that literal asymmetry.
+  PurchaseOrderCreated: { businessId: string; purchaseOrderId: string; poNumber: string; supplierId: string; totalExpectedValue: string };
+  PurchaseOrderSent: { businessId: string; purchaseOrderId: string; poNumber: string };
+  PurchaseOrderConfirmed: { businessId: string; purchaseOrderId: string; poNumber: string };
+  PurchaseOrderCancelled: { businessId: string; purchaseOrderId: string; poNumber: string; reason: string };
 }
 
 export type DomainEventName = keyof DomainEventPayloads;

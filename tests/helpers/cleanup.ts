@@ -49,6 +49,12 @@ export async function cleanupTestBusiness(businessId: string): Promise<void> {
   await prisma.expense_counters.deleteMany({ where: { business_id: businessId } });
   await prisma.customer_counters.deleteMany({ where: { business_id: businessId } });
   await prisma.tags.deleteMany({ where: { business_id: businessId } });
+  // purchase_order_items FKs to products/purchase_orders -- delete before both.
+  // purchase_orders FKs to branches/suppliers/users -- delete before all three.
+  await prisma.purchase_order_items.deleteMany({ where: { business_id: businessId } });
+  await prisma.purchase_orders.deleteMany({ where: { business_id: businessId } });
+  await prisma.po_counters.deleteMany({ where: { business_id: businessId } });
+  await prisma.suppliers.deleteMany({ where: { business_id: businessId } });
   await prisma.branch_inventory.deleteMany({ where: { business_id: businessId } });
   await prisma.warehouse_stock.deleteMany({ where: { business_id: businessId } });
   await prisma.products.deleteMany({ where: { business_id: businessId } });

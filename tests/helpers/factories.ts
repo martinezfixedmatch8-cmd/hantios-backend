@@ -241,6 +241,22 @@ export async function createTestCustomer(
   });
 }
 
+export async function createTestSupplier(
+  businessId: string,
+  overrides: Partial<{ name: string; phone: string; email: string; status: "active" | "archived" }> = {}
+) {
+  return prisma.suppliers.create({
+    data: {
+      id: generateId(),
+      business_id: businessId,
+      name: overrides.name ?? `Test Supplier ${randomUUID()}`,
+      phone: overrides.phone,
+      email: overrides.email,
+      status: overrides.status ?? "active",
+    },
+  });
+}
+
 export async function createTestBranchInventory(
   businessId: string,
   branchId: string,

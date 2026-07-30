@@ -71,6 +71,7 @@ model branches {
   debts                            debts[]
   expenses                         expenses[]
   inventory_adjustments            inventory_adjustments[]
+  purchase_orders                  purchase_orders[]
   sales                            sales[]
   users_users_branch_idTobranches  users[]                 @relation("users_branch_idTobranches")
 
@@ -127,10 +128,14 @@ model businesses {
   payment_methods                     payment_methods[]
   price_history                       price_history[]
   products                            products[]
+  purchase_orders                     purchase_orders[]
+  purchase_order_items                purchase_order_items[]
+  po_counters                         po_counters?
   receipt_counters                    receipt_counters[]
   sales                               sales[]
   sessions                            sessions[]
   staff_invites                       staff_invites[]
+  suppliers                           suppliers[]
   users_users_business_idTobusinesses users[]                 @relation("users_business_idTobusinesses")
   warehouse_stock                     warehouse_stock[]
   warehouses                          warehouses?
@@ -724,6 +729,7 @@ model products {
   price_history         price_history[]
   businesses            businesses              @relation(fields: [business_id], references: [id])
   categories            categories?             @relation(fields: [category_id], references: [id])
+  purchase_order_items  purchase_order_items[]
   warehouse_stock       warehouse_stock[]
 
   @@index([business_id, barcode])
@@ -731,6 +737,123 @@ model products {
   @@index([business_id])
   @@index([business_id, sku])
   @@index([business_id, status])
+}
+
+// Module 11 (Purchase Orders) prerequisite -- built as a full module this
+// session (not a bare table) per explicit decision: no dedup/uniqueness
+// constraint on phone/name (nothing in the spec asked for supplier dedup,
+// unlike Customers' phone-uniqueness requirement), no supplier-number
+// sequence (not requested).
+model suppliers {
+  id              String            @id
+  business_id     String
+  name            String
+  phone           String?
+  email           String?
+  notes           String?
+  status          RecordStatus      @default(active)
+  archived_reason String?
+  version         Int               @default(0)
+  created_at      DateTime          @default(now())
+  updated_at      DateTime          @updatedAt
+  businesses      businesses        @relation(fields: [business_id], references: [id])
+  purchase_orders purchase_orders[]
+
+  @@index([business_id, status])
+  @@index([business_id, name])
+}
+
+enum PurchaseOrderStatus {
+  draft
+  sent
+  confirmed
+  // Unreachable by any code path this session -- schema-only forward
+  // compatibility for Session B (GRN), same precedent as
+  // ExpenseWorkflowStatus shipping "draft" unreachable for an entire
+  // session before a later one made it reachable.
+  partially_received
+  received
+  paid
+  cancelled
+}
+
+/// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
+model purchase_orders {
+  id                      String                 @id
+  business_id             String
+  branch_id               String?
+  supplier_id             String
+  // Captured once at creation from the supplier's live values at that
+  // moment (and re-captured on any supplierId change while still DRAFT) --
+  // a later edit to the live Supplier record must never retroactively
+  // change a historical PO. Same principle as costPriceAtSale on Sales.
+  supplier_name_snapshot  String
+  supplier_phone_snapshot String?
+  supplier_email_snapshot String?
+  // PO-000001, sequential per business, immutable, never reused -- mirrors
+  // customerNumber.ts/expenseNumber.ts exactly. See purchaseOrderNumber.ts.
+  po_number               String
+  status                  PurchaseOrderStatus    @default(draft)
+  // Fields only, no calculation logic (Module 19's job, not built here) --
+  // same "snapshot now, convert later" boundary Expenses' own currency
+  // snapshot already established.
+  currency_code           String
+  exchange_rate           Decimal?               @db.Decimal(14, 6)
+  // Derived cache, recomputed and re-persisted at the one place it's
+  // actually written (create, and PATCH-while-DRAFT when items are
+  // replaced) -- never client-supplied, never trusted blindly, same
+  // pattern as customers.total_spent/debts.amount_remaining.
+  total_expected_value    Decimal                @db.Decimal(14, 2)
+  cancel_reason           String?
+  version                 Int                    @default(0)
+  created_by              String
+  created_at              DateTime               @default(now())
+  updated_at              DateTime               @updatedAt
+  businesses              businesses             @relation(fields: [business_id], references: [id])
+  branches                branches?              @relation(fields: [branch_id], references: [id])
+  suppliers               suppliers              @relation(fields: [supplier_id], references: [id])
+  users                   users                  @relation(fields: [created_by], references: [id])
+  purchase_order_items    purchase_order_items[]
+
+  @@unique([business_id, po_number])
+  @@index([business_id, status])
+  @@index([business_id])
+  @@index([supplier_id])
+}
+
+/// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
+model purchase_order_items {
+  id                    String          @id
+  business_id           String
+  purchase_order_id     String
+  product_id            String
+  // Captured once at creation from the product's live values at that
+  // moment -- a later Product price/name change must never retroactively
+  // change a historical PO line item. Same principle as costPriceAtSale.
+  product_name_snapshot String
+  sku_snapshot          String?
+  quantity_ordered      Decimal         @db.Decimal(14, 2)
+  unit_cost_snapshot    Decimal         @db.Decimal(14, 2)
+  // Stored, computed once at write time (quantityOrdered x unitCostSnapshot)
+  // -- mirrors Sales' own stored lineSubtotal precedent rather than
+  // deriving it lazily on every read.
+  line_total            Decimal         @db.Decimal(14, 2)
+  created_at            DateTime        @default(now())
+  purchase_orders       purchase_orders @relation(fields: [purchase_order_id], references: [id])
+  businesses            businesses      @relation(fields: [business_id], references: [id])
+  products              products        @relation(fields: [product_id], references: [id])
+
+  @@index([business_id])
+  @@index([purchase_order_id])
+}
+
+// Purchase Order Number sequence -- mirrors customer_counters/
+// expense_counters exactly, no year dimension.
+model po_counters {
+  id          String     @id
+  business_id String     @unique
+  last_number Int        @default(0)
+  businesses  businesses @relation(fields: [business_id], references: [id])
 }
 
 /// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
@@ -868,6 +991,7 @@ model users {
   otp_challenges                                otp_challenges[]
   password_history                              password_history[]
   price_history                                 price_history[]
+  purchase_orders                               purchase_orders[]
   sales_sales_cashier_idTousers                 sales[]                 @relation("sales_cashier_idTousers")
   sales_sales_confirmed_byTousers               sales[]                 @relation("sales_confirmed_byTousers")
   sessions                                      sessions[]
