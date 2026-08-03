@@ -1169,6 +1169,19 @@ model warehouse_stock {
   business_id  String
   warehouse_id String
   product_id   String
+  // GOTCHA, deliberate departure from branch_inventory's own convention:
+  // "no size" is stored as an EMPTY STRING (""), never NULL, even though
+  // this column is still nullable at the type level. Postgres does not
+  // treat NULL as equal to NULL for uniqueness, so @@unique([warehouse_id,
+  // product_id, size]) below can never fire on NULL, silently allowing
+  // duplicate rows under concurrent writes (confirmed live, Module 11
+  // Session B) -- "" makes the constraint a real guard. Every current
+  // reader/writer (src/lib/warehouseStock.ts's recordWarehouseMovement,
+  // the sole choke point for this table) already follows this. Any FUTURE
+  // code that reads or writes this table directly -- a Stock Count/Reports
+  // Center list endpoint, a manual DB script, anything bypassing
+  // recordWarehouseMovement -- MUST do the same: query/compare against ""
+  // for "no size," never `null`, or rows will silently stop matching.
   size         String?
   quantity     Decimal    @default(0) @db.Decimal(14, 2)
   // Free-text display override, kept alongside the discrete fields below
