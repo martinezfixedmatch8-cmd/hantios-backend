@@ -74,14 +74,15 @@ model branches {
   purchase_orders                  purchase_orders[]
   sales                            sales[]
   users_users_branch_idTobranches  users[]                 @relation("users_branch_idTobranches")
+  warehouse_movements              warehouse_movements[]
 
   @@index([business_id])
 }
 
 model businesses {
-  id                                  String                  @id
+  id                                  String                    @id
   name                                String
-  owner_id                            String?                 @unique
+  owner_id                            String?                   @unique
   plan                                String
   tier                                String
   country                             String
@@ -94,20 +95,20 @@ model businesses {
   // time-of-day is >= 00:00:00). business_day_end_time is stored for future use
   // (Daily Reports/Cash Closing/Shift Closing) but not yet read by Void/Refund --
   // those only need the rolling-24h start boundary, see src/lib/businessTime.ts.
-  business_day_start_time             DateTime                @default(dbgenerated("'00:00:00'::time")) @db.Time
-  business_day_end_time               DateTime                @default(dbgenerated("'23:59:59'::time")) @db.Time
+  business_day_start_time             DateTime                  @default(dbgenerated("'00:00:00'::time")) @db.Time
+  business_day_end_time               DateTime                  @default(dbgenerated("'23:59:59'::time")) @db.Time
   currency                            String
-  decimal_places                      Int                     @default(2)
-  language                            String                  @default("en")
-  fiscal_year_start_month             Int                     @default(1)
-  fiscal_year_start_day               Int                     @default(1)
-  settings                            Json                    @default("{}")
-  created_at                          DateTime                @default(now())
-  updated_at                          DateTime                @updatedAt
+  decimal_places                      Int                       @default(2)
+  language                            String                    @default("en")
+  fiscal_year_start_month             Int                       @default(1)
+  fiscal_year_start_day               Int                       @default(1)
+  settings                            Json                      @default("{}")
+  created_at                          DateTime                  @default(now())
+  updated_at                          DateTime                  @updatedAt
   audit_logs                          audit_logs[]
   branch_inventory                    branch_inventory[]
   branches                            branches[]
-  users_businesses_owner_idTousers    users?                  @relation("businesses_owner_idTousers", fields: [owner_id], references: [id])
+  users_businesses_owner_idTousers    users?                    @relation("businesses_owner_idTousers", fields: [owner_id], references: [id])
   categories                          categories[]
   customers                           customers[]
   customer_counters                   customer_counters?
@@ -121,6 +122,8 @@ model businesses {
   expense_attachments                 expense_attachments[]
   expense_recurrence                  expense_recurrence[]
   tags                                tags[]
+  goods_received_notes                goods_received_notes[]
+  grn_counters                        grn_counters?
   idempotency_keys                    idempotency_keys[]
   inventory_adjustments               inventory_adjustments[]
   login_events                        login_events[]
@@ -130,15 +133,19 @@ model businesses {
   products                            products[]
   purchase_orders                     purchase_orders[]
   purchase_order_items                purchase_order_items[]
+  purchase_order_payments             purchase_order_payments[]
   po_counters                         po_counters?
   receipt_counters                    receipt_counters[]
   sales                               sales[]
   sessions                            sessions[]
   staff_invites                       staff_invites[]
   suppliers                           suppliers[]
-  users_users_business_idTobusinesses users[]                 @relation("users_business_idTobusinesses")
+  users_users_business_idTobusinesses users[]                   @relation("users_business_idTobusinesses")
   warehouse_stock                     warehouse_stock[]
+  warehouse_movements                 warehouse_movements[]
   warehouses                          warehouses?
+  wsm_counters                        wsm_counters?
+  goods_received_items                goods_received_items[]
 }
 
 model categories {
@@ -398,7 +405,7 @@ model debt_transactions {
 // table's `status`, which stays archive/restore only).
 /// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
 model expenses {
-  id                                String                @id
+  id                                String                    @id
   business_id                       String
   branch_id                         String?
   scope                             ExpenseScope
@@ -406,7 +413,7 @@ model expenses {
   // Snapshot, same reasoning as debts.customer_name -- historical accuracy
   // even if the category is later renamed.
   category_name                     String
-  amount                            Decimal               @db.Decimal(14, 2)
+  amount                            Decimal                   @db.Decimal(14, 2)
   // Snapshotted from Business.currency (+ src/lib/currencyReference.ts's
   // getCurrency()) at creation time, same pattern as costPriceAtSale --
   // fields only, no conversion logic (Module 19's job).
@@ -416,28 +423,38 @@ model expenses {
   // currency snapshot above: manually entered per expense, never derived
   // from amount/rate or vice versa. A real Tax Engine (auto-calculation,
   // tax-code lookup) is a later phase's job, not built here.
-  tax_amount                        Decimal?              @db.Decimal(14, 2)
-  tax_rate                          Decimal?              @db.Decimal(5, 2)
+  tax_amount                        Decimal?                  @db.Decimal(14, 2)
+  tax_rate                          Decimal?                  @db.Decimal(5, 2)
   tax_included                      Boolean?
   payment_method_id                 String?
   // "When it happened" (renamed from the old `date` column) vs recorded_at
   // "when entered" -- two separate fields, per spec.
-  expense_date                      DateTime              @db.Date
-  recorded_at                       DateTime              @default(now())
+  expense_date                      DateTime                  @db.Date
+  recorded_at                       DateTime                  @default(now())
   // NOT a real FK yet -- no vendors/suppliers table exists anywhere in this
   // schema (confirmed). Becomes a real relation once that module ships.
   vendor_id                         String?
   vendor_name                       String?
   reference_number                  String?
+  // Module 11 Session B -- real FK + plain string snapshots, populated only
+  // when this Expense was auto-created by a PO payment (createExpenseInTransaction).
+  // po_number/grn_number are snapshots (never a live join requirement), same
+  // "self-contained audit record" principle as every other snapshot field in
+  // this schema. grn_number is a comma-joined list when multiple GRNs had
+  // been received against the PO by the time payment was recorded -- a
+  // payment is PO-scoped, not GRN-scoped, so there's no single GRN to name.
+  purchase_order_id                 String?
+  po_number                         String?
+  grn_number                        String?
   description                       String?
   notes                             String?
-  source                            ExpenseSource         @default(manual)
+  source                            ExpenseSource             @default(manual)
   // Session 5B: workflow_status is the sole source of truth for "is this
   // recurring" going forward -- an expense_recurrence row referencing this
   // expense as its template answers that, structurally, so the old
   // recurring/recurrence_rule (free-text) fields were dropped rather than
   // kept alongside the new table (confirmed zero live rows before dropping).
-  workflow_status                   ExpenseWorkflowStatus @default(pending)
+  workflow_status                   ExpenseWorkflowStatus     @default(pending)
   approved_by                       String?
   approved_at                       DateTime?
   rejected_by                       String?
@@ -451,25 +468,27 @@ model expenses {
   // (caught by the cross-business test suite): the second business's first
   // expense would collide with the first business's own "EXP-000001".
   expense_number                    String
-  version                           Int                   @default(0)
-  status                            RecordStatus          @default(active)
+  version                           Int                       @default(0)
+  status                            RecordStatus              @default(active)
   archived_reason                   String?
-  created_at                        DateTime              @default(now())
-  businesses                        businesses            @relation(fields: [business_id], references: [id])
-  branches                          branches?             @relation(fields: [branch_id], references: [id])
-  expense_categories                expense_categories    @relation(fields: [category_id], references: [id])
-  payment_methods                   payment_methods?      @relation(fields: [payment_method_id], references: [id])
+  created_at                        DateTime                  @default(now())
+  businesses                        businesses                @relation(fields: [business_id], references: [id])
+  branches                          branches?                 @relation(fields: [branch_id], references: [id])
+  expense_categories                expense_categories        @relation(fields: [category_id], references: [id])
+  payment_methods                   payment_methods?          @relation(fields: [payment_method_id], references: [id])
+  purchase_orders                   purchase_orders?          @relation(fields: [purchase_order_id], references: [id])
   // Four distinct relations to `users` now (created/approved/rejected/paid)
   // -- Prisma requires every one of them named once a model has more than
   // one relation to the same target, same shape sales.confirmed_by already
   // established (users_sales_confirmed_byTousers).
-  users_expenses_created_byTousers  users                 @relation("expenses_created_byTousers", fields: [created_by], references: [id])
-  users_expenses_approved_byTousers users?                @relation("expenses_approved_byTousers", fields: [approved_by], references: [id])
-  users_expenses_rejected_byTousers users?                @relation("expenses_rejected_byTousers", fields: [rejected_by], references: [id])
-  users_expenses_paid_byTousers     users?                @relation("expenses_paid_byTousers", fields: [paid_by], references: [id])
+  users_expenses_created_byTousers  users                     @relation("expenses_created_byTousers", fields: [created_by], references: [id])
+  users_expenses_approved_byTousers users?                    @relation("expenses_approved_byTousers", fields: [approved_by], references: [id])
+  users_expenses_rejected_byTousers users?                    @relation("expenses_rejected_byTousers", fields: [rejected_by], references: [id])
+  users_expenses_paid_byTousers     users?                    @relation("expenses_paid_byTousers", fields: [paid_by], references: [id])
   expense_attachments               expense_attachments[]
   expense_recurrence                expense_recurrence?
   expense_tags                      expense_tags[]
+  purchase_order_payments           purchase_order_payments[]
 
   @@unique([business_id, expense_number])
   @@index([business_id, branch_id])
@@ -477,6 +496,7 @@ model expenses {
   @@index([business_id, expense_date])
   @@index([business_id, workflow_status])
   @@index([business_id])
+  @@index([purchase_order_id])
 }
 
 model expense_categories {
@@ -730,7 +750,9 @@ model products {
   businesses            businesses              @relation(fields: [business_id], references: [id])
   categories            categories?             @relation(fields: [category_id], references: [id])
   purchase_order_items  purchase_order_items[]
+  goods_received_items  goods_received_items[]
   warehouse_stock       warehouse_stock[]
+  warehouse_movements   warehouse_movements[]
 
   @@index([business_id, barcode])
   @@index([business_id, created_at])
@@ -767,19 +789,35 @@ enum PurchaseOrderStatus {
   draft
   sent
   confirmed
-  // Unreachable by any code path this session -- schema-only forward
-  // compatibility for Session B (GRN), same precedent as
-  // ExpenseWorkflowStatus shipping "draft" unreachable for an entire
-  // session before a later one made it reachable.
   partially_received
   received
-  paid
+  // No "paid" value (Module 11 Session B correction) -- payment is an
+  // orthogonal fact tracked by the separate PurchaseOrderPaymentStatus/
+  // payment_status below, not a step in this receiving lifecycle. A PO can
+  // be `received` (fulfillment complete) while `payment_status: partially_paid`
+  // (money side incomplete) simultaneously, which one combined enum could
+  // never express -- same "never track one fact two ways" principle that
+  // already dropped Debts' redundant `disputed` boolean and Expenses'
+  // redundant `recurring` boolean. Session A shipped `paid` here with zero
+  // live rows ever using it; safe to remove outright rather than leave a
+  // permanently-dead, confusing value.
   cancelled
+}
+
+enum PurchaseOrderPaymentStatus {
+  unpaid
+  partially_paid
+  paid
+}
+
+enum ThreeWayMatchStatus {
+  matched
+  match_failed
 }
 
 /// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
 model purchase_orders {
-  id                      String                 @id
+  id                      String                     @id
   business_id             String
   branch_id               String?
   supplier_id             String
@@ -793,37 +831,49 @@ model purchase_orders {
   // PO-000001, sequential per business, immutable, never reused -- mirrors
   // customerNumber.ts/expenseNumber.ts exactly. See purchaseOrderNumber.ts.
   po_number               String
-  status                  PurchaseOrderStatus    @default(draft)
+  status                  PurchaseOrderStatus        @default(draft)
   // Fields only, no calculation logic (Module 19's job, not built here) --
   // same "snapshot now, convert later" boundary Expenses' own currency
   // snapshot already established.
   currency_code           String
-  exchange_rate           Decimal?               @db.Decimal(14, 6)
+  exchange_rate           Decimal?                   @db.Decimal(14, 6)
   // Derived cache, recomputed and re-persisted at the one place it's
   // actually written (create, and PATCH-while-DRAFT when items are
   // replaced) -- never client-supplied, never trusted blindly, same
   // pattern as customers.total_spent/debts.amount_remaining.
-  total_expected_value    Decimal                @db.Decimal(14, 2)
+  total_expected_value    Decimal                    @db.Decimal(14, 2)
   cancel_reason           String?
-  version                 Int                    @default(0)
+  // Module 11 Session B -- orthogonal to `status` (see PurchaseOrderStatus's
+  // own comment on why "paid" was removed from that enum). remaining_amount
+  // is set to total_expected_value at creation (nothing owed until paid) and
+  // recomputed at the one place it's written (payPurchaseOrder), same
+  // derived-cache pattern as total_expected_value itself.
+  payment_status          PurchaseOrderPaymentStatus @default(unpaid)
+  paid_amount             Decimal                    @default(0) @db.Decimal(14, 2)
+  remaining_amount        Decimal                    @db.Decimal(14, 2)
+  version                 Int                        @default(0)
   created_by              String
-  created_at              DateTime               @default(now())
-  updated_at              DateTime               @updatedAt
-  businesses              businesses             @relation(fields: [business_id], references: [id])
-  branches                branches?              @relation(fields: [branch_id], references: [id])
-  suppliers               suppliers              @relation(fields: [supplier_id], references: [id])
-  users                   users                  @relation(fields: [created_by], references: [id])
+  created_at              DateTime                   @default(now())
+  updated_at              DateTime                   @updatedAt
+  businesses              businesses                 @relation(fields: [business_id], references: [id])
+  branches                branches?                  @relation(fields: [branch_id], references: [id])
+  suppliers               suppliers                  @relation(fields: [supplier_id], references: [id])
+  users                   users                      @relation(fields: [created_by], references: [id])
   purchase_order_items    purchase_order_items[]
+  goods_received_notes    goods_received_notes[]
+  purchase_order_payments purchase_order_payments[]
+  expenses                expenses[]
 
   @@unique([business_id, po_number])
   @@index([business_id, status])
+  @@index([business_id, payment_status])
   @@index([business_id])
   @@index([supplier_id])
 }
 
 /// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
 model purchase_order_items {
-  id                    String          @id
+  id                    String                 @id
   business_id           String
   purchase_order_id     String
   product_id            String
@@ -832,16 +882,17 @@ model purchase_order_items {
   // change a historical PO line item. Same principle as costPriceAtSale.
   product_name_snapshot String
   sku_snapshot          String?
-  quantity_ordered      Decimal         @db.Decimal(14, 2)
-  unit_cost_snapshot    Decimal         @db.Decimal(14, 2)
+  quantity_ordered      Decimal                @db.Decimal(14, 2)
+  unit_cost_snapshot    Decimal                @db.Decimal(14, 2)
   // Stored, computed once at write time (quantityOrdered x unitCostSnapshot)
   // -- mirrors Sales' own stored lineSubtotal precedent rather than
   // deriving it lazily on every read.
-  line_total            Decimal         @db.Decimal(14, 2)
-  created_at            DateTime        @default(now())
-  purchase_orders       purchase_orders @relation(fields: [purchase_order_id], references: [id])
-  businesses            businesses      @relation(fields: [business_id], references: [id])
-  products              products        @relation(fields: [product_id], references: [id])
+  line_total            Decimal                @db.Decimal(14, 2)
+  created_at            DateTime               @default(now())
+  purchase_orders       purchase_orders        @relation(fields: [purchase_order_id], references: [id])
+  businesses            businesses             @relation(fields: [business_id], references: [id])
+  products              products               @relation(fields: [product_id], references: [id])
+  goods_received_items  goods_received_items[]
 
   @@index([business_id])
   @@index([purchase_order_id])
@@ -854,6 +905,110 @@ model po_counters {
   business_id String     @unique
   last_number Int        @default(0)
   businesses  businesses @relation(fields: [business_id], references: [id])
+}
+
+// Module 11 Session B -- Goods Received Note. Immutable once created (no
+// update/delete code path, matching inventory_adjustments/audit_logs).
+// Multiple GRNs can exist against one PO by design (partial deliveries) --
+// nothing here assumes a 1:1 relationship.
+/// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
+model goods_received_notes {
+  id                     String                 @id
+  business_id            String
+  purchase_order_id      String
+  // GRN-000001, sequential per business, immutable -- mirrors po_number
+  // exactly. See grnNumber.ts.
+  grn_number             String
+  // Most suppliers issue their own delivery note number -- useful for
+  // reconciliation, purely informational, never validated/deduped.
+  supplier_delivery_note String?
+  // Free-text, client-supplied explanation of any discrepancy -- the
+  // discrepancy itself is flagged numerically per line via
+  // goods_received_items.variance_quantity, this is just an optional human
+  // annotation alongside it.
+  variance_notes         String?
+  received_by            String
+  received_at            DateTime               @default(now())
+  purchase_orders        purchase_orders        @relation(fields: [purchase_order_id], references: [id])
+  businesses             businesses             @relation(fields: [business_id], references: [id])
+  users                  users                  @relation(fields: [received_by], references: [id])
+  goods_received_items   goods_received_items[]
+  warehouse_movements    warehouse_movements[]
+
+  @@unique([business_id, grn_number])
+  @@index([business_id])
+  @@index([purchase_order_id])
+}
+
+/// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
+model goods_received_items {
+  id                   String               @id
+  business_id          String
+  grn_id               String
+  po_item_id           String
+  product_id           String
+  quantity_received    Decimal              @db.Decimal(14, 2)
+  // The actual invoiced/received unit cost -- may legitimately differ from
+  // the PO's own negotiated unit_cost_snapshot (supplier substitutions,
+  // last-minute pricing changes), never overwrites it.
+  unit_cost_actual     Decimal              @db.Decimal(14, 2)
+  // Server-computed once at write time (quantity_received - the PO line's
+  // quantity_ordered), signed -- positive means over-delivery, negative
+  // means under-delivery on THIS GRN specifically. Stored, not derived live,
+  // same "derived cache written at the one place it's produced" pattern
+  // used throughout this schema.
+  variance_quantity    Decimal              @db.Decimal(14, 2)
+  created_at           DateTime             @default(now())
+  goods_received_notes goods_received_notes @relation(fields: [grn_id], references: [id])
+  purchase_order_items purchase_order_items @relation(fields: [po_item_id], references: [id])
+  businesses           businesses           @relation(fields: [business_id], references: [id])
+  products             products             @relation(fields: [product_id], references: [id])
+
+  @@index([business_id])
+  @@index([grn_id])
+  @@index([po_item_id])
+}
+
+// GRN Number sequence -- mirrors po_counters exactly.
+model grn_counters {
+  id          String     @id
+  business_id String     @unique
+  last_number Int        @default(0)
+  businesses  businesses @relation(fields: [business_id], references: [id])
+}
+
+// Module 11 Session B -- one payment installment against a PO. Immutable
+// once created (financial history, no edit/reversal path this session,
+// unlike debt_payments which does support reversal). expense_id is NOT
+// NULL -- every payment atomically creates its linked Expense in the same
+// transaction (createExpenseInTransaction), never as a separate step.
+model purchase_order_payments {
+  id                    String              @id
+  business_id           String
+  purchase_order_id     String
+  amount                Decimal             @db.Decimal(14, 2)
+  invoice_amount        Decimal             @db.Decimal(14, 2)
+  invoice_reference     String?
+  match_status          ThreeWayMatchStatus
+  // Signed variance recorded for audit purposes -- the larger of the two
+  // pairwise gaps checked (invoice vs PO expected, cumulative GRN-received
+  // value vs PO expected), whichever pushed match_status to match_failed
+  // (or the invoice-vs-expected gap when matched).
+  match_variance        Decimal             @db.Decimal(14, 2)
+  match_overridden      Boolean             @default(false)
+  match_override_reason String?
+  expense_id            String
+  payment_date          DateTime            @db.Date
+  notes                 String?
+  created_by            String
+  created_at            DateTime            @default(now())
+  purchase_orders       purchase_orders     @relation(fields: [purchase_order_id], references: [id])
+  businesses            businesses          @relation(fields: [business_id], references: [id])
+  expenses              expenses            @relation(fields: [expense_id], references: [id])
+  users                 users               @relation(fields: [created_by], references: [id])
+
+  @@index([business_id])
+  @@index([purchase_order_id])
 }
 
 /// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
@@ -947,21 +1102,21 @@ model staff_invites {
 }
 
 model users {
-  id                                            String                  @id
+  id                                            String                    @id
   business_id                                   String
   branch_id                                     String?
   name                                          String
   phone                                         String
   password_hash                                 String?
   role                                          UserRole
-  permissions                                   Json                    @default("{}")
+  permissions                                   Json                      @default("{}")
   last_login                                    DateTime?
-  status                                        RecordStatus            @default(active)
-  created_at                                    DateTime                @default(now())
-  updated_at                                    DateTime                @updatedAt
-  failed_login_attempts                         Int                     @default(0)
+  status                                        RecordStatus              @default(active)
+  created_at                                    DateTime                  @default(now())
+  updated_at                                    DateTime                  @updatedAt
+  failed_login_attempts                         Int                       @default(0)
   locked_until                                  DateTime?
-  email                                         String                  @unique
+  email                                         String                    @unique
   oauth_provider                                AuthProvider?
   oauth_provider_id                             String?
   phone_verified_at                             DateTime?
@@ -977,14 +1132,14 @@ model users {
   email_verification_token                      String?
   email_verified_at                             DateTime?
   audit_logs                                    audit_logs[]
-  branches_branches_manager_idTousers           branches[]              @relation("branches_manager_idTousers")
-  businesses_businesses_owner_idTousers         businesses?             @relation("businesses_owner_idTousers")
+  branches_branches_manager_idTousers           branches[]                @relation("branches_manager_idTousers")
+  businesses_businesses_owner_idTousers         businesses?               @relation("businesses_owner_idTousers")
   debt_payments                                 debt_payments[]
   debt_transactions                             debt_transactions[]
-  expenses_expenses_created_byTousers           expenses[]              @relation("expenses_created_byTousers")
-  expenses_expenses_approved_byTousers          expenses[]              @relation("expenses_approved_byTousers")
-  expenses_expenses_rejected_byTousers          expenses[]              @relation("expenses_rejected_byTousers")
-  expenses_expenses_paid_byTousers              expenses[]              @relation("expenses_paid_byTousers")
+  expenses_expenses_created_byTousers           expenses[]                @relation("expenses_created_byTousers")
+  expenses_expenses_approved_byTousers          expenses[]                @relation("expenses_approved_byTousers")
+  expenses_expenses_rejected_byTousers          expenses[]                @relation("expenses_rejected_byTousers")
+  expenses_expenses_paid_byTousers              expenses[]                @relation("expenses_paid_byTousers")
   expense_attachments                           expense_attachments[]
   inventory_adjustments                         inventory_adjustments[]
   login_events                                  login_events[]
@@ -992,15 +1147,18 @@ model users {
   password_history                              password_history[]
   price_history                                 price_history[]
   purchase_orders                               purchase_orders[]
-  sales_sales_cashier_idTousers                 sales[]                 @relation("sales_cashier_idTousers")
-  sales_sales_confirmed_byTousers               sales[]                 @relation("sales_confirmed_byTousers")
+  goods_received_notes                          goods_received_notes[]
+  purchase_order_payments                       purchase_order_payments[]
+  warehouse_movements                           warehouse_movements[]
+  sales_sales_cashier_idTousers                 sales[]                   @relation("sales_cashier_idTousers")
+  sales_sales_confirmed_byTousers               sales[]                   @relation("sales_confirmed_byTousers")
   sessions                                      sessions[]
-  staff_invites_staff_invites_invited_byTousers staff_invites[]         @relation("staff_invites_invited_byTousers")
-  staff_invites_staff_invites_user_idTousers    staff_invites[]         @relation("staff_invites_user_idTousers")
-  branches_users_branch_idTobranches            branches?               @relation("users_branch_idTobranches", fields: [branch_id], references: [id])
-  businesses_users_business_idTobusinesses      businesses              @relation("users_business_idTobusinesses", fields: [business_id], references: [id])
-  users                                         users?                  @relation("usersTousers", fields: [deactivated_by], references: [id])
-  other_users                                   users[]                 @relation("usersTousers")
+  staff_invites_staff_invites_invited_byTousers staff_invites[]           @relation("staff_invites_invited_byTousers")
+  staff_invites_staff_invites_user_idTousers    staff_invites[]           @relation("staff_invites_user_idTousers")
+  branches_users_branch_idTobranches            branches?                 @relation("users_branch_idTobranches", fields: [branch_id], references: [id])
+  businesses_users_business_idTobusinesses      businesses                @relation("users_business_idTobusinesses", fields: [business_id], references: [id])
+  users                                         users?                    @relation("usersTousers", fields: [deactivated_by], references: [id])
+  other_users                                   users[]                   @relation("usersTousers")
 
   @@unique([business_id, phone])
   @@unique([oauth_provider, oauth_provider_id])
@@ -1013,7 +1171,21 @@ model warehouse_stock {
   product_id   String
   size         String?
   quantity     Decimal    @default(0) @db.Decimal(14, 2)
+  // Free-text display override, kept alongside the discrete fields below
+  // rather than replaced -- e.g. a combined "A-01-B" summary string.
   location     String?
+  // Module 11 Session B -- simple discrete addressing fields, not
+  // barcode/RFID infrastructure. All independently optional.
+  shelf        String?
+  row_label    String?
+  section      String?
+  bin          String?
+  rack         String?
+  // Module 11 Session B -- optimistic locking, same pattern as every other
+  // mutable financial/inventory row in this schema. The atomic
+  // quantity-guarded updateMany (Stock In/Out) is still the real safety net;
+  // this is defense-in-depth/consistency, not the sole guard.
+  version      Int        @default(0)
   last_updated DateTime   @default(now())
   businesses   businesses @relation(fields: [business_id], references: [id])
   products     products   @relation(fields: [product_id], references: [id])
@@ -1041,13 +1213,87 @@ model receipt_counters {
 }
 
 model warehouses {
-  id              String            @id
-  business_id     String            @unique
-  name            String            @default("Main Warehouse")
-  location        String?
-  created_at      DateTime          @default(now())
-  warehouse_stock warehouse_stock[]
-  businesses      businesses        @relation(fields: [business_id], references: [id])
+  id                  String                @id
+  business_id         String                @unique
+  name                String                @default("Main Warehouse")
+  location            String?
+  created_at          DateTime              @default(now())
+  warehouse_stock     warehouse_stock[]
+  warehouse_movements warehouse_movements[]
+  businesses          businesses            @relation(fields: [business_id], references: [id])
+}
+
+enum WarehouseMovementType {
+  stock_in
+  stock_out
+}
+
+// LOCKED enum -- without this, Stock Out history is much less useful for
+// later reporting/analysis.
+enum WarehouseStockOutReason {
+  branch_transfer
+  adjustment
+  damage
+  return
+  other
+}
+
+// Module 11 Session B -- one shared immutable ledger for both Stock In and
+// Stock Out (mirrors inventory_adjustments' own precedent: one table for
+// heterogeneous movement sources via an enum, not a parallel table per
+// source). Type-specific fields are nullable and populated per
+// movement_type. No update/delete code path for any row -- permanent
+// history, same rule as goods_received_notes/inventory_adjustments/audit_logs.
+/// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
+model warehouse_movements {
+  id                    String                   @id
+  business_id           String
+  warehouse_id          String
+  // WSM-000001, sequential per business, immutable -- ONE shared sequence
+  // covering both stock_in and stock_out rows. See warehouseMovementNumber.ts.
+  movement_number       String
+  movement_type         WarehouseMovementType
+  product_id            String
+  quantity              Decimal                  @db.Decimal(14, 2)
+  // Snapshot pair around this movement, mirroring inventory_adjustments'
+  // own quantity_before/quantity_after precedent -- quantity_after is
+  // quantity_before + quantity for stock_in, quantity_before - quantity for
+  // stock_out. `quantity` itself stays a positive amount either way (CHECK
+  // chk_warehouse_movements_quantity_positive), direction is movement_type.
+  quantity_before       Decimal                  @db.Decimal(14, 2)
+  quantity_after        Decimal                  @db.Decimal(14, 2)
+  // Stock In only:
+  grn_id                String?
+  unit_cost             Decimal?                 @db.Decimal(14, 2)
+  // Stock Out only. destination_branch_id is the minimal "Stock Out Receipt"
+  // record (Module 06/Receipts doesn't exist yet) -- this row itself, via
+  // movement_number, serves as the receipt until a real Receipts module
+  // supersedes it.
+  destination_branch_id String?
+  reason                WarehouseStockOutReason?
+  notes                 String?
+  created_by            String
+  created_at            DateTime                 @default(now())
+  businesses            businesses               @relation(fields: [business_id], references: [id])
+  warehouses            warehouses               @relation(fields: [warehouse_id], references: [id])
+  products              products                 @relation(fields: [product_id], references: [id])
+  goods_received_notes  goods_received_notes?    @relation(fields: [grn_id], references: [id])
+  branches              branches?                @relation(fields: [destination_branch_id], references: [id])
+  users                 users                    @relation(fields: [created_by], references: [id])
+
+  @@unique([business_id, movement_number])
+  @@index([business_id, movement_type])
+  @@index([business_id, product_id])
+  @@index([warehouse_id])
+}
+
+// Warehouse Movement Number sequence -- mirrors po_counters/grn_counters
+// exactly, shared by both Stock In and Stock Out.
+model wsm_counters {
+  id          String     @id
+  business_id String     @unique
+  last_number Int        @default(0)
+  businesses  businesses @relation(fields: [business_id], references: [id])
 }
 
 enum AdjustmentType {
@@ -1169,6 +1415,11 @@ enum ExpenseSource {
   recurring
   import
   api
+  // Module 11 Session B -- expenses auto-created by recording a payment
+  // against a Purchase Order (createExpenseInTransaction). A distinct value
+  // from "api" so future BI can break expenses down by real origin without
+  // PO payments diluting the generic api bucket.
+  purchase_order
 }
 
 // Session 5B. `draft` is intentionally unreachable this session -- the spec

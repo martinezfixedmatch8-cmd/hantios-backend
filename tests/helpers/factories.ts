@@ -274,3 +274,36 @@ export async function createTestBranchInventory(
     },
   });
 }
+
+// Module 11 Session B -- warehouses.business_id is @unique (exactly one per
+// business), matching the production code's own getOrCreateWarehouse lazy-
+// creation shape. Factory-level upsert so tests can call this idempotently
+// without caring whether a prior call (or the code under test) already
+// created one.
+export async function createTestWarehouse(businessId: string, overrides: Partial<{ name: string }> = {}) {
+  return prisma.warehouses.upsert({
+    where: { business_id: businessId },
+    create: { id: generateId(), business_id: businessId, name: overrides.name ?? "Test Warehouse" },
+    update: {},
+  });
+}
+
+export async function createTestWarehouseStock(
+  businessId: string,
+  warehouseId: string,
+  productId: string,
+  overrides: Partial<{ quantity: number }> = {}
+) {
+  return prisma.warehouse_stock.create({
+    data: {
+      id: generateId(),
+      business_id: businessId,
+      warehouse_id: warehouseId,
+      product_id: productId,
+      // "" is the deliberate "no size" sentinel this table uses (never
+      // NULL) -- see src/lib/warehouseStock.ts's own comment for why.
+      size: "",
+      quantity: overrides.quantity ?? 0,
+    },
+  });
+}

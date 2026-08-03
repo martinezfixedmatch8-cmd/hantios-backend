@@ -77,6 +77,24 @@ export interface DomainEventPayloads {
   PurchaseOrderSent: { businessId: string; purchaseOrderId: string; poNumber: string };
   PurchaseOrderConfirmed: { businessId: string; purchaseOrderId: string; poNumber: string };
   PurchaseOrderCancelled: { businessId: string; purchaseOrderId: string; poNumber: string; reason: string };
+  // Module 11 Session B (GRN, Warehouse Stock Movements, PO Payments).
+  GoodsReceivedNoteCreated: {
+    businessId: string;
+    grnId: string;
+    grnNumber: string;
+    purchaseOrderId: string;
+    purchaseOrderStatus: string;
+  };
+  WarehouseStockIn: { businessId: string; warehouseId: string; productId: string; movementNumber: string; quantity: string };
+  WarehouseStockOut: { businessId: string; warehouseId: string; productId: string; movementNumber: string; quantity: string };
+  PurchaseOrderPaymentRecorded: {
+    businessId: string;
+    purchaseOrderId: string;
+    paymentId: string;
+    amount: string;
+    matchStatus: string;
+    paymentStatus: string;
+  };
 }
 
 export type DomainEventName = keyof DomainEventPayloads;

@@ -29,16 +29,19 @@ describe("Expense Categories", () => {
     expect(res.status).toBe(401);
   });
 
-  it("lazily seeds exactly the 5 fixed SYSTEM categories on first access, idempotently on repeat access", async () => {
+  it("lazily seeds exactly the 6 fixed SYSTEM categories on first access, idempotently on repeat access", async () => {
     const res = await request(app).get("/expense-categories?pageSize=50").set("Authorization", `Bearer ${ownerToken}`);
     expect(res.status).toBe(200);
     const systemNames = res.body.data.filter((c: { type: string }) => c.type === "system").map((c: { name: string }) => c.name).sort();
-    expect(systemNames).toEqual(["Electricity", "Misc", "Payroll", "Rent", "Transport"]);
+    // "Inventory Purchases" added in Module 11 Session B -- the auto-created
+    // Expense behind a PO payment needs a category, and none of the
+    // original 5 fit "money paid to a supplier for goods."
+    expect(systemNames).toEqual(["Electricity", "Inventory Purchases", "Misc", "Payroll", "Rent", "Transport"]);
 
     // Second access must not duplicate them.
     const again = await request(app).get("/expense-categories?pageSize=50").set("Authorization", `Bearer ${ownerToken}`);
     const systemNamesAgain = again.body.data.filter((c: { type: string }) => c.type === "system");
-    expect(systemNamesAgain).toHaveLength(5);
+    expect(systemNamesAgain).toHaveLength(6);
   });
 
   it("lets the owner create a CUSTOM category", async () => {

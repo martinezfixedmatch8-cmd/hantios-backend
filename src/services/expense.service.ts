@@ -1,4 +1,4 @@
-import { Prisma } from "@prisma/client";
+import { Prisma, ExpenseScope, ExpenseSource, RecurrenceFrequency } from "@prisma/client";
 import { prisma } from "../lib/prisma";
 import { generateId } from "../lib/ids";
 import { getOwned } from "../lib/ownership";
@@ -82,6 +82,143 @@ async function validateTagIds(tagIds: string[] | undefined, businessId: string):
   }
 }
 
+// Module 11 Session B -- extracted from createExpense's own transaction body
+// so a PO payment (purchaseOrderPayment.service.ts) can create its linked
+// Expense atomically inside its OWN transaction, without nesting a second
+// `prisma.$transaction` (Prisma interactive transactions in this repo are
+// always a single top-level `tx`, matching writeAuditLog/claimIdempotencyKey's
+// own tx-accepting shape). Deliberately does NOT claim/complete an
+// idempotency key or publish a domain event -- both stay the CALLER's
+// responsibility, exactly once, at whichever endpoint actually owns this
+// transaction (createExpense itself, or recordPurchaseOrderPayment).
+export interface CreateExpenseInTransactionInput {
+  businessId: string;
+  branchId: string | null;
+  scope: ExpenseScope;
+  category: { id: string; name: string };
+  amount: Prisma.Decimal;
+  currencyCode: string;
+  currencySymbol: string | null;
+  taxAmount?: Prisma.Decimal;
+  taxRate?: Prisma.Decimal;
+  taxIncluded?: boolean;
+  paymentMethodId?: string | null;
+  expenseDate: Date;
+  vendorId?: string | null;
+  vendorName?: string | null;
+  referenceNumber?: string | null;
+  description?: string | null;
+  notes?: string | null;
+  source: ExpenseSource;
+  createdBy: string;
+  attachments?: { filename: string; mimeType: string; size: number; storageKey: string }[];
+  tagIds?: string[];
+  recurrence?: { frequency: RecurrenceFrequency; interval: number; nextRun?: Date };
+  // Module 11 Session B -- populated only when source === "purchase_order".
+  purchaseOrderId?: string | null;
+  poNumber?: string | null;
+  grnNumber?: string | null;
+  // When set, bypasses the normal "always creates in pending" rule -- used
+  // exclusively by PO Payments: the payment recording IS the approval+paid
+  // event, just via a different path than the manual approve/mark-paid
+  // endpoints, so all four actor/timestamp fields are stamped together.
+  workflowOverride?: { status: "paid"; approvedBy: string; approvedAt: Date; paidBy: string; paidAt: Date };
+  actorUserName: string;
+  actorUserRole: string;
+}
+
+export async function createExpenseInTransaction(tx: Prisma.TransactionClient, input: CreateExpenseInTransactionInput) {
+  const expenseNumber = await getNextExpenseNumber(tx, input.businessId);
+
+  const created = await tx.expenses.create({
+    data: {
+      id: generateId(),
+      business_id: input.businessId,
+      branch_id: input.branchId,
+      scope: input.scope,
+      category_id: input.category.id,
+      category_name: input.category.name,
+      amount: input.amount,
+      currency_code: input.currencyCode,
+      currency_symbol: input.currencySymbol,
+      tax_amount: input.taxAmount,
+      tax_rate: input.taxRate,
+      tax_included: input.taxIncluded,
+      payment_method_id: input.paymentMethodId,
+      expense_date: input.expenseDate,
+      vendor_id: input.vendorId,
+      vendor_name: input.vendorName,
+      reference_number: input.referenceNumber,
+      description: input.description,
+      notes: input.notes,
+      source: input.source,
+      // Spec named only create/approve/reject/mark-paid as actions, with no
+      // "submit" -- createExpense always creates directly in `pending`
+      // (confirmed with the user). `draft` stays in the enum, unreachable.
+      // A PO payment is the one exception (workflowOverride) -- confirmed
+      // with the user, not assumed silently.
+      workflow_status: input.workflowOverride ? input.workflowOverride.status : "pending",
+      approved_by: input.workflowOverride?.approvedBy ?? null,
+      approved_at: input.workflowOverride?.approvedAt ?? null,
+      paid_by: input.workflowOverride?.paidBy ?? null,
+      paid_at: input.workflowOverride?.paidAt ?? null,
+      created_by: input.createdBy,
+      expense_number: expenseNumber,
+      status: "active",
+      purchase_order_id: input.purchaseOrderId ?? null,
+      po_number: input.poNumber ?? null,
+      grn_number: input.grnNumber ?? null,
+    },
+  });
+
+  if (input.attachments && input.attachments.length > 0) {
+    await tx.expense_attachments.createMany({
+      data: input.attachments.map((a) => ({
+        id: generateId(),
+        business_id: input.businessId,
+        expense_id: created.id,
+        filename: a.filename,
+        mime_type: a.mimeType,
+        size: a.size,
+        storage_key: a.storageKey,
+        uploaded_by: input.createdBy,
+      })),
+    });
+  }
+
+  if (input.tagIds && input.tagIds.length > 0) {
+    await tx.expense_tags.createMany({
+      data: input.tagIds.map((tagId) => ({ expense_id: created.id, tag_id: tagId })),
+    });
+  }
+
+  if (input.recurrence) {
+    await tx.expense_recurrence.create({
+      data: {
+        id: generateId(),
+        business_id: input.businessId,
+        template_expense_id: created.id,
+        frequency: input.recurrence.frequency,
+        interval: input.recurrence.interval,
+        next_run: input.recurrence.nextRun,
+      },
+    });
+  }
+
+  await writeAuditLog(tx, {
+    businessId: input.businessId,
+    userId: input.createdBy,
+    userName: input.actorUserName,
+    userRole: input.actorUserRole,
+    action: "expense.created",
+    entityType: "expense",
+    entityId: created.id,
+    reason: `Expense ${expenseNumber} of ${input.amount.toString()} recorded (${input.category.name})`,
+  });
+
+  return tx.expenses.findUniqueOrThrow({ where: { id: created.id }, include: EXPENSE_INCLUDE });
+}
+
 export async function createExpense(input: CreateExpenseInput, actor: Actor, idempotencyKey: string) {
   const business = await prisma.businesses.findUniqueOrThrow({ where: { id: actor.businessId } });
 
@@ -106,86 +243,33 @@ export async function createExpense(input: CreateExpenseInput, actor: Actor, ide
   const expense = await prisma.$transaction(async (tx) => {
     await claimIdempotencyKey(tx, actor.businessId, idempotencyKey, CREATE_EXPENSE_ENDPOINT);
 
-    const expenseNumber = await getNextExpenseNumber(tx, actor.businessId);
-
-    const created = await tx.expenses.create({
-      data: {
-        id: generateId(),
-        business_id: actor.businessId,
-        branch_id: input.branchId,
-        scope: input.scope,
-        category_id: category.id,
-        category_name: category.name,
-        amount,
-        currency_code: currency?.code ?? business.currency,
-        currency_symbol: currency?.symbol ?? null,
-        tax_amount: input.taxAmount !== undefined ? new Prisma.Decimal(input.taxAmount) : undefined,
-        tax_rate: input.taxRate !== undefined ? new Prisma.Decimal(input.taxRate) : undefined,
-        tax_included: input.taxIncluded,
-        payment_method_id: input.paymentMethodId,
-        expense_date: input.expenseDate,
-        vendor_id: input.vendorId,
-        vendor_name: input.vendorName,
-        reference_number: input.referenceNumber,
-        description: input.description,
-        notes: input.notes,
-        source: input.source,
-        // Spec named only create/approve/reject/mark-paid as actions, with no
-        // "submit" -- createExpense always creates directly in `pending`
-        // (confirmed with the user). `draft` stays in the enum, unreachable.
-        workflow_status: "pending",
-        created_by: actor.userId,
-        expense_number: expenseNumber,
-        status: "active",
-      },
-    });
-
-    if (input.attachments && input.attachments.length > 0) {
-      await tx.expense_attachments.createMany({
-        data: input.attachments.map((a) => ({
-          id: generateId(),
-          business_id: actor.businessId,
-          expense_id: created.id,
-          filename: a.filename,
-          mime_type: a.mimeType,
-          size: a.size,
-          storage_key: a.storageKey,
-          uploaded_by: actor.userId,
-        })),
-      });
-    }
-
-    if (input.tagIds && input.tagIds.length > 0) {
-      await tx.expense_tags.createMany({
-        data: input.tagIds.map((tagId) => ({ expense_id: created.id, tag_id: tagId })),
-      });
-    }
-
-    if (input.recurrence) {
-      await tx.expense_recurrence.create({
-        data: {
-          id: generateId(),
-          business_id: actor.businessId,
-          template_expense_id: created.id,
-          frequency: input.recurrence.frequency,
-          interval: input.recurrence.interval,
-          next_run: input.recurrence.nextRun,
-        },
-      });
-    }
-
-    await writeAuditLog(tx, {
+    const withRelations = await createExpenseInTransaction(tx, {
       businessId: actor.businessId,
-      userId: actor.userId,
-      userName: actor.userName,
-      userRole: actor.userRole,
-      action: "expense.created",
-      entityType: "expense",
-      entityId: created.id,
-      reason: `Expense ${expenseNumber} of ${amount.toString()} recorded (${category.name})`,
+      branchId: input.branchId ?? null,
+      scope: input.scope,
+      category: { id: category.id, name: category.name },
+      amount,
+      currencyCode: currency?.code ?? business.currency,
+      currencySymbol: currency?.symbol ?? null,
+      taxAmount: input.taxAmount !== undefined ? new Prisma.Decimal(input.taxAmount) : undefined,
+      taxRate: input.taxRate !== undefined ? new Prisma.Decimal(input.taxRate) : undefined,
+      taxIncluded: input.taxIncluded,
+      paymentMethodId: input.paymentMethodId ?? null,
+      expenseDate: input.expenseDate,
+      vendorId: input.vendorId ?? null,
+      vendorName: input.vendorName ?? null,
+      referenceNumber: input.referenceNumber ?? null,
+      description: input.description ?? null,
+      notes: input.notes ?? null,
+      source: input.source,
+      createdBy: actor.userId,
+      attachments: input.attachments,
+      tagIds: input.tagIds,
+      recurrence: input.recurrence,
+      actorUserName: actor.userName,
+      actorUserRole: actor.userRole,
     });
 
-    const withRelations = await tx.expenses.findUniqueOrThrow({ where: { id: created.id }, include: EXPENSE_INCLUDE });
     const responseBody = JSON.parse(JSON.stringify({ data: withRelations })) as unknown;
     await completeIdempotencyKey(tx, actor.businessId, idempotencyKey, CREATE_EXPENSE_ENDPOINT, 201, responseBody);
 

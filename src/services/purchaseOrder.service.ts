@@ -38,7 +38,17 @@ export const cancelPurchaseOrderEndpoint = (id: string): string => `POST /purcha
 // allowed to even begin one) need headroom under real concurrent load.
 const PO_TRANSACTION_OPTIONS = { timeout: 15000, maxWait: 10000 };
 
-const PO_ITEMS_INCLUDE = { purchase_order_items: true } as const;
+// Module 11 Session B -- GRN and PO Payment history are surfaced by bundling
+// them onto the PO's own read endpoints (mirroring Expenses' EXPENSE_INCLUDE
+// "bundle related records on the parent's read endpoint" pattern), not by
+// adding new list endpoints -- this repo has no dedicated "list ledger
+// history" endpoint anywhere (branch_inventory/inventory_adjustments have
+// none either), deferred to the not-yet-built Reports Center.
+const PO_ITEMS_INCLUDE = {
+  purchase_order_items: true,
+  goods_received_notes: { include: { goods_received_items: true } },
+  purchase_order_payments: true,
+} as const;
 
 interface ResolvedLine {
   product_id: string;
@@ -142,6 +152,10 @@ export async function createPurchaseOrder(input: CreatePurchaseOrderInput, actor
         currency_code: currency?.code ?? business.currency,
         exchange_rate: input.exchangeRate,
         total_expected_value: total,
+        // Module 11 Session B -- nothing owed until a payment is recorded,
+        // so remaining_amount starts equal to the full expected value
+        // (paid_amount/payment_status keep their DB defaults of 0/"unpaid").
+        remaining_amount: total,
         created_by: actor.userId,
       },
     });

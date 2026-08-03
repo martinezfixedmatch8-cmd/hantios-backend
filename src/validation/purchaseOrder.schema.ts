@@ -69,6 +69,9 @@ export const cancelPurchaseOrderSchema = z.object({
 export type CancelPurchaseOrderInput = z.infer<typeof cancelPurchaseOrderSchema>;
 
 export const listPurchaseOrdersQuerySchema = paginationQuerySchema.extend({
-  status: z.enum(["draft", "sent", "confirmed", "partially_received", "received", "paid", "cancelled"]).optional(),
+  // "paid" removed from this list -- Module 11 Session B dropped it from the
+  // PurchaseOrderStatus enum itself (payment is now tracked orthogonally via
+  // payment_status, see prisma/schema.prisma's own comment on that model).
+  status: z.enum(["draft", "sent", "confirmed", "partially_received", "received", "cancelled"]).optional(),
 });
 export type ListPurchaseOrdersQuery = z.infer<typeof listPurchaseOrdersQuerySchema>;

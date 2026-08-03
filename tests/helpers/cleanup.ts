@@ -38,6 +38,21 @@ export async function cleanupTestBusiness(businessId: string): Promise<void> {
   // negative-total row).
   await prisma.sales.deleteMany({ where: { business_id: businessId, refund_of_sale_id: { not: null } } });
   await prisma.sales.deleteMany({ where: { business_id: businessId } });
+  // Module 11 Session B -- warehouse_movements FKs to warehouses/products/
+  // goods_received_notes (the last is ON DELETE SET NULL, but deleting this
+  // table first regardless keeps the order simple); goods_received_items
+  // FKs to goods_received_notes/purchase_order_items/products, so it must go
+  // before all three; goods_received_notes FKs to purchase_orders, so it
+  // must go before that; purchase_order_payments FKs to BOTH expenses and
+  // purchase_orders (both RESTRICT), so it must go before both -- placed
+  // here, ahead of the expense-cleanup block below, for that reason.
+  await prisma.warehouse_movements.deleteMany({ where: { business_id: businessId } });
+  await prisma.goods_received_items.deleteMany({ where: { business_id: businessId } });
+  await prisma.goods_received_notes.deleteMany({ where: { business_id: businessId } });
+  await prisma.purchase_order_payments.deleteMany({ where: { business_id: businessId } });
+  await prisma.grn_counters.deleteMany({ where: { business_id: businessId } });
+  await prisma.wsm_counters.deleteMany({ where: { business_id: businessId } });
+
   // expense_attachments/expense_tags/expense_recurrence all FK to expenses --
   // delete before it. expense_tags has no direct business_id column (a pure
   // junction table), so it's scoped via the expenses relation instead.

@@ -20,7 +20,13 @@ interface Actor {
 // before this module shipped (real businesses in the live DB today would
 // otherwise never get seeded). Relies on @@unique([business_id, name]) for
 // idempotency -- safe to call on every access.
-const SYSTEM_CATEGORY_NAMES = ["Rent", "Electricity", "Payroll", "Transport", "Misc"] as const;
+//
+// "Inventory Purchases" added in Module 11 Session B -- the auto-created
+// Expense behind a PO payment (createExpenseInTransaction) needs a
+// category_id, and none of the original 5 fit "money paid to a supplier for
+// goods." Added here rather than a one-off special case so it self-heals
+// existing businesses the same way the original 5 do.
+const SYSTEM_CATEGORY_NAMES = ["Rent", "Electricity", "Payroll", "Transport", "Misc", "Inventory Purchases"] as const;
 
 type Db = typeof prisma | Prisma.TransactionClient;
 
