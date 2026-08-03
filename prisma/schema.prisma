@@ -80,9 +80,9 @@ model branches {
 }
 
 model businesses {
-  id                                  String                    @id
+  id                                  String                               @id
   name                                String
-  owner_id                            String?                   @unique
+  owner_id                            String?                              @unique
   plan                                String
   tier                                String
   country                             String
@@ -95,20 +95,20 @@ model businesses {
   // time-of-day is >= 00:00:00). business_day_end_time is stored for future use
   // (Daily Reports/Cash Closing/Shift Closing) but not yet read by Void/Refund --
   // those only need the rolling-24h start boundary, see src/lib/businessTime.ts.
-  business_day_start_time             DateTime                  @default(dbgenerated("'00:00:00'::time")) @db.Time
-  business_day_end_time               DateTime                  @default(dbgenerated("'23:59:59'::time")) @db.Time
+  business_day_start_time             DateTime                             @default(dbgenerated("'00:00:00'::time")) @db.Time
+  business_day_end_time               DateTime                             @default(dbgenerated("'23:59:59'::time")) @db.Time
   currency                            String
-  decimal_places                      Int                       @default(2)
-  language                            String                    @default("en")
-  fiscal_year_start_month             Int                       @default(1)
-  fiscal_year_start_day               Int                       @default(1)
-  settings                            Json                      @default("{}")
-  created_at                          DateTime                  @default(now())
-  updated_at                          DateTime                  @updatedAt
+  decimal_places                      Int                                  @default(2)
+  language                            String                               @default("en")
+  fiscal_year_start_month             Int                                  @default(1)
+  fiscal_year_start_day               Int                                  @default(1)
+  settings                            Json                                 @default("{}")
+  created_at                          DateTime                             @default(now())
+  updated_at                          DateTime                             @updatedAt
   audit_logs                          audit_logs[]
   branch_inventory                    branch_inventory[]
   branches                            branches[]
-  users_businesses_owner_idTousers    users?                    @relation("businesses_owner_idTousers", fields: [owner_id], references: [id])
+  users_businesses_owner_idTousers    users?                               @relation("businesses_owner_idTousers", fields: [owner_id], references: [id])
   categories                          categories[]
   customers                           customers[]
   customer_counters                   customer_counters?
@@ -135,12 +135,19 @@ model businesses {
   purchase_order_items                purchase_order_items[]
   purchase_order_payments             purchase_order_payments[]
   po_counters                         po_counters?
+  po_secure_links                     po_secure_links[]
+  po_negotiation_messages             po_negotiation_messages[]
+  po_negotiation_proposals            po_negotiation_proposals[]
+  po_negotiation_proposal_changes     po_negotiation_proposal_changes[]
+  po_negotiation_attachments          po_negotiation_attachments[]
+  po_negotiation_internal_notes       po_negotiation_internal_notes[]
+  po_negotiation_agreement_snapshots  po_negotiation_agreement_snapshots[]
   receipt_counters                    receipt_counters[]
   sales                               sales[]
   sessions                            sessions[]
   staff_invites                       staff_invites[]
   suppliers                           suppliers[]
-  users_users_business_idTobusinesses users[]                   @relation("users_business_idTobusinesses")
+  users_users_business_idTobusinesses users[]                              @relation("users_business_idTobusinesses")
   warehouse_stock                     warehouse_stock[]
   warehouse_movements                 warehouse_movements[]
   warehouses                          warehouses?
@@ -817,52 +824,64 @@ enum ThreeWayMatchStatus {
 
 /// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
 model purchase_orders {
-  id                      String                     @id
-  business_id             String
-  branch_id               String?
-  supplier_id             String
+  id                                 String                               @id
+  business_id                        String
+  branch_id                          String?
+  supplier_id                        String
   // Captured once at creation from the supplier's live values at that
   // moment (and re-captured on any supplierId change while still DRAFT) --
   // a later edit to the live Supplier record must never retroactively
   // change a historical PO. Same principle as costPriceAtSale on Sales.
-  supplier_name_snapshot  String
-  supplier_phone_snapshot String?
-  supplier_email_snapshot String?
+  supplier_name_snapshot             String
+  supplier_phone_snapshot            String?
+  supplier_email_snapshot            String?
   // PO-000001, sequential per business, immutable, never reused -- mirrors
   // customerNumber.ts/expenseNumber.ts exactly. See purchaseOrderNumber.ts.
-  po_number               String
-  status                  PurchaseOrderStatus        @default(draft)
+  po_number                          String
+  status                             PurchaseOrderStatus                  @default(draft)
   // Fields only, no calculation logic (Module 19's job, not built here) --
   // same "snapshot now, convert later" boundary Expenses' own currency
   // snapshot already established.
-  currency_code           String
-  exchange_rate           Decimal?                   @db.Decimal(14, 6)
+  currency_code                      String
+  exchange_rate                      Decimal?                             @db.Decimal(14, 6)
   // Derived cache, recomputed and re-persisted at the one place it's
   // actually written (create, and PATCH-while-DRAFT when items are
   // replaced) -- never client-supplied, never trusted blindly, same
   // pattern as customers.total_spent/debts.amount_remaining.
-  total_expected_value    Decimal                    @db.Decimal(14, 2)
-  cancel_reason           String?
+  total_expected_value               Decimal                              @db.Decimal(14, 2)
+  cancel_reason                      String?
   // Module 11 Session B -- orthogonal to `status` (see PurchaseOrderStatus's
   // own comment on why "paid" was removed from that enum). remaining_amount
   // is set to total_expected_value at creation (nothing owed until paid) and
   // recomputed at the one place it's written (payPurchaseOrder), same
   // derived-cache pattern as total_expected_value itself.
-  payment_status          PurchaseOrderPaymentStatus @default(unpaid)
-  paid_amount             Decimal                    @default(0) @db.Decimal(14, 2)
-  remaining_amount        Decimal                    @db.Decimal(14, 2)
-  version                 Int                        @default(0)
-  created_by              String
-  created_at              DateTime                   @default(now())
-  updated_at              DateTime                   @updatedAt
-  businesses              businesses                 @relation(fields: [business_id], references: [id])
-  branches                branches?                  @relation(fields: [branch_id], references: [id])
-  suppliers               suppliers                  @relation(fields: [supplier_id], references: [id])
-  users                   users                      @relation(fields: [created_by], references: [id])
-  purchase_order_items    purchase_order_items[]
-  goods_received_notes    goods_received_notes[]
-  purchase_order_payments purchase_order_payments[]
-  expenses                expenses[]
+  payment_status                     PurchaseOrderPaymentStatus           @default(unpaid)
+  paid_amount                        Decimal                              @default(0) @db.Decimal(14, 2)
+  remaining_amount                   Decimal                              @db.Decimal(14, 2)
+  // PO Negotiation Session 1 -- negotiation_round increments once per
+  // accepted proposal (never per submit/reject); negotiation_respond_by is
+  // an optional owner-set deadline, purely derived-at-read-time expiry (see
+  // computeNegotiationStatus in poNegotiation.service.ts), no scheduler.
+  negotiation_round                  Int                                  @default(0)
+  negotiation_respond_by             DateTime?
+  version                            Int                                  @default(0)
+  created_by                         String
+  created_at                         DateTime                             @default(now())
+  updated_at                         DateTime                             @updatedAt
+  businesses                         businesses                           @relation(fields: [business_id], references: [id])
+  branches                           branches?                            @relation(fields: [branch_id], references: [id])
+  suppliers                          suppliers                            @relation(fields: [supplier_id], references: [id])
+  users                              users                                @relation(fields: [created_by], references: [id])
+  purchase_order_items               purchase_order_items[]
+  goods_received_notes               goods_received_notes[]
+  purchase_order_payments            purchase_order_payments[]
+  expenses                           expenses[]
+  po_secure_links                    po_secure_links[]
+  po_negotiation_messages            po_negotiation_messages[]
+  po_negotiation_proposals           po_negotiation_proposals[]
+  po_negotiation_attachments         po_negotiation_attachments[]
+  po_negotiation_internal_notes      po_negotiation_internal_notes[]
+  po_negotiation_agreement_snapshots po_negotiation_agreement_snapshots[]
 
   @@unique([business_id, po_number])
   @@index([business_id, status])
@@ -873,26 +892,27 @@ model purchase_orders {
 
 /// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
 model purchase_order_items {
-  id                    String                 @id
-  business_id           String
-  purchase_order_id     String
-  product_id            String
+  id                              String                            @id
+  business_id                     String
+  purchase_order_id               String
+  product_id                      String
   // Captured once at creation from the product's live values at that
   // moment -- a later Product price/name change must never retroactively
   // change a historical PO line item. Same principle as costPriceAtSale.
-  product_name_snapshot String
-  sku_snapshot          String?
-  quantity_ordered      Decimal                @db.Decimal(14, 2)
-  unit_cost_snapshot    Decimal                @db.Decimal(14, 2)
+  product_name_snapshot           String
+  sku_snapshot                    String?
+  quantity_ordered                Decimal                           @db.Decimal(14, 2)
+  unit_cost_snapshot              Decimal                           @db.Decimal(14, 2)
   // Stored, computed once at write time (quantityOrdered x unitCostSnapshot)
   // -- mirrors Sales' own stored lineSubtotal precedent rather than
   // deriving it lazily on every read.
-  line_total            Decimal                @db.Decimal(14, 2)
-  created_at            DateTime               @default(now())
-  purchase_orders       purchase_orders        @relation(fields: [purchase_order_id], references: [id])
-  businesses            businesses             @relation(fields: [business_id], references: [id])
-  products              products               @relation(fields: [product_id], references: [id])
-  goods_received_items  goods_received_items[]
+  line_total                      Decimal                           @db.Decimal(14, 2)
+  created_at                      DateTime                          @default(now())
+  purchase_orders                 purchase_orders                   @relation(fields: [purchase_order_id], references: [id])
+  businesses                      businesses                        @relation(fields: [business_id], references: [id])
+  products                        products                          @relation(fields: [product_id], references: [id])
+  goods_received_items            goods_received_items[]
+  po_negotiation_proposal_changes po_negotiation_proposal_changes[]
 
   @@index([business_id])
   @@index([purchase_order_id])
@@ -1011,6 +1031,278 @@ model purchase_order_payments {
   @@index([purchase_order_id])
 }
 
+// ============================================================================
+// PO Supplier Negotiation Core (Session 1) -- a supplier-facing, token-
+// authenticated portal (no login) for negotiating an already-SENT Purchase
+// Order, plus the owner-side authenticated API. See CLAUDE.md's own
+// "Purchase Orders -- PO Supplier Negotiation (Session 1)" section for the
+// full design rationale (why Proposal is a header+child aggregate rather
+// than one field-change, why Negotiation Status/Summary are derived not
+// stored, why Internal Notes is a fully separate table).
+// ============================================================================
+
+enum PoSecureLinkStatus {
+  active
+  revoked
+  expired
+}
+
+// One PO = one active link at a time -- generating a new one immediately
+// revokes any prior active link for that PO. Token is SHA-256 hashed
+// (src/lib/tokens.ts's existing hashToken, already used for session
+// refresh tokens) -- the raw token is NEVER stored, matching sessions'
+// own convention, deliberately NOT staff_invites' plaintext-token
+// convention (that one is single-use/short-lived; this one is viewed
+// repeatedly over up to 30 days by an unauthenticated party).
+model po_secure_links {
+  id                String             @id
+  business_id       String
+  purchase_order_id String
+  token_hash        String             @unique
+  status            PoSecureLinkStatus @default(active)
+  // Fixed 30 days for v1, not business-configurable (locked decision,
+  // confirmed both in the spec and independently in the Notion doc's own
+  // "Open Question" resolution) -- fields-only, no settings-driven logic.
+  expires_at        DateTime
+  created_at        DateTime           @default(now())
+  created_by        String
+  revoked_at        DateTime?
+  revoked_by        String?
+  last_viewed_at    DateTime?
+  view_count        Int                @default(0)
+  purchase_orders   purchase_orders    @relation(fields: [purchase_order_id], references: [id])
+  businesses        businesses         @relation(fields: [business_id], references: [id])
+  users_created_by  users              @relation("po_secure_links_created_byTousers", fields: [created_by], references: [id])
+  users_revoked_by  users?             @relation("po_secure_links_revoked_byTousers", fields: [revoked_by], references: [id])
+
+  @@index([business_id])
+  @@index([purchase_order_id])
+}
+
+// owner = authenticated staff action; supplier = token-authenticated public
+// portal action; system = domain-event-triggered (e.g. an automated notice
+// this session only publishes as an event, never sends -- see CLAUDE.md).
+enum PoNegotiationParty {
+  owner
+  supplier
+  system
+}
+
+// Messages are fully immutable except the read_at/read_by pair, which is
+// set exactly once (first read by the OTHER party only) and never
+// overwritten on subsequent reads.
+model po_negotiation_messages {
+  id                  String                       @id
+  business_id         String
+  purchase_order_id   String
+  sender_type         PoNegotiationParty
+  // Suppliers have no user account in this system -- captured free-text at
+  // send time, same reasoning throughout this whole module. department/role
+  // let a large supplier's reply be attributed to e.g. "Ahmed Hassan, Sales
+  // Manager" rather than just a bare name, improving audit quality when
+  // replies come from Sales/Warehouse/Accounts/Logistics interchangeably.
+  sender_name         String?
+  sender_department   String?
+  sender_role         String?
+  message_text        String
+  // Threading -- a message may optionally reply to an earlier one. Self-
+  // relation; nullable since most messages are not replies.
+  reply_to_message_id String?
+  created_at          DateTime                     @default(now())
+  ip_address          String?
+  read_at             DateTime?
+  read_by             PoNegotiationParty?
+  purchase_orders     purchase_orders              @relation(fields: [purchase_order_id], references: [id])
+  businesses          businesses                   @relation(fields: [business_id], references: [id])
+  reply_to_message    po_negotiation_messages?     @relation("po_negotiation_messages_replies", fields: [reply_to_message_id], references: [id])
+  replies             po_negotiation_messages[]    @relation("po_negotiation_messages_replies")
+  attachments         po_negotiation_attachments[]
+
+  @@index([business_id, purchase_order_id, created_at])
+  @@index([reply_to_message_id])
+}
+
+enum PoNegotiationProposalStatus {
+  draft
+  pending
+  accepted
+  rejected
+  superseded
+}
+
+// Every coordinated change a proposal touches -- quantity/price/delivery/
+// shipping changes, product substitutions/additions/removals. Deliberately
+// NOT one row per field per proposal event; see po_negotiation_proposals'
+// own comment for why this is a header, not the ledger row itself.
+enum PoNegotiationFieldChanged {
+  quantity
+  unit_price
+  delivery_date
+  shipping_method
+  product_substitution
+  product_added
+  product_removed
+}
+
+// Aggregate root for one negotiation "turn." A single proposal bundles N
+// coordinated changes (quantity + price + shipping method, etc.) submitted
+// and resolved atomically -- never one proposal per field. Mutable ONLY
+// while status=draft (the one explicit, locked exception to this whole
+// schema's usual immutable-ledger rule); submitting (draft -> pending)
+// locks it permanently from that point on, exactly like every other
+// immutable ledger table here (debt_transactions, warehouse_movements,
+// goods_received_notes). version guards concurrent draft edits (e.g. two
+// browser tabs) -- irrelevant once submitted, since the row can't be
+// written to at all past that point regardless of version.
+model po_negotiation_proposals {
+  id                  String                               @id
+  business_id         String
+  purchase_order_id   String
+  proposed_by         PoNegotiationParty
+  proposer_name       String?
+  proposer_department String?
+  proposer_role       String?
+  // Optional comment bundled with the proposal itself (e.g. "Only 80 units
+  // available, see attached photo") -- one per proposal, not one per change,
+  // since real supplier replies bundle a rationale with several coordinated
+  // changes as a single business communication, not several disconnected
+  // messages.
+  comment             String?
+  status              PoNegotiationProposalStatus          @default(draft)
+  version             Int                                  @default(0)
+  // Sequential per PO, assigned on submit (draft -> pending), never on
+  // draft save -- lets an owner say "this is Revision #4" without counting
+  // rows by hand.
+  revision_number     Int?
+  created_at          DateTime                             @default(now())
+  submitted_at        DateTime?
+  resolved_at         DateTime?
+  // Owner userId on accept/reject; a supplier-side resolution (not enabled
+  // this session -- accept/reject is owner-only for v1) would store the
+  // supplier's phone instead, same as every other supplier-attributable
+  // field in this module -- never a users FK, since suppliers have none.
+  resolved_by         String?
+  ip_address          String?
+  purchase_orders     purchase_orders                      @relation(fields: [purchase_order_id], references: [id])
+  businesses          businesses                           @relation(fields: [business_id], references: [id])
+  changes             po_negotiation_proposal_changes[]
+  attachments         po_negotiation_attachments[]
+  agreement_snapshots po_negotiation_agreement_snapshots[]
+
+  @@index([business_id, purchase_order_id, status])
+}
+
+// Child rows -- one per coordinated change within a single proposal. No own
+// status: the WHOLE proposal accepts/rejects atomically (the session's
+// locked "Most Important Architectural Rule"), so there is nothing here to
+// resolve independently. Mirrors goods_received_items' header+child shape
+// (a GRN bundles N line items under one receipt) rather than
+// debt_transactions/warehouse_movements' flat-ledger shape, since a
+// proposal genuinely bundles N related facts under one resolution.
+model po_negotiation_proposal_changes {
+  id                       String                    @id
+  business_id              String
+  proposal_id              String
+  field_changed            PoNegotiationFieldChanged
+  // FK to purchase_order_items when the change is item-scoped (quantity/
+  // unit_price/product_substitution/product_removed); null for PO-level
+  // changes (delivery_date/shipping_method) and for product_added (the
+  // product doesn't exist as a line item yet at proposal time).
+  item_id                  String?
+  old_value                String
+  new_value                String
+  created_at               DateTime                  @default(now())
+  po_negotiation_proposals po_negotiation_proposals  @relation(fields: [proposal_id], references: [id])
+  businesses               businesses                @relation(fields: [business_id], references: [id])
+  purchase_order_items     purchase_order_items?     @relation(fields: [item_id], references: [id])
+
+  @@index([proposal_id])
+  @@index([item_id])
+}
+
+enum PoNegotiationAttachmentType {
+  image
+  pdf
+  excel
+  doc
+  video
+}
+
+// Attachments are immutable once uploaded (upload/view only, no replace/
+// edit). Exactly one of message_id/proposal_id must be set, validated at
+// the service layer (Prisma has no native XOR constraint). storage_key
+// flows through the new StorageProvider interface (src/storage/), the same
+// seam Expense Attachments were retrofitted onto this session.
+model po_negotiation_attachments {
+  id                       String                      @id
+  business_id              String
+  purchase_order_id        String
+  message_id               String?
+  proposal_id              String?
+  type                     PoNegotiationAttachmentType
+  file_name                String
+  file_size_bytes          Int
+  storage_key              String
+  uploaded_by              PoNegotiationParty
+  uploaded_by_name         String?
+  uploaded_at              DateTime                    @default(now())
+  purchase_orders          purchase_orders             @relation(fields: [purchase_order_id], references: [id])
+  businesses               businesses                  @relation(fields: [business_id], references: [id])
+  po_negotiation_messages  po_negotiation_messages?    @relation(fields: [message_id], references: [id])
+  po_negotiation_proposals po_negotiation_proposals?   @relation(fields: [proposal_id], references: [id])
+
+  @@index([purchase_order_id])
+  @@index([message_id])
+  @@index([proposal_id])
+}
+
+// Owner/Manager visibility ONLY -- never exposed on any supplier-portal
+// code path (kept as a fully separate table from po_negotiation_messages
+// specifically so no future query against messages could accidentally leak
+// a confidential note; see CLAUDE.md's "Rejected alternatives" for this
+// session). Append-only (create + list, no edit/delete) -- an inferred
+// choice, not explicitly specified either way.
+model po_negotiation_internal_notes {
+  id                String          @id
+  business_id       String
+  purchase_order_id String
+  note_text         String
+  created_by        String
+  created_at        DateTime        @default(now())
+  purchase_orders   purchase_orders @relation(fields: [purchase_order_id], references: [id])
+  businesses        businesses      @relation(fields: [business_id], references: [id])
+  users             users           @relation(fields: [created_by], references: [id])
+
+  @@index([purchase_order_id])
+}
+
+// One immutable snapshot per ACCEPTED proposal (not just a single "final"
+// one) -- keyed by negotiation_round, consistent with this repo's "keep
+// every entry, never just the latest" ledger philosophy (debt_transactions,
+// warehouse_movements). items_snapshot is JSON, matching sales.items' own
+// "locked historical snapshot" precedent -- a point-in-time record, never a
+// live-queryable structure. This is the permanent legal record of what both
+// parties agreed to; future PO edits must never overwrite it.
+model po_negotiation_agreement_snapshots {
+  id                       String                   @id
+  business_id              String
+  purchase_order_id        String
+  proposal_id              String
+  negotiation_round        Int
+  items_snapshot           Json
+  shipping_method          String?
+  delivery_date            DateTime?
+  total_expected_value     Decimal                  @db.Decimal(14, 2)
+  accepted_at              DateTime                 @default(now())
+  accepted_by              String
+  purchase_orders          purchase_orders          @relation(fields: [purchase_order_id], references: [id])
+  businesses               businesses               @relation(fields: [business_id], references: [id])
+  po_negotiation_proposals po_negotiation_proposals @relation(fields: [proposal_id], references: [id])
+  users                    users                    @relation(fields: [accepted_by], references: [id])
+
+  @@index([purchase_order_id])
+}
+
 /// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
 model sales {
   id                              String                  @id
@@ -1102,21 +1394,21 @@ model staff_invites {
 }
 
 model users {
-  id                                            String                    @id
+  id                                            String                               @id
   business_id                                   String
   branch_id                                     String?
   name                                          String
   phone                                         String
   password_hash                                 String?
   role                                          UserRole
-  permissions                                   Json                      @default("{}")
+  permissions                                   Json                                 @default("{}")
   last_login                                    DateTime?
-  status                                        RecordStatus              @default(active)
-  created_at                                    DateTime                  @default(now())
-  updated_at                                    DateTime                  @updatedAt
-  failed_login_attempts                         Int                       @default(0)
+  status                                        RecordStatus                         @default(active)
+  created_at                                    DateTime                             @default(now())
+  updated_at                                    DateTime                             @updatedAt
+  failed_login_attempts                         Int                                  @default(0)
   locked_until                                  DateTime?
-  email                                         String                    @unique
+  email                                         String                               @unique
   oauth_provider                                AuthProvider?
   oauth_provider_id                             String?
   phone_verified_at                             DateTime?
@@ -1132,14 +1424,14 @@ model users {
   email_verification_token                      String?
   email_verified_at                             DateTime?
   audit_logs                                    audit_logs[]
-  branches_branches_manager_idTousers           branches[]                @relation("branches_manager_idTousers")
-  businesses_businesses_owner_idTousers         businesses?               @relation("businesses_owner_idTousers")
+  branches_branches_manager_idTousers           branches[]                           @relation("branches_manager_idTousers")
+  businesses_businesses_owner_idTousers         businesses?                          @relation("businesses_owner_idTousers")
   debt_payments                                 debt_payments[]
   debt_transactions                             debt_transactions[]
-  expenses_expenses_created_byTousers           expenses[]                @relation("expenses_created_byTousers")
-  expenses_expenses_approved_byTousers          expenses[]                @relation("expenses_approved_byTousers")
-  expenses_expenses_rejected_byTousers          expenses[]                @relation("expenses_rejected_byTousers")
-  expenses_expenses_paid_byTousers              expenses[]                @relation("expenses_paid_byTousers")
+  expenses_expenses_created_byTousers           expenses[]                           @relation("expenses_created_byTousers")
+  expenses_expenses_approved_byTousers          expenses[]                           @relation("expenses_approved_byTousers")
+  expenses_expenses_rejected_byTousers          expenses[]                           @relation("expenses_rejected_byTousers")
+  expenses_expenses_paid_byTousers              expenses[]                           @relation("expenses_paid_byTousers")
   expense_attachments                           expense_attachments[]
   inventory_adjustments                         inventory_adjustments[]
   login_events                                  login_events[]
@@ -1150,15 +1442,19 @@ model users {
   goods_received_notes                          goods_received_notes[]
   purchase_order_payments                       purchase_order_payments[]
   warehouse_movements                           warehouse_movements[]
-  sales_sales_cashier_idTousers                 sales[]                   @relation("sales_cashier_idTousers")
-  sales_sales_confirmed_byTousers               sales[]                   @relation("sales_confirmed_byTousers")
+  po_secure_links_created_byTousers             po_secure_links[]                    @relation("po_secure_links_created_byTousers")
+  po_secure_links_revoked_byTousers             po_secure_links[]                    @relation("po_secure_links_revoked_byTousers")
+  po_negotiation_internal_notes                 po_negotiation_internal_notes[]
+  po_negotiation_agreement_snapshots            po_negotiation_agreement_snapshots[]
+  sales_sales_cashier_idTousers                 sales[]                              @relation("sales_cashier_idTousers")
+  sales_sales_confirmed_byTousers               sales[]                              @relation("sales_confirmed_byTousers")
   sessions                                      sessions[]
-  staff_invites_staff_invites_invited_byTousers staff_invites[]           @relation("staff_invites_invited_byTousers")
-  staff_invites_staff_invites_user_idTousers    staff_invites[]           @relation("staff_invites_user_idTousers")
-  branches_users_branch_idTobranches            branches?                 @relation("users_branch_idTobranches", fields: [branch_id], references: [id])
-  businesses_users_business_idTobusinesses      businesses                @relation("users_business_idTobusinesses", fields: [business_id], references: [id])
-  users                                         users?                    @relation("usersTousers", fields: [deactivated_by], references: [id])
-  other_users                                   users[]                   @relation("usersTousers")
+  staff_invites_staff_invites_invited_byTousers staff_invites[]                      @relation("staff_invites_invited_byTousers")
+  staff_invites_staff_invites_user_idTousers    staff_invites[]                      @relation("staff_invites_user_idTousers")
+  branches_users_branch_idTobranches            branches?                            @relation("users_branch_idTobranches", fields: [branch_id], references: [id])
+  businesses_users_business_idTobusinesses      businesses                           @relation("users_business_idTobusinesses", fields: [business_id], references: [id])
+  users                                         users?                               @relation("usersTousers", fields: [deactivated_by], references: [id])
+  other_users                                   users[]                              @relation("usersTousers")
 
   @@unique([business_id, phone])
   @@unique([oauth_provider, oauth_provider_id])

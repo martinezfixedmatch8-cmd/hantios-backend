@@ -18,6 +18,8 @@ import customerRoutes from "./routes/customer.routes";
 import supplierRoutes from "./routes/supplier.routes";
 import purchaseOrderRoutes from "./routes/purchaseOrder.routes";
 import warehouseMovementRoutes from "./routes/warehouseMovement.routes";
+import poNegotiationRoutes from "./routes/poNegotiation.routes";
+import poNegotiationPortalRoutes from "./routes/poNegotiationPortal.routes";
 import { notFoundHandler, errorHandler } from "./middleware/errorHandler";
 
 export const app = express();
@@ -49,7 +51,9 @@ app.use("/tags", tagRoutes);
 app.use("/customers", customerRoutes);
 app.use("/suppliers", supplierRoutes);
 app.use("/purchase-orders", purchaseOrderRoutes);
+app.use("/purchase-orders", poNegotiationRoutes);
 app.use("/warehouse-movements", warehouseMovementRoutes);
+app.use("/portal", poNegotiationPortalRoutes);
 
 app.use(notFoundHandler);
 app.use(errorHandler);

@@ -64,6 +64,20 @@ export async function cleanupTestBusiness(businessId: string): Promise<void> {
   await prisma.expense_counters.deleteMany({ where: { business_id: businessId } });
   await prisma.customer_counters.deleteMany({ where: { business_id: businessId } });
   await prisma.tags.deleteMany({ where: { business_id: businessId } });
+  // PO Negotiation Core -- agreement_snapshots FKs to proposals (RESTRICT),
+  // so it must go before proposals; attachments FKs to messages/proposals
+  // (SET NULL, but deleted first anyway for order simplicity);
+  // proposal_changes FKs to proposals AND purchase_order_items (RESTRICT),
+  // so it must go before BOTH; proposals/messages/internal_notes/
+  // secure_links all FK to purchase_orders, so all must go before that.
+  await prisma.po_negotiation_agreement_snapshots.deleteMany({ where: { business_id: businessId } });
+  await prisma.po_negotiation_attachments.deleteMany({ where: { business_id: businessId } });
+  await prisma.po_negotiation_proposal_changes.deleteMany({ where: { business_id: businessId } });
+  await prisma.po_negotiation_proposals.deleteMany({ where: { business_id: businessId } });
+  await prisma.po_negotiation_messages.deleteMany({ where: { business_id: businessId } });
+  await prisma.po_negotiation_internal_notes.deleteMany({ where: { business_id: businessId } });
+  await prisma.po_secure_links.deleteMany({ where: { business_id: businessId } });
+
   // purchase_order_items FKs to products/purchase_orders -- delete before both.
   // purchase_orders FKs to branches/suppliers/users -- delete before all three.
   await prisma.purchase_order_items.deleteMany({ where: { business_id: businessId } });

@@ -60,3 +60,15 @@ export const verifyOtpLimiter = rateLimit({
   standardHeaders: true,
   legacyHeaders: false,
 });
+
+// PO Negotiation supplier portal -- public, token-authenticated, no JWT.
+// "30 requests/min per IP per link" per the locked spec, literally: a 1-
+// minute window, not inviteTokenLimiter's 15-minute one (that limiter's
+// numbers don't transfer here despite the similar "public token route"
+// shape).
+export const supplierPortalLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: isTestEnv ? 10_000 : 30,
+  standardHeaders: true,
+  legacyHeaders: false,
+});

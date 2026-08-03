@@ -9,6 +9,7 @@ import { claimIdempotencyKey, completeIdempotencyKey } from "../lib/idempotency"
 import { domainEvents } from "../lib/events";
 import { getNextPurchaseOrderNumber } from "../lib/purchaseOrderNumber";
 import { getCurrency } from "../lib/currencyReference";
+import { expireSecureLinksForTerminalPo } from "./poSecureLink.service";
 import type {
   CreatePurchaseOrderInput,
   UpdatePurchaseOrderInput,
@@ -344,6 +345,10 @@ export async function confirmPurchaseOrder(id: string, input: ConfirmPurchaseOrd
     if (result.count === 0) {
       throw conflict("Purchase order is not in a confirmable state (must be SENT; already confirmed/cancelled, still DRAFT, or was modified concurrently)");
     }
+    // PO Negotiation Session 1 -- CONFIRMED is a terminal negotiation state
+    // (Workflow Guard, Enhancement #10); auto-expire any still-active secure
+    // link in the same transaction as the status transition, not a scheduler.
+    await expireSecureLinksForTerminalPo(tx, id);
 
     const updatedPo = await tx.purchase_orders.findUniqueOrThrow({ where: { id } });
 
@@ -383,6 +388,9 @@ export async function cancelPurchaseOrder(id: string, input: CancelPurchaseOrder
     if (result.count === 0) {
       throw conflict("Purchase order cannot be cancelled (must be DRAFT or SENT; already confirmed/cancelled, or was modified concurrently)");
     }
+    // PO Negotiation Session 1 -- CANCELLED is a terminal negotiation state,
+    // same reasoning as confirmPurchaseOrder's own call.
+    await expireSecureLinksForTerminalPo(tx, id);
 
     const updatedPo = await tx.purchase_orders.findUniqueOrThrow({ where: { id } });
 

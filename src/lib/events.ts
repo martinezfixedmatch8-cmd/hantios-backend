@@ -95,6 +95,25 @@ export interface DomainEventPayloads {
     matchStatus: string;
     paymentStatus: string;
   };
+  // PO Supplier Negotiation Core (Session 1). No dispatch/subscriber this
+  // session -- publish only, per the locked spec ("Session 1 only publishes
+  // domain events, no dispatch/sending logic").
+  PurchaseOrderSecureLinkGenerated: { businessId: string; purchaseOrderId: string; secureLinkId: string };
+  // Debounced first-view only, mirrors StockLow's own debounce shape.
+  PurchaseOrderViewedBySupplier: { businessId: string; purchaseOrderId: string; occurredAt: string };
+  PurchaseOrderPdfDownloaded: { businessId: string; purchaseOrderId: string; occurredAt: string };
+  PurchaseOrderNegotiationMessageSent: { businessId: string; purchaseOrderId: string; messageId: string; senderType: string };
+  PurchaseOrderNegotiationMessageRead: { businessId: string; purchaseOrderId: string; messageId: string; readBy: string };
+  PurchaseOrderNegotiationProposalSubmitted: { businessId: string; purchaseOrderId: string; proposalId: string; revisionNumber: number };
+  PurchaseOrderNegotiationAccepted: {
+    businessId: string;
+    purchaseOrderId: string;
+    proposalId: string;
+    negotiationRound: number;
+  };
+  PurchaseOrderNegotiationRejected: { businessId: string; purchaseOrderId: string; proposalId: string };
+  PurchaseOrderNegotiationAttachmentUploaded: { businessId: string; purchaseOrderId: string; attachmentId: string };
+  PurchaseOrderNegotiationDeadlineSet: { businessId: string; purchaseOrderId: string; respondBy: string | null };
 }
 
 export type DomainEventName = keyof DomainEventPayloads;

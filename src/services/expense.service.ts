@@ -9,6 +9,7 @@ import { claimIdempotencyKey, completeIdempotencyKey } from "../lib/idempotency"
 import { paginate, resolveListQuery } from "../lib/pagination";
 import { getNextExpenseNumber } from "../lib/expenseNumber";
 import { getCurrency } from "../lib/currencyReference";
+import { getStorageProvider } from "../storage/registry";
 import {
   CreateExpenseInput,
   UpdateExpenseInput,
@@ -172,15 +173,31 @@ export async function createExpenseInTransaction(tx: Prisma.TransactionClient, i
   });
 
   if (input.attachments && input.attachments.length > 0) {
+    // Module 11 Negotiation Session -- routed through StorageProvider
+    // (previously a raw pass-through of the client-supplied storageKey).
+    // The stub implementation returns the same key unchanged, so this is
+    // behavior-identical to before; it's the seam a real storage backend
+    // slots into later without this call site changing again.
+    const registered = await Promise.all(
+      input.attachments.map((a) =>
+        getStorageProvider().registerUpload({
+          businessId: input.businessId,
+          fileName: a.filename,
+          mimeType: a.mimeType,
+          sizeBytes: a.size,
+          clientStorageKey: a.storageKey,
+        })
+      )
+    );
     await tx.expense_attachments.createMany({
-      data: input.attachments.map((a) => ({
+      data: input.attachments.map((a, i) => ({
         id: generateId(),
         business_id: input.businessId,
         expense_id: created.id,
         filename: a.filename,
         mime_type: a.mimeType,
         size: a.size,
-        storage_key: a.storageKey,
+        storage_key: registered[i].storageKey,
         uploaded_by: input.createdBy,
       })),
     });
@@ -499,15 +516,26 @@ export async function addAttachments(id: string, input: AddAttachmentsInput, act
   const result = await prisma.$transaction(async (tx) => {
     await claimIdempotencyKey(tx, actor.businessId, idempotencyKey, addAttachmentsEndpoint(id));
 
+    const registered = await Promise.all(
+      input.attachments.map((a) =>
+        getStorageProvider().registerUpload({
+          businessId: actor.businessId,
+          fileName: a.filename,
+          mimeType: a.mimeType,
+          sizeBytes: a.size,
+          clientStorageKey: a.storageKey,
+        })
+      )
+    );
     await tx.expense_attachments.createMany({
-      data: input.attachments.map((a) => ({
+      data: input.attachments.map((a, i) => ({
         id: generateId(),
         business_id: actor.businessId,
         expense_id: id,
         filename: a.filename,
         mime_type: a.mimeType,
         size: a.size,
-        storage_key: a.storageKey,
+        storage_key: registered[i].storageKey,
         uploaded_by: actor.userId,
       })),
     });
