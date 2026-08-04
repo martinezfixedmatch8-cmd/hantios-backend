@@ -121,6 +121,15 @@ export interface DomainEventPayloads {
   SupplierPaymentInstructionDefaultChanged: { businessId: string; supplierId: string; instructionId: string };
   PurchaseOrderProformaInvoiceIssued: { businessId: string; purchaseOrderId: string; proformaInvoiceId: string; total: string };
   PurchaseOrderAdvancePaymentRecorded: { businessId: string; purchaseOrderId: string; proformaInvoiceId: string; advancePaymentId: string; amount: string };
+  // Session 2B -- confirmed via Phase 0 that these did NOT already exist
+  // despite the spec assuming they did (only a match_status field inside
+  // PurchaseOrderPaymentRecorded's own payload existed before this
+  // session). Added for real, fired from recordPurchaseOrderPayment
+  // alongside that existing event, not a replacement for it.
+  ThreeWayMatchPassed: { businessId: string; purchaseOrderId: string; paymentId: string; matchVariance: string };
+  ThreeWayMatchFailed: { businessId: string; purchaseOrderId: string; paymentId: string; matchVariance: string; overridden: boolean };
+  PurchaseOrderCommercialInvoiceIssued: { businessId: string; purchaseOrderId: string; commercialInvoiceId: string; totalAmount: string };
+  PurchaseOrderCommercialInvoiceSuperseded: { businessId: string; purchaseOrderId: string; commercialInvoiceId: string; supersedesId: string };
 }
 
 export type DomainEventName = keyof DomainEventPayloads;

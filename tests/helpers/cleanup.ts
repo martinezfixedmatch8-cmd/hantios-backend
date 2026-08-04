@@ -87,6 +87,12 @@ export async function cleanupTestBusiness(businessId: string): Promise<void> {
   await prisma.po_proforma_invoices.deleteMany({ where: { business_id: businessId } });
   await prisma.proforma_invoice_counters.deleteMany({ where: { business_id: businessId } });
 
+  // Session 2B -- po_commercial_invoices self-references via supersedes_id
+  // (SET NULL, order-independent among its own rows) and FKs to
+  // purchase_orders (RESTRICT), so it must go before that.
+  await prisma.po_commercial_invoices.deleteMany({ where: { business_id: businessId } });
+  await prisma.commercial_invoice_counters.deleteMany({ where: { business_id: businessId } });
+
   // purchase_order_items FKs to products/purchase_orders -- delete before both.
   // purchase_orders FKs to branches/suppliers/users -- delete before all three.
   await prisma.purchase_order_items.deleteMany({ where: { business_id: businessId } });

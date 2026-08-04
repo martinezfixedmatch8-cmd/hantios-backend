@@ -15,6 +15,12 @@ import { createGoodsReceivedNote } from "../controllers/goodsReceivedNote.contro
 import { recordPurchaseOrderPayment } from "../controllers/purchaseOrderPayment.controller";
 import { issueProformaInvoice, listProformaInvoices, getProformaInvoice } from "../controllers/poProformaInvoice.controller";
 import { recordAdvancePayment, listAdvancePayments } from "../controllers/poAdvancePayment.controller";
+import {
+  issueCommercialInvoice,
+  supersedeCommercialInvoice,
+  listCommercialInvoices,
+  getPaymentStatus,
+} from "../controllers/poCommercialInvoice.controller";
 
 const router = Router();
 
@@ -60,5 +66,18 @@ router.get("/:id/proforma-invoices/:invoiceId", requireRole(...financialViewRole
 
 router.post("/:id/advance-payments", requireRole(...advancePaymentWriteRoles), requireIdempotencyKey, recordAdvancePayment);
 router.get("/:id/advance-payments", requireRole(...financialViewRoles), listAdvancePayments);
+
+// Session 2B -- locked RBAC table: Issue/supersede Commercial Invoice =
+// Owner/Manager; View Commercial Invoice/Payment Status = Owner/Manager/
+// Accountant, same bar as the rest of this financial surface.
+router.post("/:id/commercial-invoices", requireRole(...proformaWriteRoles), requireIdempotencyKey, issueCommercialInvoice);
+router.post(
+  "/:id/commercial-invoices/:invoiceId/supersede",
+  requireRole(...proformaWriteRoles),
+  requireIdempotencyKey,
+  supersedeCommercialInvoice
+);
+router.get("/:id/commercial-invoices", requireRole(...financialViewRoles), listCommercialInvoices);
+router.get("/:id/payment-status", requireRole(...financialViewRoles), getPaymentStatus);
 
 export default router;

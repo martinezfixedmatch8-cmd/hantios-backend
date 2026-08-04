@@ -146,6 +146,8 @@ model businesses {
   proforma_invoice_counters           proforma_invoice_counters?
   po_proforma_invoices                po_proforma_invoices[]
   po_advance_payments                 po_advance_payments[]
+  commercial_invoice_counters         commercial_invoice_counters?
+  po_commercial_invoices              po_commercial_invoices[]
   receipt_counters                    receipt_counters[]
   sales                               sales[]
   sessions                            sessions[]
@@ -928,6 +930,7 @@ model purchase_orders {
   po_negotiation_agreement_snapshots po_negotiation_agreement_snapshots[]
   po_proforma_invoices               po_proforma_invoices[]
   po_advance_payments                po_advance_payments[]
+  po_commercial_invoices             po_commercial_invoices[]
 
   @@unique([business_id, po_number])
   @@index([business_id, status])
@@ -1220,6 +1223,64 @@ model po_advance_payments {
 
   @@index([purchase_order_id])
   @@index([proforma_invoice_id])
+}
+
+// ============================================================================
+// Commercial Invoice + full Invoice Payment Status (Session 2B). Finishes
+// the "Invoice Split" work Session 2A started -- see CLAUDE.md's own
+// "Commercial Invoice + 3-Way Match + Full Payment Status -- Session 2B"
+// section for the full design rationale (why the issuance gate is an
+// acknowledged interim substitute for a real shipment-status check, why
+// 3-way match re-pointing is backward-compatible rather than a breaking
+// change to Session B's already-shipped endpoint).
+// ============================================================================
+
+enum CommercialInvoiceStatus {
+  issued
+  superseded
+}
+
+/// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
+model commercial_invoice_counters {
+  id          String     @id
+  business_id String     @unique
+  last_number Int        @default(0)
+  businesses  businesses @relation(fields: [business_id], references: [id])
+}
+
+/// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
+model po_commercial_invoices {
+  id                 String                  @id
+  business_id        String
+  purchase_order_id  String
+  // CI-000001, sequential per business -- same atomic-counter shape as
+  // every other numbered document in this repo.
+  invoice_number     String
+  total_amount       Decimal                 @db.Decimal(14, 2)
+  currency_code      String
+  issued_at          DateTime                @default(now())
+  issued_by          String
+  // Future PDF generation placeholder, same pattern as Proforma Invoice's
+  // own storage_key.
+  storage_key        String?
+  // Immutable financial document -- corrections are modeled as a NEW row
+  // with supersedes_id pointing back to the one it corrects, exactly the
+  // same pattern already used for Proforma Invoice re-issuance and Sales
+  // Refunds (refund_of_sale_id). Never an in-place PATCH of totals.
+  status             CommercialInvoiceStatus @default(issued)
+  supersedes_id      String?
+  created_at         DateTime                @default(now())
+  businesses         businesses              @relation(fields: [business_id], references: [id])
+  purchase_orders    purchase_orders         @relation(fields: [purchase_order_id], references: [id])
+  users              users                   @relation(fields: [issued_by], references: [id])
+  supersedes         po_commercial_invoices? @relation("po_commercial_invoices_supersedes", fields: [supersedes_id], references: [id])
+  superseded_by      po_commercial_invoices[] @relation("po_commercial_invoices_supersedes")
+
+  // Future extension point -- NOT built this session: creditNoteId/
+  // debitNoteId would attach here once that feature is ever requested.
+
+  @@unique([business_id, invoice_number])
+  @@index([purchase_order_id])
 }
 
 // ============================================================================
@@ -1641,6 +1702,7 @@ model users {
   supplier_payment_instructions                 supplier_payment_instructions[]
   po_proforma_invoices                          po_proforma_invoices[]
   po_advance_payments                           po_advance_payments[]
+  po_commercial_invoices                        po_commercial_invoices[]
   sales_sales_cashier_idTousers                 sales[]                              @relation("sales_cashier_idTousers")
   sales_sales_confirmed_byTousers               sales[]                              @relation("sales_confirmed_byTousers")
   sessions                                      sessions[]

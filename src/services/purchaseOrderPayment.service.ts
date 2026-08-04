@@ -55,7 +55,30 @@ export async function recordPurchaseOrderPayment(
     throw badRequest(`Payment amount ${amount.toString()} exceeds the remaining balance of ${po.remaining_amount.toString()}`);
   }
 
-  const invoiceAmount = new Prisma.Decimal(input.invoiceAmount);
+  // Session 2B re-pointing: when a current (issued) Commercial Invoice
+  // exists for this PO, ITS total_amount is the authoritative match input,
+  // never a client-supplied number -- keeps the match honest against a
+  // real, previously-verified invoice instead of whatever a caller happens
+  // to type. Falls back to the client-supplied invoiceAmount only when no
+  // Commercial Invoice exists yet, byte-identical to Session B's original
+  // behavior (every PO that hasn't reached that stage, including every
+  // pre-existing Session B test).
+  const currentCommercialInvoice = await prisma.po_commercial_invoices.findFirst({
+    where: { purchase_order_id: purchaseOrderId, status: "issued" },
+    orderBy: { issued_at: "desc" },
+  });
+  let invoiceAmount: Prisma.Decimal;
+  let invoiceReference: string | null;
+  if (currentCommercialInvoice) {
+    invoiceAmount = currentCommercialInvoice.total_amount;
+    invoiceReference = input.invoiceReference ?? currentCommercialInvoice.invoice_number;
+  } else {
+    if (input.invoiceAmount === undefined) {
+      throw badRequest("invoiceAmount is required when no Commercial Invoice has been issued for this purchase order");
+    }
+    invoiceAmount = new Prisma.Decimal(input.invoiceAmount);
+    invoiceReference = input.invoiceReference ?? null;
+  }
 
   // 3-way match: PO expected value vs supplier invoice vs cumulative
   // GRN-received value -- LOCKED tolerance = min(1% of expected, $10),
@@ -128,7 +151,7 @@ export async function recordPurchaseOrderPayment(
       currencyCode: currency?.code ?? business.currency,
       currencySymbol: currency?.symbol ?? null,
       expenseDate: input.paymentDate,
-      referenceNumber: input.invoiceReference ?? null,
+      referenceNumber: invoiceReference,
       description: `Payment against Purchase Order ${po.po_number}`,
       notes: input.notes ?? null,
       source: "purchase_order",
@@ -153,7 +176,7 @@ export async function recordPurchaseOrderPayment(
         purchase_order_id: purchaseOrderId,
         amount,
         invoice_amount: invoiceAmount,
-        invoice_reference: input.invoiceReference,
+        invoice_reference: invoiceReference,
         match_status: matchStatus,
         match_variance: matchVariance,
         match_overridden: matchStatus === "match_failed",
@@ -193,6 +216,24 @@ export async function recordPurchaseOrderPayment(
     matchStatus,
     paymentStatus: result.purchaseOrder.payment_status,
   });
+  // Session 2B -- these did not exist before this session (confirmed via
+  // Phase 0 grep on events.ts); added for real rather than re-fired.
+  if (matchStatus === "matched") {
+    domainEvents.publish("ThreeWayMatchPassed", {
+      businessId: actor.businessId,
+      purchaseOrderId,
+      paymentId: result.payment.id,
+      matchVariance: matchVariance.toString(),
+    });
+  } else {
+    domainEvents.publish("ThreeWayMatchFailed", {
+      businessId: actor.businessId,
+      purchaseOrderId,
+      paymentId: result.payment.id,
+      matchVariance: matchVariance.toString(),
+      overridden: true, // match_failed can only reach this point via an override, see the guard above
+    });
+  }
   // Fired for consistency -- a real Expense row now exists, same as every
   // other path that creates one.
   domainEvents.publish("ExpenseCreated", {
