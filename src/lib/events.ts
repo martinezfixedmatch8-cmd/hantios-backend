@@ -114,6 +114,13 @@ export interface DomainEventPayloads {
   PurchaseOrderNegotiationRejected: { businessId: string; purchaseOrderId: string; proposalId: string };
   PurchaseOrderNegotiationAttachmentUploaded: { businessId: string; purchaseOrderId: string; attachmentId: string };
   PurchaseOrderNegotiationDeadlineSet: { businessId: string; purchaseOrderId: string; respondBy: string | null };
+  // Session 2A -- Supplier Payment Instructions, Proforma Invoice, Advance
+  // Payments. Publish-only, no dispatch, same standing rule as every event
+  // above.
+  SupplierPaymentInstructionCreated: { businessId: string; supplierId: string; instructionId: string; isDefault: boolean };
+  SupplierPaymentInstructionDefaultChanged: { businessId: string; supplierId: string; instructionId: string };
+  PurchaseOrderProformaInvoiceIssued: { businessId: string; purchaseOrderId: string; proformaInvoiceId: string; total: string };
+  PurchaseOrderAdvancePaymentRecorded: { businessId: string; purchaseOrderId: string; proformaInvoiceId: string; advancePaymentId: string; amount: string };
 }
 
 export type DomainEventName = keyof DomainEventPayloads;

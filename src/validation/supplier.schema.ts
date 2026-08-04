@@ -1,11 +1,17 @@
 import { z } from "zod";
 import { paginationQuerySchema } from "../lib/pagination";
 
+const PAYMENT_TERMS_VALUES = ["prepayment", "net_30", "net_60", "net_90"] as const;
+
 export const createSupplierSchema = z.object({
   name: z.string().trim().min(1).max(200),
   phone: z.string().trim().min(1).max(30).optional(),
   email: z.string().trim().email().max(200).optional(),
   notes: z.string().trim().min(1).max(2000).optional(),
+  // Session 2A -- the supplier's own default/quoted terms. Optional: a
+  // supplier can exist with no terms configured yet, same as every other
+  // genuinely-optional field on this model.
+  paymentTerms: z.enum(PAYMENT_TERMS_VALUES).optional(),
 });
 export type CreateSupplierInput = z.infer<typeof createSupplierSchema>;
 
@@ -19,6 +25,7 @@ export const updateSupplierSchema = z.object({
   phone: z.string().trim().min(1).max(30).optional().nullable(),
   email: z.string().trim().email().max(200).optional().nullable(),
   notes: z.string().trim().min(1).max(2000).optional().nullable(),
+  paymentTerms: z.enum(PAYMENT_TERMS_VALUES).optional().nullable(),
 });
 export type UpdateSupplierInput = z.infer<typeof updateSupplierSchema>;
 

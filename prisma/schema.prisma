@@ -142,6 +142,10 @@ model businesses {
   po_negotiation_attachments          po_negotiation_attachments[]
   po_negotiation_internal_notes       po_negotiation_internal_notes[]
   po_negotiation_agreement_snapshots  po_negotiation_agreement_snapshots[]
+  supplier_payment_instructions       supplier_payment_instructions[]
+  proforma_invoice_counters           proforma_invoice_counters?
+  po_proforma_invoices                po_proforma_invoices[]
+  po_advance_payments                 po_advance_payments[]
   receipt_counters                    receipt_counters[]
   sales                               sales[]
   sessions                            sessions[]
@@ -713,6 +717,7 @@ model payment_methods {
   sales          sales[]
   debt_payments  debt_payments[]
   expenses       expenses[]
+  po_advance_payments po_advance_payments[]
 
   @@index([business_id])
 }
@@ -780,6 +785,13 @@ model suppliers {
   phone           String?
   email           String?
   notes           String?
+  // Session 2A -- the supplier's own default/quoted terms, nullable (didn't
+  // exist before this session, so every pre-existing supplier has none
+  // configured). Snapshotted onto purchase_orders.payment_terms at PO
+  // creation time (same "policy snapshot" pattern as costPriceAtSale/
+  // supplier_name_snapshot) -- a later edit here never retroactively
+  // changes an already-created PO's own terms.
+  payment_terms   PaymentTerms?
   status          RecordStatus      @default(active)
   archived_reason String?
   version         Int               @default(0)
@@ -787,9 +799,17 @@ model suppliers {
   updated_at      DateTime          @updatedAt
   businesses      businesses        @relation(fields: [business_id], references: [id])
   purchase_orders purchase_orders[]
+  supplier_payment_instructions supplier_payment_instructions[]
 
   @@index([business_id, status])
   @@index([business_id, name])
+}
+
+enum PaymentTerms {
+  prepayment
+  net_30
+  net_60
+  net_90
 }
 
 enum PurchaseOrderStatus {
@@ -820,6 +840,25 @@ enum PurchaseOrderPaymentStatus {
 enum ThreeWayMatchStatus {
   matched
   match_failed
+}
+
+enum WalletNetwork {
+  trc20
+  erc20
+}
+
+// Session 2A -- an invoice's own LIFECYCLE state only (issued vs
+// superseded-by-a-reissue). Deliberately does NOT include a "fully
+// advanced"/"fully prepaid" value the way an early draft of this session's
+// spec suggested -- that's Invoice Payment Status, a separate, PURELY
+// DERIVED concept (see computeInvoicePaymentStatus in
+// poProformaInvoice.service.ts), never stored here. Keeping status/Payment
+// Status as two different fields resolves what would otherwise be tracking
+// the same "is this invoice covered" fact in two places at once -- the
+// exact principle that already dropped Debts' redundant `disputed` boolean.
+enum ProformaInvoiceStatus {
+  issued
+  superseded
 }
 
 /// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
@@ -864,6 +903,11 @@ model purchase_orders {
   // computeNegotiationStatus in poNegotiation.service.ts), no scheduler.
   negotiation_round                  Int                                  @default(0)
   negotiation_respond_by             DateTime?
+  // Session 2A -- snapshotted once from suppliers.payment_terms at PO
+  // creation time (nullable: a supplier with no configured terms yet, or a
+  // PO created before this session existed). A later edit to the supplier's
+  // own terms never retroactively changes an already-created PO's terms.
+  payment_terms                      PaymentTerms?
   version                            Int                                  @default(0)
   created_by                         String
   created_at                         DateTime                             @default(now())
@@ -882,6 +926,8 @@ model purchase_orders {
   po_negotiation_attachments         po_negotiation_attachments[]
   po_negotiation_internal_notes      po_negotiation_internal_notes[]
   po_negotiation_agreement_snapshots po_negotiation_agreement_snapshots[]
+  po_proforma_invoices               po_proforma_invoices[]
+  po_advance_payments                po_advance_payments[]
 
   @@unique([business_id, po_number])
   @@index([business_id, status])
@@ -1029,6 +1075,151 @@ model purchase_order_payments {
 
   @@index([business_id])
   @@index([purchase_order_id])
+}
+
+// ============================================================================
+// Supplier Payment Instructions + Payment Terms + Proforma Invoice +
+// Advance Payments (Session 2A). Payment Instructions is a genuinely new
+// table, not a reuse of payment_methods -- confirmed in this session's own
+// Phase 0 that payment_methods (Module 07) has no IBAN/SWIFT/beneficiary
+// fields, just a business-configured channel label. See CLAUDE.md's
+// "Supplier Payments, Advance Payments, Proforma Invoice -- Session 2A"
+// section for the full design rationale (why Invoice Payment Status is a
+// separate, purely-derived concept from the already-stored, already-live
+// purchase_orders.payment_status, and why Proforma falls back to the PO's
+// own line items when no Agreement Snapshot exists yet).
+// ============================================================================
+
+/// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
+model supplier_payment_instructions {
+  id               String                @id
+  business_id       String
+  supplier_id       String
+  beneficiary_name  String
+  bank_name         String?
+  account_number    String?
+  iban              String?
+  swift             String?
+  wallet_address    String?
+  network           WalletNetwork?
+  default_currency  String
+  // Only one true per supplier at a time -- enforced for real via a raw
+  // partial unique index (Postgres has no plain @@unique-among-a-subset
+  // syntax in Prisma's DSL, same documented gap as Customer Records'
+  // active-only phone uniqueness), not just an app-layer "unset the old one
+  // first" convention. See the migration's own hand-added
+  // ux_supplier_payment_instructions_one_default index.
+  is_default        Boolean               @default(false)
+  created_at        DateTime              @default(now())
+  created_by        String
+  businesses        businesses            @relation(fields: [business_id], references: [id])
+  suppliers         suppliers             @relation(fields: [supplier_id], references: [id])
+  users             users                 @relation(fields: [created_by], references: [id])
+  po_advance_payments po_advance_payments[]
+
+  @@index([business_id])
+  @@index([supplier_id])
+}
+
+model proforma_invoice_counters {
+  id          String     @id
+  business_id String     @unique
+  last_number Int        @default(0)
+  businesses  businesses @relation(fields: [business_id], references: [id])
+}
+
+/// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
+model po_proforma_invoices {
+  id                    String                @id
+  business_id           String
+  purchase_order_id     String
+  // Nullable -- a PO that never entered negotiation (the common case; a PO
+  // going straight DRAFT->SENT->CONFIRMED without a supplier counter-offer)
+  // has zero po_negotiation_agreement_snapshots rows. Interpretation flagged
+  // explicitly (the base spec assumed one always exists): when null, the
+  // Proforma is generated directly from the PO's own current line items
+  // instead -- a PO the supplier never countered is trivially "agreed" as
+  // sent, so its own items ARE the agreed terms by default.
+  agreement_snapshot_id String?
+  // PFI-000001, sequential per business -- same atomic-counter shape as
+  // po_number/expense_number/customer_number (see proformaInvoiceNumber.ts).
+  invoice_number        String
+  subtotal              Decimal               @db.Decimal(14, 2)
+  shipping_cost         Decimal               @default(0) @db.Decimal(14, 2)
+  insurance             Decimal               @default(0) @db.Decimal(14, 2)
+  total                 Decimal               @db.Decimal(14, 2)
+  currency_code         String
+  valid_until           DateTime
+  issued_at             DateTime              @default(now())
+  issued_by             String
+  // Future PDF generation placeholder, same "dormant, no upload feature
+  // yet" pattern as Products' images / Expense Attachments' storage_key.
+  storage_key           String?
+  // Lifecycle ONLY (issued/superseded) -- Invoice Payment Status
+  // (UNPAID/PARTIALLY_PAID/FULLY_PREPAID) is a separate, purely-derived
+  // concept computed at query time, never stored on this field. See the
+  // enum's own comment for why these were deliberately kept apart.
+  status                ProformaInvoiceStatus @default(issued)
+  created_at            DateTime              @default(now())
+  businesses            businesses            @relation(fields: [business_id], references: [id])
+  purchase_orders       purchase_orders       @relation(fields: [purchase_order_id], references: [id])
+  po_negotiation_agreement_snapshots po_negotiation_agreement_snapshots? @relation(fields: [agreement_snapshot_id], references: [id])
+  users                 users                 @relation(fields: [issued_by], references: [id])
+  po_advance_payments   po_advance_payments[]
+
+  @@unique([business_id, invoice_number])
+  @@index([purchase_order_id])
+}
+
+/// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
+model po_advance_payments {
+  id                              String                        @id
+  business_id                     String
+  purchase_order_id               String
+  proforma_invoice_id             String
+  amount                          Decimal                       @db.Decimal(14, 2)
+  currency_code                   String
+  // Fields only, no conversion logic -- same "snapshot now, convert later"
+  // boundary Purchase Orders' own exchange_rate and Expenses' currency
+  // snapshot already established. Module 19's job, not built here.
+  exchange_rate_snapshot          Decimal?                      @db.Decimal(14, 6)
+  base_currency                   String?
+  supplier_currency               String?
+  // Reuses the existing payment_methods table (a business-configured
+  // channel label, e.g. "Cash"/"M-Pesa"/"Bank Transfer") exactly the way
+  // Sales/DebtPayments/Expenses already do, rather than inventing a new,
+  // parallel "method" string enum -- there is no separate channel-type
+  // value set anywhere else in this schema to duplicate. Nullable, matching
+  // every other optional payment_method_id FK in this repo.
+  payment_method_id               String?
+  supplier_payment_instruction_id String
+  // Snapshotted at write time from the live SupplierPaymentInstruction --
+  // same Policy Snapshot pattern as Payment Terms/unitCostSnapshot. If the
+  // supplier's bank details change later, historical advance payments keep
+  // showing what was actually used at the time.
+  beneficiary_name_snapshot        String
+  bank_name_snapshot               String?
+  account_number_snapshot          String?
+  iban_snapshot                    String?
+  swift_snapshot                   String?
+  wallet_address_snapshot          String?
+  network_snapshot                 WalletNetwork?
+  reference                        String?
+  // Free text, e.g. "Deposit 20%", "Second installment" -- display only,
+  // never read by any business logic.
+  installment_label                String?
+  paid_at                           DateTime                      @default(now())
+  recorded_by                      String
+  created_at                       DateTime                      @default(now())
+  businesses                       businesses                    @relation(fields: [business_id], references: [id])
+  purchase_orders                  purchase_orders               @relation(fields: [purchase_order_id], references: [id])
+  po_proforma_invoices             po_proforma_invoices          @relation(fields: [proforma_invoice_id], references: [id])
+  supplier_payment_instructions    supplier_payment_instructions @relation(fields: [supplier_payment_instruction_id], references: [id])
+  payment_methods                  payment_methods?              @relation(fields: [payment_method_id], references: [id])
+  users                             users                         @relation(fields: [recorded_by], references: [id])
+
+  @@index([purchase_order_id])
+  @@index([proforma_invoice_id])
 }
 
 // ============================================================================
@@ -1299,6 +1490,7 @@ model po_negotiation_agreement_snapshots {
   businesses               businesses               @relation(fields: [business_id], references: [id])
   po_negotiation_proposals po_negotiation_proposals @relation(fields: [proposal_id], references: [id])
   users                    users                    @relation(fields: [accepted_by], references: [id])
+  po_proforma_invoices     po_proforma_invoices[]
 
   @@index([purchase_order_id])
 }
@@ -1446,6 +1638,9 @@ model users {
   po_secure_links_revoked_byTousers             po_secure_links[]                    @relation("po_secure_links_revoked_byTousers")
   po_negotiation_internal_notes                 po_negotiation_internal_notes[]
   po_negotiation_agreement_snapshots            po_negotiation_agreement_snapshots[]
+  supplier_payment_instructions                 supplier_payment_instructions[]
+  po_proforma_invoices                          po_proforma_invoices[]
+  po_advance_payments                           po_advance_payments[]
   sales_sales_cashier_idTousers                 sales[]                              @relation("sales_cashier_idTousers")
   sales_sales_confirmed_byTousers               sales[]                              @relation("sales_confirmed_byTousers")
   sessions                                      sessions[]

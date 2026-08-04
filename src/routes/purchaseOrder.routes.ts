@@ -13,6 +13,8 @@ import {
 } from "../controllers/purchaseOrder.controller";
 import { createGoodsReceivedNote } from "../controllers/goodsReceivedNote.controller";
 import { recordPurchaseOrderPayment } from "../controllers/purchaseOrderPayment.controller";
+import { issueProformaInvoice, listProformaInvoices, getProformaInvoice } from "../controllers/poProformaInvoice.controller";
+import { recordAdvancePayment, listAdvancePayments } from "../controllers/poAdvancePayment.controller";
 
 const router = Router();
 
@@ -42,5 +44,21 @@ router.post("/:id/goods-received-notes", requireRole(...grnRoles), requireIdempo
 // Financial, storekeeper excluded -- mirrors Refund/write-off's elevated
 // bar, not GRN's stock-handling bar.
 router.post("/:id/payments", requireRole(...writeRoles), requireIdempotencyKey, recordPurchaseOrderPayment);
+
+// Session 2A -- locked RBAC table: Issue Proforma Invoice = Owner/Manager;
+// Record Advance Payment = Owner/Manager/Accountant (accountant can record
+// money movements, same bar Debts' own record-payment already uses); View
+// (both) = Owner/Manager/Accountant. Storekeeper/cashier/shareholder/
+// custom: no access, consistent with the rest of this financial surface.
+const proformaWriteRoles = ["owner", "manager"] as const;
+const advancePaymentWriteRoles = ["owner", "manager", "accountant"] as const;
+const financialViewRoles = ["owner", "manager", "accountant"] as const;
+
+router.post("/:id/proforma-invoices", requireRole(...proformaWriteRoles), requireIdempotencyKey, issueProformaInvoice);
+router.get("/:id/proforma-invoices", requireRole(...financialViewRoles), listProformaInvoices);
+router.get("/:id/proforma-invoices/:invoiceId", requireRole(...financialViewRoles), getProformaInvoice);
+
+router.post("/:id/advance-payments", requireRole(...advancePaymentWriteRoles), requireIdempotencyKey, recordAdvancePayment);
+router.get("/:id/advance-payments", requireRole(...financialViewRoles), listAdvancePayments);
 
 export default router;

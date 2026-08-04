@@ -1,4 +1,4 @@
-import { Prisma } from "@prisma/client";
+import { Prisma, type PaymentTerms } from "@prisma/client";
 import { prisma } from "../lib/prisma";
 import { generateId } from "../lib/ids";
 import { assertOwned, getOwned } from "../lib/ownership";
@@ -148,6 +148,11 @@ export async function createPurchaseOrder(input: CreatePurchaseOrderInput, actor
         supplier_name_snapshot: supplier.name,
         supplier_phone_snapshot: supplier.phone,
         supplier_email_snapshot: supplier.email,
+        // Session 2A -- snapshotted once from the supplier's current terms
+        // at PO creation time; a later edit to the supplier's own terms
+        // never retroactively changes this PO's, same principle as every
+        // other snapshot field on this row.
+        payment_terms: supplier.payment_terms,
         po_number: poNumber,
         status: "draft",
         currency_code: currency?.code ?? business.currency,
@@ -231,13 +236,16 @@ export async function updatePurchaseOrder(id: string, input: UpdatePurchaseOrder
     throw badRequest("Only DRAFT purchase orders can be edited");
   }
 
-  let supplierSnapshot: { name: string; phone: string | null; email: string | null } | null = null;
+  let supplierSnapshot: { name: string; phone: string | null; email: string | null; paymentTerms: PaymentTerms | null } | null = null;
   if (input.supplierId !== undefined && input.supplierId !== po.supplier_id) {
     const supplier = await getOwned(prisma.suppliers.findUnique({ where: { id: input.supplierId } }), actor.businessId, "Supplier");
     if (supplier.status !== "active") {
       throw badRequest("Cannot assign an archived supplier to a purchase order");
     }
-    supplierSnapshot = { name: supplier.name, phone: supplier.phone, email: supplier.email };
+    // Session 2A -- re-captured alongside name/phone/email whenever the
+    // supplier itself changes while still DRAFT, same "supplier changed ->
+    // every supplier-derived snapshot re-captures together" rule.
+    supplierSnapshot = { name: supplier.name, phone: supplier.phone, email: supplier.email, paymentTerms: supplier.payment_terms };
   }
   if (input.branchId) {
     const branch = await getOwned(prisma.branches.findUnique({ where: { id: input.branchId } }), actor.businessId, "Branch");
@@ -264,7 +272,12 @@ export async function updatePurchaseOrder(id: string, input: UpdatePurchaseOrder
       data: {
         ...(input.supplierId !== undefined ? { supplier_id: input.supplierId } : {}),
         ...(supplierSnapshot
-          ? { supplier_name_snapshot: supplierSnapshot.name, supplier_phone_snapshot: supplierSnapshot.phone, supplier_email_snapshot: supplierSnapshot.email }
+          ? {
+              supplier_name_snapshot: supplierSnapshot.name,
+              supplier_phone_snapshot: supplierSnapshot.phone,
+              supplier_email_snapshot: supplierSnapshot.email,
+              payment_terms: supplierSnapshot.paymentTerms,
+            }
           : {}),
         ...(input.branchId !== undefined ? { branch_id: input.branchId } : {}),
         ...(input.exchangeRate !== undefined ? { exchange_rate: input.exchangeRate } : {}),

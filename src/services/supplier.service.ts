@@ -42,6 +42,7 @@ export async function createSupplier(input: CreateSupplierInput, actor: Actor, i
         phone: input.phone,
         email: input.email,
         notes: input.notes,
+        payment_terms: input.paymentTerms,
         status: "active",
       },
     });
@@ -109,6 +110,7 @@ export async function updateSupplier(id: string, input: UpdateSupplierInput, act
         ...(input.phone !== undefined ? { phone: input.phone } : {}),
         ...(input.email !== undefined ? { email: input.email } : {}),
         ...(input.notes !== undefined ? { notes: input.notes } : {}),
+        ...(input.paymentTerms !== undefined ? { payment_terms: input.paymentTerms } : {}),
         version: { increment: 1 },
       },
     });

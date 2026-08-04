@@ -78,11 +78,24 @@ export async function cleanupTestBusiness(businessId: string): Promise<void> {
   await prisma.po_negotiation_internal_notes.deleteMany({ where: { business_id: businessId } });
   await prisma.po_secure_links.deleteMany({ where: { business_id: businessId } });
 
+  // Session 2A -- po_advance_payments FKs to po_proforma_invoices AND
+  // supplier_payment_instructions (both RESTRICT), so it must go before
+  // both; po_proforma_invoices FKs to purchase_orders (RESTRICT) and
+  // po_negotiation_agreement_snapshots (SET NULL, order-independent), so it
+  // must go before purchase_orders regardless.
+  await prisma.po_advance_payments.deleteMany({ where: { business_id: businessId } });
+  await prisma.po_proforma_invoices.deleteMany({ where: { business_id: businessId } });
+  await prisma.proforma_invoice_counters.deleteMany({ where: { business_id: businessId } });
+
   // purchase_order_items FKs to products/purchase_orders -- delete before both.
   // purchase_orders FKs to branches/suppliers/users -- delete before all three.
   await prisma.purchase_order_items.deleteMany({ where: { business_id: businessId } });
   await prisma.purchase_orders.deleteMany({ where: { business_id: businessId } });
   await prisma.po_counters.deleteMany({ where: { business_id: businessId } });
+  // supplier_payment_instructions FKs to suppliers -- delete before it
+  // (po_advance_payments, its own only other referencer, is already gone
+  // by this point, see above).
+  await prisma.supplier_payment_instructions.deleteMany({ where: { business_id: businessId } });
   await prisma.suppliers.deleteMany({ where: { business_id: businessId } });
   await prisma.branch_inventory.deleteMany({ where: { business_id: businessId } });
   await prisma.warehouse_stock.deleteMany({ where: { business_id: businessId } });
