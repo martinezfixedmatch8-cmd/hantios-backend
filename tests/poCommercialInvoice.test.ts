@@ -15,6 +15,16 @@ import {
 import type { UserRole } from "@prisma/client";
 import { domainEvents } from "../src/lib/events";
 
+// Module 11 Session 3 -- GATE CORRECTION (LOCKED). Session 2B's interim
+// FULLY_PREPAID gate is REPLACED, not merely extended: Commercial Invoice
+// issuance now depends entirely on shipment status (at least one shipment
+// dispatched/in_transit/arrived/delivered), completely decoupled from
+// payment collection. Every test below that used to build a "fully
+// prepaid" fixture to satisfy the OLD gate now builds a "shipped" fixture
+// instead -- a deliberate, intentional behavior change, not a regression.
+// Session 2B's own historical write-up (issuance always == the Proforma
+// total, so a normal path was guaranteed FULLY_PAID) still holds --
+// only the GATE's basis changed, not the total_amount-sourcing logic.
 describe("PO Commercial Invoice + Full Payment Status", () => {
   const businessIds: string[] = [];
   let businessId: string;
@@ -42,10 +52,11 @@ describe("PO Commercial Invoice + Full Payment Status", () => {
     return new Date(Date.now() + daysFromNow * 24 * 60 * 60 * 1000).toISOString();
   }
 
-  // Builds a fully-prepaid PO: create -> send -> confirm -> issue proforma
-  // -> supplier payment instruction -> advance payment(s) covering the
-  // full proforma total. Everything the Commercial Invoice gate needs.
-  async function createFullyPrepaidPo(costPrice = 10, quantity = 10, paymentTerms?: "net_30" | "net_60" | "net_90") {
+  // A plain sent (not confirmed) PO -- deliberately left at SENT so
+  // Proforma/advance-payment/Commercial-Invoice/GRN/settlement-payment/
+  // Shipments/cancellation all stay valid against it (CONFIRMED can never
+  // be cancelled, per Module 11 Session A's own locked rule).
+  async function createSentPo(costPrice = 10, quantity = 10, paymentTerms?: "net_30" | "net_60" | "net_90") {
     const supplier = await createTestSupplier(businessId);
     if (paymentTerms) {
       await prisma.suppliers.update({ where: { id: supplier.id }, data: { payment_terms: paymentTerms } });
@@ -62,34 +73,74 @@ describe("PO Commercial Invoice + Full Payment Status", () => {
       .set("Authorization", `Bearer ${ownerToken}`)
       .set("Idempotency-Key", idemKey())
       .send({ version: createRes.body.data.version });
-    // Deliberately left at SENT, not CONFIRMED -- Proforma/advance-payment/
-    // Commercial-Invoice/GRN/settlement-payment all accept "sent" as a
-    // valid PO status, and staying at SENT keeps this fixture reusable for
-    // the cancellation test too (CONFIRMED can never be cancelled, per
-    // Module 11 Session A's own locked rule).
     const fullPoRes = await request(app).get(`/purchase-orders/${sendRes.body.data.id}`).set("Authorization", `Bearer ${ownerToken}`);
-    const po = fullPoRes.body.data;
+    return { po: fullPoRes.body.data, supplier, product };
+  }
 
+  // THE new gate's own fixture -- a PO with a shipment at the given status
+  // (dispatched by default), no proforma/advance-payment involved at all.
+  // This is the fixture the locked regression test (NET_30 + UNPAID can
+  // still get a Commercial Invoice once shipped) is built from.
+  async function createShippedPo(
+    costPrice = 10,
+    quantity = 10,
+    paymentTerms?: "net_30" | "net_60" | "net_90",
+    shipmentStatus: "dispatched" | "in_transit" | "arrived" | "delivered" | "pending" = "dispatched"
+  ) {
+    const { po, supplier, product } = await createSentPo(costPrice, quantity, paymentTerms);
+    const poItemId = po.purchase_order_items[0].id;
+
+    const shipmentRes = await request(app)
+      .post(`/purchase-orders/${po.id}/shipments`)
+      .set("Authorization", `Bearer ${ownerToken}`)
+      .set("Idempotency-Key", idemKey())
+      .send({ method: "sea", items: [{ poItemId, quantityShipped: quantity }] });
+    let shipment = shipmentRes.body.data;
+
+    // The shipment status machine is permissive but not unlimited -- it
+    // must be walked through the proper forward chain, not jumped to
+    // directly (e.g. pending -> in_transit is an invalid skip). Walk every
+    // intermediate step up to (and including) the target.
+    const FORWARD_CHAIN = ["dispatched", "in_transit", "arrived", "delivered"] as const;
+    const targetIndex = FORWARD_CHAIN.indexOf(shipmentStatus as (typeof FORWARD_CHAIN)[number]);
+    if (targetIndex !== -1) {
+      for (let i = 0; i <= targetIndex; i++) {
+        const statusRes = await request(app)
+          .patch(`/purchase-orders/${po.id}/shipments/${shipment.id}/status`)
+          .set("Authorization", `Bearer ${ownerToken}`)
+          .set("Idempotency-Key", idemKey())
+          .send({ version: shipment.version, status: FORWARD_CHAIN[i] });
+        shipment = statusRes.body.data;
+      }
+    }
+
+    return { po, supplier, product, shipment };
+  }
+
+  // Adds a fully-advance-paid Proforma Invoice on top of a shipped PO --
+  // used only where a test needs FULLY_PAID Payment Status specifically,
+  // not the issuance gate itself (which no longer cares about payment).
+  async function payProformaInFull(poId: string, supplierId: string) {
     const proformaRes = await request(app)
-      .post(`/purchase-orders/${po.id}/proforma-invoices`)
+      .post(`/purchase-orders/${poId}/proforma-invoices`)
       .set("Authorization", `Bearer ${ownerToken}`)
       .set("Idempotency-Key", idemKey())
       .send({ validUntil: futureDate(30) });
     const proforma = proformaRes.body.data;
 
     const instructionRes = await request(app)
-      .post(`/suppliers/${supplier.id}/payment-instructions`)
+      .post(`/suppliers/${supplierId}/payment-instructions`)
       .set("Authorization", `Bearer ${ownerToken}`)
       .set("Idempotency-Key", idemKey())
       .send({ beneficiaryName: "Acme Supplies Ltd", accountNumber: "0123456789", defaultCurrency: "KES" });
 
     await request(app)
-      .post(`/purchase-orders/${po.id}/advance-payments`)
+      .post(`/purchase-orders/${poId}/advance-payments`)
       .set("Authorization", `Bearer ${ownerToken}`)
       .set("Idempotency-Key", idemKey())
       .send({ proformaInvoiceId: proforma.id, supplierPaymentInstructionId: instructionRes.body.data.id, amount: proforma.total, currency: "KES" });
 
-    return { po, supplier, product, proforma, instruction: instructionRes.body.data };
+    return proforma;
   }
 
   describe("RBAC", () => {
@@ -105,7 +156,7 @@ describe("PO Commercial Invoice + Full Payment Status", () => {
     ];
 
     it.each(cases)("role=$role issue=$canIssue view=$canView", async ({ role, canIssue, canView }) => {
-      const { po } = await createFullyPrepaidPo();
+      const { po } = await createShippedPo();
       const user = await createTestUser(businessId, role);
       const token = mintAccessToken(user);
 
@@ -124,65 +175,9 @@ describe("PO Commercial Invoice + Full Payment Status", () => {
     });
   });
 
-  describe("Issuance gate", () => {
-    it("400s when no Proforma Invoice has ever been issued", async () => {
-      const supplier = await createTestSupplier(businessId);
-      const product = await createTestProduct(businessId);
-      const createRes = await request(app)
-        .post("/purchase-orders")
-        .set("Authorization", `Bearer ${ownerToken}`)
-        .set("Idempotency-Key", idemKey())
-        .send({ supplierId: supplier.id, branchId, items: [{ productId: product.id, quantityOrdered: 5, unitCostSnapshot: 10 }] });
-      const sendRes = await request(app)
-        .post(`/purchase-orders/${createRes.body.data.id}/send`)
-        .set("Authorization", `Bearer ${ownerToken}`)
-        .set("Idempotency-Key", idemKey())
-        .send({ version: createRes.body.data.version });
-
-      const res = await request(app)
-        .post(`/purchase-orders/${sendRes.body.data.id}/commercial-invoices`)
-        .set("Authorization", `Bearer ${ownerToken}`)
-        .set("Idempotency-Key", idemKey())
-        .send({});
-      expect(res.status).toBe(400);
-    });
-
-    it("400s when the Proforma Invoice is only PARTIALLY_PAID", async () => {
-      const supplier = await createTestSupplier(businessId);
-      const product = await createTestProduct(businessId, { costPrice: 10 });
-      const createRes = await request(app)
-        .post("/purchase-orders")
-        .set("Authorization", `Bearer ${ownerToken}`)
-        .set("Idempotency-Key", idemKey())
-        .send({ supplierId: supplier.id, branchId, items: [{ productId: product.id, quantityOrdered: 10, unitCostSnapshot: 10 }] });
-      const sendRes = await request(app)
-        .post(`/purchase-orders/${createRes.body.data.id}/send`)
-        .set("Authorization", `Bearer ${ownerToken}`)
-        .set("Idempotency-Key", idemKey())
-        .send({ version: createRes.body.data.version });
-      const po = sendRes.body.data;
-
-      const proformaRes = await request(app)
-        .post(`/purchase-orders/${po.id}/proforma-invoices`)
-        .set("Authorization", `Bearer ${ownerToken}`)
-        .set("Idempotency-Key", idemKey())
-        .send({ validUntil: futureDate(30) });
-      const instructionRes = await request(app)
-        .post(`/suppliers/${supplier.id}/payment-instructions`)
-        .set("Authorization", `Bearer ${ownerToken}`)
-        .set("Idempotency-Key", idemKey())
-        .send({ beneficiaryName: "Acme", accountNumber: "111", defaultCurrency: "KES" });
-      await request(app)
-        .post(`/purchase-orders/${po.id}/advance-payments`)
-        .set("Authorization", `Bearer ${ownerToken}`)
-        .set("Idempotency-Key", idemKey())
-        .send({
-          proformaInvoiceId: proformaRes.body.data.id,
-          supplierPaymentInstructionId: instructionRes.body.data.id,
-          amount: 40, // total is 100
-          currency: "KES",
-        });
-
+  describe("Issuance gate -- shipment status, decoupled from payment (Session 3 correction)", () => {
+    it("400s when no shipment has ever been created for the PO", async () => {
+      const { po } = await createSentPo();
       const res = await request(app)
         .post(`/purchase-orders/${po.id}/commercial-invoices`)
         .set("Authorization", `Bearer ${ownerToken}`)
@@ -191,22 +186,78 @@ describe("PO Commercial Invoice + Full Payment Status", () => {
       expect(res.status).toBe(400);
     });
 
-    it("allows issuance once FULLY_PREPAID, with totalAmount server-derived from the Proforma total", async () => {
-      const { po, proforma } = await createFullyPrepaidPo(10, 10); // total = 100
+    it("400s while the only shipment is still PENDING (not yet dispatched)", async () => {
+      const { po } = await createShippedPo(10, 10, undefined, "pending");
+      const res = await request(app)
+        .post(`/purchase-orders/${po.id}/commercial-invoices`)
+        .set("Authorization", `Bearer ${ownerToken}`)
+        .set("Idempotency-Key", idemKey())
+        .send({});
+      expect(res.status).toBe(400);
+    });
+
+    it("201s once the shipment reaches DISPATCHED, with totalAmount server-derived from the PO's own total_expected_value (no Proforma exists)", async () => {
+      const { po } = await createShippedPo(10, 10); // 10*10 = 100
       const res = await request(app)
         .post(`/purchase-orders/${po.id}/commercial-invoices`)
         .set("Authorization", `Bearer ${ownerToken}`)
         .set("Idempotency-Key", idemKey())
         .send({});
       expect(res.status).toBe(201);
-      expect(res.body.data.total_amount).toBe(proforma.total);
+      expect(res.body.data.total_amount).toBe("100");
       expect(res.body.data.invoice_number).toMatch(/^CI-\d{6}$/);
     });
+
+    // THE explicit locked regression test: the exact scenario the OLD
+    // FULLY_PREPAID gate would have wrongly blocked.
+    it("LOCKED REGRESSION: a NET_30 PO with UNPAID Payment Status CAN still get a Commercial Invoice issued once shipped", async () => {
+      const { po } = await createShippedPo(10, 10, "net_30");
+
+      const statusBefore = await request(app).get(`/purchase-orders/${po.id}/payment-status`).set("Authorization", `Bearer ${ownerToken}`);
+      expect(statusBefore.body.data.status).toBe("UNPAID");
+
+      const res = await request(app)
+        .post(`/purchase-orders/${po.id}/commercial-invoices`)
+        .set("Authorization", `Bearer ${ownerToken}`)
+        .set("Idempotency-Key", idemKey())
+        .send({});
+      expect(res.status).toBe(201);
+    });
+
+    // Confirms the OLD FULLY_PREPAID-only path is truly gone, not left as
+    // an alternate/OR condition alongside the new shipment check.
+    it("a fully-prepaid-but-NOT-yet-shipped PO CANNOT issue a Commercial Invoice", async () => {
+      const { po, supplier } = await createSentPo(10, 10);
+      const proforma = await payProformaInFull(po.id, supplier.id);
+
+      const statusRes = await request(app).get(`/purchase-orders/${po.id}/payment-status`).set("Authorization", `Bearer ${ownerToken}`);
+      expect(statusRes.body.data.status).toBe("FULLY_PREPAID");
+      void proforma;
+
+      const res = await request(app)
+        .post(`/purchase-orders/${po.id}/commercial-invoices`)
+        .set("Authorization", `Bearer ${ownerToken}`)
+        .set("Idempotency-Key", idemKey())
+        .send({});
+      expect(res.status).toBe(400);
+    });
+
+    it("201s once the shipment reaches IN_TRANSIT/ARRIVED/DELIVERED too, not only DISPATCHED", async () => {
+      for (const status of ["in_transit", "arrived", "delivered"] as const) {
+        const { po } = await createShippedPo(10, 10, undefined, status);
+        const res = await request(app)
+          .post(`/purchase-orders/${po.id}/commercial-invoices`)
+          .set("Authorization", `Bearer ${ownerToken}`)
+          .set("Idempotency-Key", idemKey())
+          .send({});
+        expect(res.status).toBe(201);
+      }
+    }, 90000);
   });
 
   describe("Supersede -- correction chain", () => {
     it("flips the original to superseded and links the correction via supersedes_id", async () => {
-      const { po } = await createFullyPrepaidPo();
+      const { po } = await createShippedPo();
       const first = await request(app)
         .post(`/purchase-orders/${po.id}/commercial-invoices`)
         .set("Authorization", `Bearer ${ownerToken}`)
@@ -227,7 +278,7 @@ describe("PO Commercial Invoice + Full Payment Status", () => {
     });
 
     it("400s superseding an invoice that is already superseded", async () => {
-      const { po } = await createFullyPrepaidPo();
+      const { po } = await createShippedPo();
       const first = await request(app)
         .post(`/purchase-orders/${po.id}/commercial-invoices`)
         .set("Authorization", `Bearer ${ownerToken}`)
@@ -250,7 +301,7 @@ describe("PO Commercial Invoice + Full Payment Status", () => {
 
   describe("3-Way Match re-pointing -- settlement payments now read the Commercial Invoice", () => {
     it("matches using the Commercial Invoice's own total_amount, no invoiceAmount needed in the request", async () => {
-      const { po, product } = await createFullyPrepaidPo(10, 10); // total = 100
+      const { po } = await createShippedPo(10, 10); // total = 100
       await request(app)
         .post(`/purchase-orders/${po.id}/commercial-invoices`)
         .set("Authorization", `Bearer ${ownerToken}`)
@@ -263,9 +314,6 @@ describe("PO Commercial Invoice + Full Payment Status", () => {
         .set("Authorization", `Bearer ${ownerToken}`)
         .set("Idempotency-Key", idemKey())
         .send({ version: po.version, items: [{ poItemId, quantityReceived: 10, unitCostActual: 10 }] }); // 10*10=100, exactly matches
-      // GRN increments the PO's own version -- re-fetch before the payment
-      // call, same pattern purchaseOrderPayment.test.ts's own
-      // createFullyReceivedPo helper already establishes.
       const afterGrn = await request(app).get(`/purchase-orders/${po.id}`).set("Authorization", `Bearer ${ownerToken}`);
 
       const events: unknown[] = [];
@@ -284,12 +332,10 @@ describe("PO Commercial Invoice + Full Payment Status", () => {
       await new Promise((resolve) => setTimeout(resolve, 50));
       expect(events).toHaveLength(1);
       domainEvents.off("ThreeWayMatchPassed", listener);
-
-      void product;
-    });
+    }, 90000);
 
     it("400s when no Commercial Invoice exists and invoiceAmount is omitted (unchanged Session B behavior)", async () => {
-      const { po } = await createFullyPrepaidPo();
+      const { po } = await createShippedPo();
       const res = await request(app)
         .post(`/purchase-orders/${po.id}/payments`)
         .set("Authorization", `Bearer ${ownerToken}`)
@@ -299,7 +345,7 @@ describe("PO Commercial Invoice + Full Payment Status", () => {
     });
 
     it("after a supersede, the match uses the CURRENT Commercial Invoice's total, not the superseded one", async () => {
-      const { po } = await createFullyPrepaidPo(10, 10); // total = 100
+      const { po } = await createShippedPo(10, 10); // total = 100
       const first = await request(app)
         .post(`/purchase-orders/${po.id}/commercial-invoices`)
         .set("Authorization", `Bearer ${ownerToken}`)
@@ -326,30 +372,19 @@ describe("PO Commercial Invoice + Full Payment Status", () => {
         .send({ version: afterGrn.body.data.version, amount: 10, paymentDate: new Date().toISOString() });
       expect(paymentRes.status).toBe(201);
       expect(paymentRes.body.data.payment.invoice_reference).toContain("CI-");
-    });
+    }, 90000);
   });
 
   describe("Full Payment Status derivation", () => {
     it("UNPAID before any Proforma Invoice exists", async () => {
-      const supplier = await createTestSupplier(businessId);
-      const product = await createTestProduct(businessId);
-      const createRes = await request(app)
-        .post("/purchase-orders")
-        .set("Authorization", `Bearer ${ownerToken}`)
-        .set("Idempotency-Key", idemKey())
-        .send({ supplierId: supplier.id, branchId, items: [{ productId: product.id, quantityOrdered: 5, unitCostSnapshot: 10 }] });
-      const sendRes = await request(app)
-        .post(`/purchase-orders/${createRes.body.data.id}/send`)
-        .set("Authorization", `Bearer ${ownerToken}`)
-        .set("Idempotency-Key", idemKey())
-        .send({ version: createRes.body.data.version });
-
-      const res = await request(app).get(`/purchase-orders/${sendRes.body.data.id}/payment-status`).set("Authorization", `Bearer ${ownerToken}`);
+      const { po } = await createSentPo();
+      const res = await request(app).get(`/purchase-orders/${po.id}/payment-status`).set("Authorization", `Bearer ${ownerToken}`);
       expect(res.body.data.status).toBe("UNPAID");
     });
 
-    it("FULLY_PAID once a Commercial Invoice is issued (server-derived total already fully covered by construction)", async () => {
-      const { po } = await createFullyPrepaidPo();
+    it("FULLY_PAID once a Commercial Invoice is issued against a fully-advance-paid Proforma (server-derived total already fully covered by construction)", async () => {
+      const { po, supplier } = await createShippedPo();
+      await payProformaInFull(po.id, supplier.id);
       await request(app)
         .post(`/purchase-orders/${po.id}/commercial-invoices`)
         .set("Authorization", `Bearer ${ownerToken}`)
@@ -361,7 +396,8 @@ describe("PO Commercial Invoice + Full Payment Status", () => {
     });
 
     it("PARTIALLY_PAID after a supersede raises the total above what's already been paid", async () => {
-      const { po } = await createFullyPrepaidPo(10, 10); // total = 100, fully advance-paid
+      const { po, supplier } = await createShippedPo(10, 10); // total = 100
+      await payProformaInFull(po.id, supplier.id);
       const first = await request(app)
         .post(`/purchase-orders/${po.id}/commercial-invoices`)
         .set("Authorization", `Bearer ${ownerToken}`)
@@ -378,12 +414,9 @@ describe("PO Commercial Invoice + Full Payment Status", () => {
       expect(res.body.data.amountOwed).toBe("50");
     });
 
-    // Split into two focused tests (each doing one full flow, not two) --
-    // the original combined version exceeded Jest's default 40s timeout
-    // under this environment's real per-query Neon latency, a test-design
-    // issue, not a logic bug.
     it("OVERDUE for NET_30 terms once the due date has passed", async () => {
-      const { po } = await createFullyPrepaidPo(10, 10, "net_30");
+      const { po, supplier } = await createShippedPo(10, 10, "net_30");
+      await payProformaInFull(po.id, supplier.id);
       const first = await request(app)
         .post(`/purchase-orders/${po.id}/commercial-invoices`)
         .set("Authorization", `Bearer ${ownerToken}`)
@@ -404,7 +437,8 @@ describe("PO Commercial Invoice + Full Payment Status", () => {
     }, 90000);
 
     it("never reports OVERDUE for PREPAYMENT terms, even with an old issued_at and an uncovered balance", async () => {
-      const { po: prepaymentPo } = await createFullyPrepaidPo(10, 10);
+      const { po: prepaymentPo, supplier } = await createShippedPo(10, 10);
+      await payProformaInFull(prepaymentPo.id, supplier.id);
       const prepaymentCi = await request(app)
         .post(`/purchase-orders/${prepaymentPo.id}/commercial-invoices`)
         .set("Authorization", `Bearer ${ownerToken}`)
@@ -427,7 +461,7 @@ describe("PO Commercial Invoice + Full Payment Status", () => {
     }, 90000);
 
     it("CANCELLED once the PO is cancelled, regardless of payment state", async () => {
-      const { po } = await createFullyPrepaidPo();
+      const { po } = await createSentPo();
       await request(app)
         .post(`/purchase-orders/${po.id}/cancel`)
         .set("Authorization", `Bearer ${ownerToken}`)
@@ -444,7 +478,7 @@ describe("PO Commercial Invoice + Full Payment Status", () => {
     businessIds.push(other.businessId);
     const otherLogin = await loginTestOwner(other.email, other.password, other.deviceId);
 
-    const { po } = await createFullyPrepaidPo();
+    const { po } = await createShippedPo();
     const res = await request(app)
       .post(`/purchase-orders/${po.id}/commercial-invoices`)
       .set("Authorization", `Bearer ${otherLogin.accessToken}`)

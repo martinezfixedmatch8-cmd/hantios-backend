@@ -27,10 +27,16 @@ export function supersedeCommercialInvoiceEndpoint(poId: string, invoiceId: stri
   return `POST /purchase-orders/${poId}/commercial-invoices/${invoiceId}/supersede`;
 }
 
+// Shipment statuses that mean "goods have actually left the supplier" --
+// the real signal Session 3 replaces the interim FULLY_PREPAID gate with.
+const DISPATCHED_SHIPMENT_STATUSES = ["dispatched", "in_transit", "arrived", "delivered"] as const;
+
 // Loads the PO's current (status=issued) Proforma Invoice and computes its
-// own Payment Status -- the shared gate-check both issue and the
-// payment-status read use.
-async function loadGatingProformaStatus(poId: string) {
+// own Payment Status -- used only by getPaymentStatus's own reporting now
+// (renamed from its Session 2B name, loadGatingProformaStatus -- Payment
+// Status stopped "gating" anything the moment this session's correction
+// landed; it's purely informational going forward).
+async function loadProformaPaymentStatus(poId: string) {
   const proforma = await prisma.po_proforma_invoices.findFirst({
     where: { purchase_order_id: poId, status: "issued" },
     orderBy: { issued_at: "desc" },
@@ -46,25 +52,42 @@ async function loadGatingProformaStatus(poId: string) {
   return { proforma, status, advancePaidSum };
 }
 
-// Interim "post-shipment" gate substitute -- the original design says
-// Commercial Invoice is issuable "post-shipment," but Shipments (Session 3)
-// doesn't exist yet, so no real shipment-status gate is achievable this
-// session. Using "the Proforma Invoice has been fully covered by advance
-// payments" as the best available signal instead.
-// TODO(Session 3): replace this gate with a real shipment-received/
-// delivered status check once Shipments exists.
+// GATE CORRECTION (Module 11 Session 3, LOCKED) -- Session 2B's interim
+// FULLY_PREPAID gate was not just incomplete, it was actively wrong for
+// credit-terms POs: requiring full prepayment before a Commercial Invoice
+// could issue defeats the entire purpose of NET_30/60/90 terms, where the
+// invoice is supposed to issue and payment follows per the term. The gate's
+// BASIS is replaced entirely, not just its implementation -- issuance now
+// depends on shipment reality (has the PO actually been dispatched),
+// completely decoupled from payment collection. Payment Status remains a
+// separately tracked, separately reported concept (still available via
+// GET .../payment-status below) -- it is no longer, and must never again
+// be, a precondition for Commercial Invoice issuance. The FULLY_PREPAID
+// precondition is fully removed here, not left as an alternate/OR path.
 export async function issueCommercialInvoice(poId: string, actor: Actor, idempotencyKey: string) {
   const po = await getOwned(prisma.purchase_orders.findUnique({ where: { id: poId } }), actor.businessId, "Purchase order");
 
-  const { proforma, status } = await loadGatingProformaStatus(poId);
-  if (!proforma) {
-    throw badRequest("A Proforma Invoice must be issued and fully covered by advance payments before a Commercial Invoice can be issued");
-  }
-  if (status !== "FULLY_PREPAID") {
+  const dispatchedShipment = await prisma.po_shipments.findFirst({
+    where: { purchase_order_id: poId, status: { in: [...DISPATCHED_SHIPMENT_STATUSES] } },
+  });
+  if (!dispatchedShipment) {
     throw badRequest(
-      `Cannot issue a Commercial Invoice until the Proforma Invoice is fully covered by advance payments (current status: ${status})`
+      "Commercial Invoice can only be issued once at least one shipment has been dispatched (status: dispatched, in_transit, arrived, or delivered)"
     );
   }
+
+  // total_amount still prefers the current Proforma Invoice's own total
+  // when one exists (the most refined, negotiated figure) -- but issuance
+  // no longer requires it to be paid, or even to exist at all. Falls back
+  // to the PO's own total_expected_value otherwise, same
+  // fallback-to-PO-total reasoning Proforma Invoice's own issuance already
+  // established for the "never negotiated" case.
+  const currentProforma = await prisma.po_proforma_invoices.findFirst({
+    where: { purchase_order_id: poId, status: "issued" },
+    orderBy: { issued_at: "desc" },
+  });
+  const totalAmount = currentProforma ? currentProforma.total : po.total_expected_value;
+  const currencyCode = currentProforma ? currentProforma.currency_code : po.currency_code;
 
   const result = await prisma.$transaction(async (tx) => {
     await claimIdempotencyKey(tx, actor.businessId, idempotencyKey, issueCommercialInvoiceEndpoint(poId));
@@ -85,10 +108,10 @@ export async function issueCommercialInvoice(poId: string, actor: Actor, idempot
         purchase_order_id: poId,
         invoice_number: invoiceNumber,
         // Server-derived, never client-suppliable on the normal issuance
-        // path -- the exact figure that was just verified as fully
-        // covered, keeping the gate airtight.
-        total_amount: proforma.total,
-        currency_code: proforma.currency_code,
+        // path -- sourced from the current Proforma Invoice when one
+        // exists, else the PO's own total_expected_value.
+        total_amount: totalAmount,
+        currency_code: currencyCode,
         issued_by: actor.userId,
       },
     });
@@ -101,7 +124,7 @@ export async function issueCommercialInvoice(poId: string, actor: Actor, idempot
       action: "purchase_order.commercial_invoice_issued",
       entityType: "po_commercial_invoice",
       entityId: created.id,
-      reason: `Commercial Invoice ${invoiceNumber} issued for PO ${po.po_number}, total ${created.total_amount.toString()} ${created.currency_code}`,
+      reason: `Commercial Invoice ${invoiceNumber} issued for PO ${po.po_number} (shipment ${dispatchedShipment.shipment_number}, status ${dispatchedShipment.status}), total ${created.total_amount.toString()} ${created.currency_code}`,
     });
 
     const responseBody = JSON.parse(JSON.stringify({ data: created })) as unknown;
@@ -215,7 +238,7 @@ export async function getPaymentStatus(poId: string, businessId: string) {
     orderBy: { issued_at: "desc" },
   });
 
-  const { proforma, advancePaidSum } = await loadGatingProformaStatus(poId);
+  const { proforma, advancePaidSum } = await loadProformaPaymentStatus(poId);
 
   const settlementPayments = await prisma.purchase_order_payments.findMany({
     where: { purchase_order_id: poId },

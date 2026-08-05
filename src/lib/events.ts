@@ -130,6 +130,15 @@ export interface DomainEventPayloads {
   ThreeWayMatchFailed: { businessId: string; purchaseOrderId: string; paymentId: string; matchVariance: string; overridden: boolean };
   PurchaseOrderCommercialInvoiceIssued: { businessId: string; purchaseOrderId: string; commercialInvoiceId: string; totalAmount: string };
   PurchaseOrderCommercialInvoiceSuperseded: { businessId: string; purchaseOrderId: string; commercialInvoiceId: string; supersedesId: string };
+  // Module 11 Session 3 -- Shipments/Tracking/Delivery Milestones/ETA.
+  // Publish-only, no dispatch, same standing rule as every event above.
+  // PurchaseOrderShipmentEtaChanged is what should eventually notify the
+  // owner of delays -- publish only this session, no dispatch.
+  PurchaseOrderShipmentCreated: { businessId: string; purchaseOrderId: string; shipmentId: string; shipmentNumber: string };
+  PurchaseOrderShipmentStatusChanged: { businessId: string; purchaseOrderId: string; shipmentId: string; fromStatus: string; toStatus: string };
+  PurchaseOrderShipmentEtaChanged: { businessId: string; purchaseOrderId: string; shipmentId: string; newExpectedArrivalFrom: string | null; newExpectedArrivalTo: string | null };
+  PurchaseOrderShipmentAttachmentUploaded: { businessId: string; purchaseOrderId: string; shipmentId: string; attachmentId: string };
+  PurchaseOrderDeliveryMilestoneRecorded: { businessId: string; purchaseOrderId: string; milestoneId: string; milestone: string };
 }
 
 export type DomainEventName = keyof DomainEventPayloads;

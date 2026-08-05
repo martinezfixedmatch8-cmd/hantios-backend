@@ -93,6 +93,20 @@ export async function cleanupTestBusiness(businessId: string): Promise<void> {
   await prisma.po_commercial_invoices.deleteMany({ where: { business_id: businessId } });
   await prisma.commercial_invoice_counters.deleteMany({ where: { business_id: businessId } });
 
+  // Session 3 -- po_eta_updates/po_shipment_attachments/
+  // po_shipment_status_history/po_shipment_items all FK to po_shipments
+  // (RESTRICT), so all four must go before it; po_delivery_milestones FKs
+  // to po_shipments too but via SET NULL (order-independent among those
+  // two, still placed here for clarity); po_shipments/po_delivery_milestones
+  // both FK to purchase_orders (RESTRICT), so both must go before that.
+  await prisma.po_eta_updates.deleteMany({ where: { business_id: businessId } });
+  await prisma.po_shipment_attachments.deleteMany({ where: { business_id: businessId } });
+  await prisma.po_shipment_status_history.deleteMany({ where: { business_id: businessId } });
+  await prisma.po_shipment_items.deleteMany({ where: { business_id: businessId } });
+  await prisma.po_delivery_milestones.deleteMany({ where: { business_id: businessId } });
+  await prisma.po_shipments.deleteMany({ where: { business_id: businessId } });
+  await prisma.shipment_counters.deleteMany({ where: { business_id: businessId } });
+
   // purchase_order_items FKs to products/purchase_orders -- delete before both.
   // purchase_orders FKs to branches/suppliers/users -- delete before all three.
   await prisma.purchase_order_items.deleteMany({ where: { business_id: businessId } });

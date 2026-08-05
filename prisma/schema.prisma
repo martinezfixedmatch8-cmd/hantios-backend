@@ -148,6 +148,13 @@ model businesses {
   po_advance_payments                 po_advance_payments[]
   commercial_invoice_counters         commercial_invoice_counters?
   po_commercial_invoices              po_commercial_invoices[]
+  shipment_counters                   shipment_counters[]
+  po_shipments                        po_shipments[]
+  po_shipment_items                   po_shipment_items[]
+  po_delivery_milestones              po_delivery_milestones[]
+  po_eta_updates                      po_eta_updates[]
+  po_shipment_attachments             po_shipment_attachments[]
+  po_shipment_status_history          po_shipment_status_history[]
   receipt_counters                    receipt_counters[]
   sales                               sales[]
   sessions                            sessions[]
@@ -931,6 +938,9 @@ model purchase_orders {
   po_proforma_invoices               po_proforma_invoices[]
   po_advance_payments                po_advance_payments[]
   po_commercial_invoices             po_commercial_invoices[]
+  po_shipments                       po_shipments[]
+  po_delivery_milestones             po_delivery_milestones[]
+  po_eta_updates                     po_eta_updates[]
 
   @@unique([business_id, po_number])
   @@index([business_id, status])
@@ -962,6 +972,7 @@ model purchase_order_items {
   products                        products                          @relation(fields: [product_id], references: [id])
   goods_received_items            goods_received_items[]
   po_negotiation_proposal_changes po_negotiation_proposal_changes[]
+  po_shipment_items               po_shipment_items[]
 
   @@index([business_id])
   @@index([purchase_order_id])
@@ -1281,6 +1292,344 @@ model po_commercial_invoices {
 
   @@unique([business_id, invoice_number])
   @@index([purchase_order_id])
+}
+
+// ============================================================================
+// Shipments, Tracking, Delivery Milestones, ETA (Module 11 Session 3).
+// Corrects Session 2B's interim FULLY_PREPAID Commercial Invoice gate with
+// the real signal it was always meant to be replaced with -- see CLAUDE.md's
+// "Shipments, Tracking, Delivery Milestones -- Module 11 Session 3" section
+// for full design rationale (why "who acted" fields reuse PoNegotiationParty
+// instead of a users FK, why the Shipment Audit Log requirement is satisfied
+// by the existing audit_logs table rather than a new parallel one, why
+// over-shipment is hard-blocked unlike GRN's own allow-and-flag precedent).
+// ============================================================================
+
+enum ShipmentMethod {
+  air
+  sea
+  courier
+}
+
+enum ShipmentTrackingType {
+  bill_of_lading
+  air_waybill
+  container_number
+  courier_tracking
+}
+
+// Real ICC Incoterms 2020 values -- kept UPPERCASE, a deliberate exception
+// to this schema's own snake_case enum convention. Unlike every other enum
+// in this codebase (invented internal vocabulary), these are a fixed
+// external trade-document standard; lowercasing them would be unrecognizable
+// on real customs/freight paperwork, the same reasoning that already keeps
+// SWIFT codes and ISO currency codes in their natural uppercase form.
+enum Incoterm {
+  EXW
+  FCA
+  FAS
+  FOB
+  CFR
+  CIF
+  CPT
+  CIP
+  DAP
+  DPU
+  DDP
+}
+
+enum ShipmentCostResponsibility {
+  buyer
+  supplier
+  shared
+}
+
+// Locked vocabulary (used literally in the Commercial Invoice gate
+// condition below) -- deliberately NOT the addendum's own "typical
+// shipment timeline" example (Created/Booked/Loaded/Departed/Arrived Port/
+// Customs Clearance/Out For Delivery/Delivered). That list is illustrative
+// narrative color for the general concept of a status timeline, not a
+// competing literal enum -- adopting it verbatim would break the one gate
+// condition in this whole session that's explicitly locked and testable
+// ("status IN (dispatched, in_transit, arrived, delivered)"). Flagged, not
+// silently reconciled.
+enum ShipmentStatus {
+  pending
+  dispatched
+  in_transit
+  customs
+  arrived
+  delivered
+  delayed
+  cancelled
+}
+
+enum ShipmentPriority {
+  low
+  normal
+  high
+  urgent
+}
+
+enum ShipmentCancellationReason {
+  supplier_issue
+  port_closure
+  customer_cancelled
+  inventory_issue
+  other
+}
+
+enum DeliveryMilestoneType {
+  production_started
+  production_finished
+  packing
+  ready_to_ship
+  shipped
+  customs_clearance
+  arrived
+  warehouse_received
+  completed
+}
+
+enum EtaReasonCategory {
+  weather
+  port_congestion
+  customs
+  carrier_delay
+  supplier_delay
+  other
+}
+
+enum ShipmentAttachmentType {
+  packing_list
+  bill_of_lading
+  air_waybill
+  certificate_of_origin
+  insurance_certificate
+  inspection_certificate
+  other
+}
+
+model shipment_counters {
+  id          String     @id
+  business_id String
+  year        Int
+  last_number Int        @default(0)
+  businesses  businesses @relation(fields: [business_id], references: [id])
+
+  @@unique([business_id, year])
+}
+
+/// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
+model po_shipments {
+  id                        String                       @id
+  business_id               String
+  purchase_order_id         String
+  // SHP-2026-000001 -- year-scoped, mirroring receiptNumber.ts's exact
+  // (business_id, year) shape, NOT the flat po_number/grn_number sequence --
+  // the addendum's own example is year-scoped, unlike every other numbered
+  // document in Module 11.
+  shipment_number           String
+  method                    ShipmentMethod
+  carrier                   String?
+  tracking_reference        String?
+  tracking_type             ShipmentTrackingType?
+  container_no              String?
+  vessel_or_flight          String?
+  port_of_departure         String?
+  port_of_arrival           String?
+  // Addendum #17 -- a real delivery window, not a single point-in-time ETA.
+  expected_arrival_from     DateTime?
+  expected_arrival_to       DateTime?
+  actual_arrival            DateTime?
+  incoterms                 Incoterm?
+  // Stored explicitly, only ever DEFAULT-SUGGESTED from incoterms at create
+  // time (see suggestCostResponsibility in src/lib/shipmentCostSuggestion.ts)
+  // -- never silently re-derived on read, since real contracts routinely
+  // deviate from textbook Incoterm cost rules.
+  cost_responsibility       ShipmentCostResponsibility?
+  shipping_cost             Decimal                      @default(0) @db.Decimal(14, 2)
+  insurance                 Decimal                      @default(0) @db.Decimal(14, 2)
+  // Addendum #14 -- a SEPARATE business fact from insurance's own monetary
+  // amount above. $500 of insurance cost and "who contractually pays it"
+  // are never the same fact; never inferred from one another at read time.
+  insurance_responsibility  ShipmentCostResponsibility?
+  customs_cost              Decimal                      @default(0) @db.Decimal(14, 2)
+  customs_notes             String?
+  status                    ShipmentStatus               @default(pending)
+  priority                  ShipmentPriority              @default(normal)
+  // Addendum #15 -- snapshotted once at shipment creation from whichever of
+  // branches.location/warehouses.location the PO actually resolves to (this
+  // schema has no dedicated structured address entity anywhere) -- a later
+  // change to the live branch/warehouse record must never retroactively
+  // change a historical shipment's own agreed destination.
+  delivery_address_snapshot Json
+  // Addendum #20 -- three independent identifiers, never overloaded into
+  // one generic "reference" field.
+  supplier_reference        String?
+  carrier_reference         String?
+  customs_reference         String?
+  // Addendum #18 -- a cancelled shipment always carries a real reason, never
+  // just a bare terminal status.
+  cancel_reason             ShipmentCancellationReason?
+  cancel_reason_notes       String?
+  // Addendum #19 -- logistics proof-of-delivery, a genuinely different
+  // business event from GRN's own warehouse-inspection verification. A
+  // shipment can be "delivered" before GRN ever runs.
+  received_by               String?
+  received_at               DateTime?
+  receiver_notes            String?
+  // "Who created this" reuses PoNegotiationParty exactly like every
+  // po_negotiation_* table already does, rather than a users FK -- a
+  // shipment can originate from either side (POST /portal/po/:token/
+  // shipments exists for the supplier too), and a supplier has no users
+  // row anywhere in this schema.
+  created_by_party          PoNegotiationParty
+  created_by_name           String?
+  // Addendum #23 -- optimistic lock, and the mechanism the version-lock
+  // rule below is built on: once status reaches delivered/cancelled, every
+  // guarded updateMany in this module additionally requires
+  // status: {notIn: [delivered, cancelled]} in its own WHERE clause, making
+  // the row immutable by construction rather than by a separate check.
+  version                   Int                          @default(0)
+  created_at                DateTime                     @default(now())
+  updated_at                DateTime                     @updatedAt
+  purchase_orders           purchase_orders              @relation(fields: [purchase_order_id], references: [id])
+  businesses                businesses                   @relation(fields: [business_id], references: [id])
+  items                     po_shipment_items[]
+  eta_updates               po_eta_updates[]
+  milestones                po_delivery_milestones[]
+  attachments               po_shipment_attachments[]
+  status_history            po_shipment_status_history[]
+
+  @@unique([business_id, shipment_number])
+  @@index([purchase_order_id])
+}
+
+// LOCKED, the most important addition this session -- structured line
+// items per shipment, same principle as goods_received_items. Multiple
+// po_shipments rows per PO are expected and normal (partial shipments,
+// same precedent as partial GRN) -- deliberately no uniqueness constraint
+// assuming one shipment per PO.
+/// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
+model po_shipment_items {
+  id                    String                @id
+  business_id           String
+  shipment_id           String
+  po_item_id            String
+  quantity_shipped      Decimal               @db.Decimal(14, 2)
+  created_at            DateTime              @default(now())
+  po_shipments          po_shipments          @relation(fields: [shipment_id], references: [id])
+  purchase_order_items  purchase_order_items  @relation(fields: [po_item_id], references: [id])
+  businesses            businesses            @relation(fields: [business_id], references: [id])
+
+  @@index([shipment_id])
+  @@index([po_item_id])
+}
+
+// shipment_id is optional -- null for PO-level milestones (e.g.
+// production_started, recorded before any shipment exists yet). Never
+// strictly sequence-enforced this session (real-world logistics reporting
+// isn't always clean) -- variance (actualDate - plannedDate) is computed at
+// query/report time, never a stored column, same "derive, don't store what
+// can drift" principle already applied to Negotiation Status/Debt
+// aging/Invoice Payment Status elsewhere in this codebase. Recording a
+// milestone here, including warehouse_received/completed, never triggers or
+// duplicates GRN creation -- GRN stays exactly as it already works
+// (owner/storekeeper-initiated via its own existing endpoint), confirmed via
+// Phase 0 that nothing else in this codebase calls it.
+model po_delivery_milestones {
+  id                 String                 @id
+  business_id        String
+  purchase_order_id  String
+  shipment_id        String?
+  milestone          DeliveryMilestoneType
+  planned_date       DateTime?
+  actual_date        DateTime?
+  recorded_from      PoNegotiationParty
+  recorded_by_name   String?
+  created_at         DateTime               @default(now())
+  purchase_orders    purchase_orders        @relation(fields: [purchase_order_id], references: [id])
+  po_shipments       po_shipments?          @relation(fields: [shipment_id], references: [id])
+  businesses         businesses             @relation(fields: [business_id], references: [id])
+
+  @@index([purchase_order_id])
+  @@index([shipment_id])
+}
+
+// Append-only -- every arrival-window change is a NEW row, po_shipments'
+// own expected_arrival_from/to get updated to the new values but the full
+// history stays here forever. reason_category + reason are both required
+// on every update (pick "other" if nothing else fits -- never optional,
+// never losing analytics coverage).
+model po_eta_updates {
+  id                        String            @id
+  business_id               String
+  purchase_order_id         String
+  shipment_id                String
+  old_expected_arrival_from  DateTime?
+  old_expected_arrival_to    DateTime?
+  new_expected_arrival_from  DateTime?
+  new_expected_arrival_to    DateTime?
+  reason_category            EtaReasonCategory
+  reason                     String
+  updated_by_party           PoNegotiationParty
+  updated_by_name            String?
+  updated_at                 DateTime          @default(now())
+  purchase_orders            purchase_orders   @relation(fields: [purchase_order_id], references: [id])
+  po_shipments               po_shipments      @relation(fields: [shipment_id], references: [id])
+  businesses                 businesses        @relation(fields: [business_id], references: [id])
+
+  @@index([shipment_id])
+}
+
+// Reuses StorageProvider exactly (built PO Negotiation Session 1, already
+// retrofitted onto Expense Attachments) -- no parallel storage abstraction.
+/// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
+model po_shipment_attachments {
+  id                String                  @id
+  business_id       String
+  shipment_id       String
+  type              ShipmentAttachmentType
+  file_name         String
+  file_size_bytes   Int
+  storage_key       String
+  uploaded_by_party PoNegotiationParty
+  uploaded_by_name  String?
+  uploaded_at       DateTime                @default(now())
+  po_shipments      po_shipments            @relation(fields: [shipment_id], references: [id])
+  businesses        businesses              @relation(fields: [business_id], references: [id])
+
+  @@index([shipment_id])
+}
+
+// Addendum #11 -- a shipment's CURRENT status (po_shipments.status) and its
+// historical journey are two separate business concepns. This table is the
+// immutable audit trail of every state transition (never overwritten,
+// always appended), the same architectural philosophy already used by
+// debt_transactions/warehouse_movements/po_negotiation_agreement_snapshots.
+// Deliberately distinct from the addendum's own "Shipment Audit Log"
+// requirement (#21, operational changes like carrier/cost/tracking
+// updates) -- that requirement is satisfied by this repo's existing
+// generic, universal audit_logs table (used by every module for exactly
+// this purpose already) rather than a second, shipment-only parallel
+// table; this table captures ONLY structured from/to state transitions,
+// a genuinely different shape audit_logs' own free-text reason field
+// doesn't model as cleanly for building a status-timeline view.
+model po_shipment_status_history {
+  id               String              @id
+  business_id      String
+  shipment_id      String
+  from_status      ShipmentStatus?
+  to_status        ShipmentStatus
+  changed_by_party PoNegotiationParty
+  changed_by_name  String?
+  changed_at       DateTime            @default(now())
+  note             String?
+  po_shipments     po_shipments        @relation(fields: [shipment_id], references: [id])
+  businesses       businesses          @relation(fields: [business_id], references: [id])
+
+  @@index([shipment_id])
 }
 
 // ============================================================================
