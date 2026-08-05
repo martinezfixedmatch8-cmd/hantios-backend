@@ -151,3 +151,51 @@ export type UpdateSupplierShipmentEtaInput = z.infer<typeof updateSupplierShipme
 
 export const listShipmentsQuerySchema = paginationQuerySchema;
 export type ListShipmentsQuery = z.infer<typeof listShipmentsQuerySchema>;
+
+// PATCH /purchase-orders/:id/shipments/:shipmentId -- a genuinely new
+// endpoint born from a second review pass, not part of the original locked
+// API surface. LOCKED, explicit editable-field allowlist: only logistics-
+// execution details that legitimately arrive/change after creation.
+// Nothing that defines the shipment's core identity or contractual terms
+// (poId, method, incoterms, portOfDeparture, portOfArrival,
+// deliveryAddressSnapshot, or anything item/quantity-related) is ever
+// editable via this or any other endpoint -- `.strict()` below rejects any
+// attempt to send a field outside this allowlist with a 400, the same way
+// it rejects a genuinely unknown field.
+const editableShipmentFieldsSchema = z.object({
+  carrier: z.string().trim().max(200).optional(),
+  trackingReference: z.string().trim().max(200).optional(),
+  trackingType: z.enum(TRACKING_TYPES).optional(),
+  shippingCost: decimalField(z.coerce.number().nonnegative()).optional(),
+  insurance: decimalField(z.coerce.number().nonnegative()).optional(),
+  customsCost: decimalField(z.coerce.number().nonnegative()).optional(),
+  priority: z.enum(PRIORITIES).optional(),
+});
+
+const EDITABLE_SHIPMENT_FIELD_NAMES = [
+  "carrier",
+  "trackingReference",
+  "trackingType",
+  "shippingCost",
+  "insurance",
+  "customsCost",
+  "priority",
+] as const;
+
+export const updateShipmentSchema = editableShipmentFieldsSchema
+  .extend({
+    version: z.number().int().nonnegative(),
+    // A single reason covering the whole update -- explicitly sufficient
+    // per the locked instruction unless multiple unrelated fields are
+    // changed in one call; the audit log's own beforeState/afterState JSON
+    // already shows exactly WHAT changed, this reason explains WHY.
+    reason: z.string().trim().min(1).max(1000),
+  })
+  .strict()
+  .superRefine((input, ctx) => {
+    const hasAnyEditableField = EDITABLE_SHIPMENT_FIELD_NAMES.some((key) => input[key] !== undefined);
+    if (!hasAnyEditableField) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: "At least one editable field must be provided", path: ["carrier"] });
+    }
+  });
+export type UpdateShipmentInput = z.infer<typeof updateShipmentSchema>;

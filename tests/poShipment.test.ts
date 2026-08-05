@@ -507,6 +507,170 @@ describe("PO Shipments, Tracking, Delivery Milestones, ETA", () => {
     });
   });
 
+  describe("General shipment update -- PATCH /:id/shipments/:shipmentId (added on second review)", () => {
+    it("updates each editable field correctly, with a proper before/after audit trail", async () => {
+      const { po } = await createSentPo();
+      const poItemId = po.purchase_order_items[0].id;
+      const shipment = (await createShipment(po.id, poItemId, 5, { carrier: "DHL", shippingCost: 100 })).body.data;
+
+      const res = await request(app)
+        .patch(`/purchase-orders/${po.id}/shipments/${shipment.id}`)
+        .set("Authorization", `Bearer ${ownerToken}`)
+        .set("Idempotency-Key", idemKey())
+        .send({
+          version: shipment.version,
+          carrier: "FedEx",
+          trackingReference: "TRK123",
+          trackingType: "courier_tracking",
+          shippingCost: 150,
+          insurance: 20,
+          customsCost: 5,
+          priority: "urgent",
+          reason: "Carrier changed after supplier renegotiated freight terms",
+        });
+      expect(res.status).toBe(200);
+      expect(res.body.data.carrier).toBe("FedEx");
+      expect(res.body.data.tracking_reference).toBe("TRK123");
+      expect(res.body.data.tracking_type).toBe("courier_tracking");
+      expect(res.body.data.shipping_cost).toBe("150");
+      expect(res.body.data.insurance).toBe("20");
+      expect(res.body.data.customs_cost).toBe("5");
+      expect(res.body.data.priority).toBe("urgent");
+      expect(res.body.data.version).toBe(shipment.version + 1);
+
+      const auditRows = await prisma.audit_logs.findMany({
+        where: { entity_id: shipment.id, action: "purchase_order.shipment_updated" },
+      });
+      expect(auditRows).toHaveLength(1);
+      expect(auditRows[0].reason).toBe("Carrier changed after supplier renegotiated freight terms");
+      const before = auditRows[0].before_state as Record<string, unknown>;
+      const after = auditRows[0].after_state as Record<string, unknown>;
+      expect(before.carrier).toBe("DHL");
+      expect(after.carrier).toBe("FedEx");
+      expect(before.shippingCost).toBe("100");
+      expect(after.shippingCost).toBe(150);
+    });
+
+    it("updates only the fields actually sent, leaving others untouched", async () => {
+      const { po } = await createSentPo();
+      const poItemId = po.purchase_order_items[0].id;
+      const shipment = (await createShipment(po.id, poItemId, 5, { carrier: "DHL", priority: "low" })).body.data;
+
+      const res = await request(app)
+        .patch(`/purchase-orders/${po.id}/shipments/${shipment.id}`)
+        .set("Authorization", `Bearer ${ownerToken}`)
+        .set("Idempotency-Key", idemKey())
+        .send({ version: shipment.version, priority: "high", reason: "Escalated by customer" });
+      expect(res.status).toBe(200);
+      expect(res.body.data.priority).toBe("high");
+      expect(res.body.data.carrier).toBe("DHL"); // untouched
+    });
+
+    it("requires a reason", async () => {
+      const { po } = await createSentPo();
+      const poItemId = po.purchase_order_items[0].id;
+      const shipment = (await createShipment(po.id, poItemId, 5)).body.data;
+      const res = await request(app)
+        .patch(`/purchase-orders/${po.id}/shipments/${shipment.id}`)
+        .set("Authorization", `Bearer ${ownerToken}`)
+        .set("Idempotency-Key", idemKey())
+        .send({ version: shipment.version, carrier: "FedEx" });
+      expect(res.status).toBe(400);
+    });
+
+    it("requires at least one editable field", async () => {
+      const { po } = await createSentPo();
+      const poItemId = po.purchase_order_items[0].id;
+      const shipment = (await createShipment(po.id, poItemId, 5)).body.data;
+      const res = await request(app)
+        .patch(`/purchase-orders/${po.id}/shipments/${shipment.id}`)
+        .set("Authorization", `Bearer ${ownerToken}`)
+        .set("Idempotency-Key", idemKey())
+        .send({ version: shipment.version, reason: "no-op attempt" });
+      expect(res.status).toBe(400);
+    });
+
+    describe("Immutable fields are rejected with 400, never silently ignored", () => {
+      const immutableAttempts: Record<string, unknown>[] = [
+        { method: "air" },
+        { incoterms: "FOB" },
+        { portOfDeparture: "Mombasa" },
+        { portOfArrival: "Rotterdam" },
+        { deliveryAddressSnapshot: { source: "branch", branchId: "x" } },
+        { poId: "some-other-id" },
+        { items: [{ poItemId: "x", quantityShipped: 1 }] },
+      ];
+
+      it.each(immutableAttempts)("rejects an attempt to change %j", async (attempt) => {
+        const { po } = await createSentPo();
+        const poItemId = po.purchase_order_items[0].id;
+        const shipment = (await createShipment(po.id, poItemId, 5)).body.data;
+        const res = await request(app)
+          .patch(`/purchase-orders/${po.id}/shipments/${shipment.id}`)
+          .set("Authorization", `Bearer ${ownerToken}`)
+          .set("Idempotency-Key", idemKey())
+          .send({ version: shipment.version, reason: "attempting to edit an immutable field", ...attempt });
+        expect(res.status).toBe(400);
+      });
+    });
+
+    it("409s a stale version", async () => {
+      const { po } = await createSentPo();
+      const poItemId = po.purchase_order_items[0].id;
+      const shipment = (await createShipment(po.id, poItemId, 5)).body.data;
+      const res = await request(app)
+        .patch(`/purchase-orders/${po.id}/shipments/${shipment.id}`)
+        .set("Authorization", `Bearer ${ownerToken}`)
+        .set("Idempotency-Key", idemKey())
+        .send({ version: shipment.version + 1, carrier: "FedEx", reason: "test" });
+      expect(res.status).toBe(409);
+    });
+
+    it("409s once the shipment reaches a terminal status (delivered/cancelled) -- same atomic guard as the version check", async () => {
+      const { po } = await createSentPo();
+      const poItemId = po.purchase_order_items[0].id;
+      const shipment = (await createShipment(po.id, poItemId, 5)).body.data;
+      const cancelled = (
+        await request(app)
+          .patch(`/purchase-orders/${po.id}/shipments/${shipment.id}/status`)
+          .set("Authorization", `Bearer ${ownerToken}`)
+          .set("Idempotency-Key", idemKey())
+          .send({ version: shipment.version, status: "cancelled", cancelReason: "other" })
+      ).body.data;
+
+      const res = await request(app)
+        .patch(`/purchase-orders/${po.id}/shipments/${shipment.id}`)
+        .set("Authorization", `Bearer ${ownerToken}`)
+        .set("Idempotency-Key", idemKey())
+        .send({ version: cancelled.version, carrier: "FedEx", reason: "test" });
+      expect(res.status).toBe(409);
+    });
+
+    it("under real concurrency, exactly one of two simultaneous updates succeeds", async () => {
+      const { po } = await createSentPo();
+      const poItemId = po.purchase_order_items[0].id;
+      const shipment = (await createShipment(po.id, poItemId, 5)).body.data;
+
+      const [r1, r2] = await Promise.all([
+        request(app)
+          .patch(`/purchase-orders/${po.id}/shipments/${shipment.id}`)
+          .set("Authorization", `Bearer ${ownerToken}`)
+          .set("Idempotency-Key", idemKey())
+          .send({ version: shipment.version, carrier: "FedEx", reason: "race A" }),
+        request(app)
+          .patch(`/purchase-orders/${po.id}/shipments/${shipment.id}`)
+          .set("Authorization", `Bearer ${ownerToken}`)
+          .set("Idempotency-Key", idemKey())
+          .send({ version: shipment.version, carrier: "UPS", reason: "race B" }),
+      ]);
+      const statuses = [r1.status, r2.status].sort();
+      expect(statuses).toEqual([200, 409]);
+
+      const reloaded = await prisma.po_shipments.findUniqueOrThrow({ where: { id: shipment.id } });
+      expect(["FedEx", "UPS"]).toContain(reloaded.carrier);
+    });
+  });
+
   it("isolates shipments across businesses (404, not a data leak)", async () => {
     const other = await signupTestOwner();
     businessIds.push(other.businessId);

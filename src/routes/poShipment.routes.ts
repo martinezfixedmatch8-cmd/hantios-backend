@@ -7,6 +7,7 @@ import {
   listShipments,
   getShipment,
   updateShipmentStatus,
+  updateShipment,
   updateShipmentEta,
   getRemainingQuantities,
 } from "../controllers/poShipment.controller";
@@ -33,6 +34,10 @@ router.post("/:id/shipments", requireRole(...writeRoles), requireIdempotencyKey,
 router.get("/:id/shipments", requireRole(...viewRoles), listShipments);
 router.get("/:id/shipments/:shipmentId", requireRole(...viewRoles), getShipment);
 router.patch("/:id/shipments/:shipmentId/status", requireRole(...writeRoles), requireIdempotencyKey, updateShipmentStatus);
+// General logistics-detail edit endpoint (carrier/tracking/costs/priority
+// only) -- added on second review, owner-side only, no supplier-portal
+// equivalent (a deliberate default, not originally specified either way).
+router.patch("/:id/shipments/:shipmentId", requireRole(...writeRoles), requireIdempotencyKey, updateShipment);
 router.post("/:id/shipments/:shipmentId/eta", requireRole(...writeRoles), requireIdempotencyKey, updateShipmentEta);
 router.get("/:id/shipments/:shipmentId/remaining-quantities", requireRole(...viewRoles), getRemainingQuantities);
 router.post("/:id/shipments/:shipmentId/attachments", requireRole(...writeRoles), requireIdempotencyKey, uploadShipmentAttachment);

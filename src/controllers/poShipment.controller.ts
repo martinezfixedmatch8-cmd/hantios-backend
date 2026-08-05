@@ -4,6 +4,7 @@ import { idParamSchema } from "../validation/common.schema";
 import {
   createShipmentSchema,
   updateShipmentStatusSchema,
+  updateShipmentSchema,
   updateShipmentEtaSchema,
   listShipmentsQuerySchema,
 } from "../validation/poShipment.schema";
@@ -73,6 +74,27 @@ export async function updateShipmentStatus(req: Request, res: Response, next: Ne
 
     const input = updateShipmentStatusSchema.parse(req.body);
     const result = await service.updateShipmentStatus(id, shipmentId, input, actor, idempotencyKey);
+    res.status(200).json({ data: result });
+  } catch (err) {
+    next(err);
+  }
+}
+
+export async function updateShipment(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    if (!req.auth) throw unauthorized();
+    const actor = getOwnerNegotiationActor(req);
+    const { id, shipmentId } = shipmentIdParamSchema.parse(req.params);
+    const idempotencyKey = req.idempotencyKey as string;
+
+    const replayed = await getReplayedResponse(actor.businessId, idempotencyKey, service.updateShipmentEndpoint(id, shipmentId));
+    if (replayed) {
+      res.status(replayed.status).json(replayed.body);
+      return;
+    }
+
+    const input = updateShipmentSchema.parse(req.body);
+    const result = await service.updateShipment(id, shipmentId, input, actor, idempotencyKey);
     res.status(200).json({ data: result });
   } catch (err) {
     next(err);

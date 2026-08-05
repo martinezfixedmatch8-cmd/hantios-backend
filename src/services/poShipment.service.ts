@@ -16,7 +16,13 @@ import {
   TERMINAL_SHIPMENT_STATUSES,
 } from "../lib/shipmentStatus";
 import { resolveAuditActor, type NegotiationActor } from "../lib/negotiationActor";
-import type { CreateShipmentInput, UpdateShipmentStatusInput, UpdateShipmentEtaInput, ListShipmentsQuery } from "../validation/poShipment.schema";
+import type {
+  CreateShipmentInput,
+  UpdateShipmentStatusInput,
+  UpdateShipmentEtaInput,
+  UpdateShipmentInput,
+  ListShipmentsQuery,
+} from "../validation/poShipment.schema";
 
 // Same Neon-latency reasoning as every other transactional service in this
 // repo -- shipment creation in particular does a counter allocation +
@@ -37,6 +43,9 @@ export function createShipmentEndpoint(poId: string): string {
 }
 export function updateShipmentStatusEndpoint(poId: string, shipmentId: string): string {
   return `PATCH /purchase-orders/${poId}/shipments/${shipmentId}/status`;
+}
+export function updateShipmentEndpoint(poId: string, shipmentId: string): string {
+  return `PATCH /purchase-orders/${poId}/shipments/${shipmentId}`;
 }
 export function updateShipmentEtaEndpoint(poId: string, shipmentId: string): string {
   return `POST /purchase-orders/${poId}/shipments/${shipmentId}/eta`;
@@ -319,6 +328,111 @@ export async function updateShipmentStatus(
     shipmentId,
     fromStatus: shipment.status,
     toStatus: input.status,
+  });
+
+  return result;
+}
+
+// PATCH /purchase-orders/:id/shipments/:shipmentId -- added on second
+// review. LOCKED, explicit editable-field allowlist enforced at the Zod
+// layer (uploadShipmentSchema's own `.strict()`): only logistics-execution
+// details that legitimately arrive/change after creation (carrier,
+// tracking, costs, priority). Nothing that defines the shipment's core
+// identity or contractual terms is reachable through this endpoint at all.
+// version + status are checked in ONE atomic guarded updateMany -- a stale
+// version and an already-delivered/cancelled shipment both produce the
+// same 409, exactly as every other version-locked mutation in this repo
+// does (count===0 covers both uniformly, no separate pre-check needed or
+// wanted here).
+export async function updateShipment(
+  poId: string,
+  shipmentId: string,
+  input: UpdateShipmentInput,
+  actor: NegotiationActor,
+  idempotencyKey: string
+) {
+  const po = await getOwned(prisma.purchase_orders.findUnique({ where: { id: poId } }), actor.businessId, "Purchase order");
+  const shipment = await getOwned(prisma.po_shipments.findUnique({ where: { id: shipmentId } }), actor.businessId, "Shipment");
+  if (shipment.purchase_order_id !== poId) throw notFound("Shipment not found");
+
+  const data: Prisma.po_shipmentsUpdateManyMutationInput = { version: { increment: 1 } };
+  const beforeState: Record<string, unknown> = {};
+  const afterState: Record<string, unknown> = {};
+
+  if (input.carrier !== undefined) {
+    beforeState.carrier = shipment.carrier;
+    afterState.carrier = input.carrier;
+    data.carrier = input.carrier;
+  }
+  if (input.trackingReference !== undefined) {
+    beforeState.trackingReference = shipment.tracking_reference;
+    afterState.trackingReference = input.trackingReference;
+    data.tracking_reference = input.trackingReference;
+  }
+  if (input.trackingType !== undefined) {
+    beforeState.trackingType = shipment.tracking_type;
+    afterState.trackingType = input.trackingType;
+    data.tracking_type = input.trackingType;
+  }
+  if (input.shippingCost !== undefined) {
+    beforeState.shippingCost = shipment.shipping_cost.toString();
+    afterState.shippingCost = input.shippingCost;
+    data.shipping_cost = new Prisma.Decimal(input.shippingCost);
+  }
+  if (input.insurance !== undefined) {
+    beforeState.insurance = shipment.insurance.toString();
+    afterState.insurance = input.insurance;
+    data.insurance = new Prisma.Decimal(input.insurance);
+  }
+  if (input.customsCost !== undefined) {
+    beforeState.customsCost = shipment.customs_cost.toString();
+    afterState.customsCost = input.customsCost;
+    data.customs_cost = new Prisma.Decimal(input.customsCost);
+  }
+  if (input.priority !== undefined) {
+    beforeState.priority = shipment.priority;
+    afterState.priority = input.priority;
+    data.priority = input.priority;
+  }
+
+  const result = await prisma.$transaction(async (tx) => {
+    await claimIdempotencyKey(tx, actor.businessId, idempotencyKey, updateShipmentEndpoint(poId, shipmentId));
+
+    const guarded = await tx.po_shipments.updateMany({
+      where: { id: shipmentId, business_id: actor.businessId, version: input.version, status: { notIn: TERMINAL_SHIPMENT_STATUSES } },
+      data,
+    });
+    if (guarded.count === 0) {
+      throw conflict(
+        "Shipment was modified concurrently, or has already reached a terminal status (delivered/cancelled) -- please retry with the latest version"
+      );
+    }
+
+    const auditActor = resolveAuditActor(actor, po);
+    await writeAuditLog(tx, {
+      businessId: actor.businessId,
+      userId: auditActor.userId,
+      userName: auditActor.userName,
+      userRole: auditActor.userRole,
+      action: "purchase_order.shipment_updated",
+      entityType: "po_shipment",
+      entityId: shipmentId,
+      beforeState,
+      afterState,
+      reason: input.reason,
+    });
+
+    const fresh = await tx.po_shipments.findUniqueOrThrow({ where: { id: shipmentId }, include: SHIPMENT_INCLUDE });
+    const responseBody = JSON.parse(JSON.stringify({ data: fresh })) as unknown;
+    await completeIdempotencyKey(tx, actor.businessId, idempotencyKey, updateShipmentEndpoint(poId, shipmentId), 200, responseBody);
+    return fresh;
+  }, SHIPMENT_TRANSACTION_OPTIONS);
+
+  domainEvents.publish("PurchaseOrderShipmentUpdated", {
+    businessId: actor.businessId,
+    purchaseOrderId: poId,
+    shipmentId,
+    changedFields: Object.keys(afterState),
   });
 
   return result;

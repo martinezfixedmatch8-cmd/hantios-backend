@@ -139,6 +139,10 @@ export interface DomainEventPayloads {
   PurchaseOrderShipmentEtaChanged: { businessId: string; purchaseOrderId: string; shipmentId: string; newExpectedArrivalFrom: string | null; newExpectedArrivalTo: string | null };
   PurchaseOrderShipmentAttachmentUploaded: { businessId: string; purchaseOrderId: string; shipmentId: string; attachmentId: string };
   PurchaseOrderDeliveryMilestoneRecorded: { businessId: string; purchaseOrderId: string; milestoneId: string; milestone: string };
+  // Added on second review -- the general PATCH endpoint for logistics-
+  // execution fields (carrier/tracking/costs/priority), never core
+  // identity/contractual-terms fields.
+  PurchaseOrderShipmentUpdated: { businessId: string; purchaseOrderId: string; shipmentId: string; changedFields: string[] };
 }
 
 export type DomainEventName = keyof DomainEventPayloads;
