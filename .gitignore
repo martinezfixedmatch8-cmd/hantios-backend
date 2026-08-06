@@ -10,3 +10,4 @@ npm-debug.log*
 .claude/settings.local.json
 .claude/shell-snapshots/
 .claude/session-env/
+.claude/.last-notified-commit

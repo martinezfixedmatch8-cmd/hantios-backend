@@ -1,0 +1,16 @@
+{
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node .claude/hooks/notify-slack-on-commit.js",
+            "timeout": 20,
+            "statusMessage": "Checking for a new commit to notify Slack about..."
+          }
+        ]
+      }
+    ]
+  }
+}
