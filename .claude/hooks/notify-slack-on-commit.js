@@ -2,6 +2,7 @@
 // Fires on the Claude Code Stop hook. Posts to Slack only when HEAD has moved
 // past the last commit this script already notified about, so it's a no-op
 // on every ordinary turn and only fires once per real commit.
+// Live-verified 2026-08-06: fired correctly on this exact commit.
 const { execSync } = require("child_process");
 const fs = require("fs");
 const path = require("path");
