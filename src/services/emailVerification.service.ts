@@ -4,6 +4,7 @@ import { generateSecureToken } from "../lib/tokens";
 import { env } from "../lib/config";
 import { badRequest, gone } from "../lib/errors";
 import { getNotificationProvider } from "../notifications/registry";
+import { renderEmailTemplate } from "../notifications/EmailTemplateRenderer";
 
 type Db = PrismaClient | Prisma.TransactionClient;
 
@@ -20,14 +21,20 @@ export async function createEmailVerificationToken(db: Db, userId: string): Prom
   return { token };
 }
 
-export async function sendEmailVerificationNotification(user: { email: string; name: string }, token: string): Promise<void> {
+export async function sendEmailVerificationNotification(
+  user: { email: string; name: string; business_id: string },
+  token: string
+): Promise<void> {
   const verifyUrl = `${env.APP_BASE_URL}/verify-email/${token}`;
+  const { subject, body } = renderEmailTemplate("email_verification", { name: user.name, verifyUrl });
   await getNotificationProvider().send({
     category: "TRANSACTIONAL",
     channel: "email",
     to: user.email,
-    subject: "Verify your HantiOS email address",
-    body: `Hi ${user.name}, please verify your email address: ${verifyUrl}`,
+    businessId: user.business_id,
+    senderProfile: "NOREPLY",
+    subject,
+    body,
   });
 }
 

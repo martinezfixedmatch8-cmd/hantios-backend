@@ -194,6 +194,7 @@ export async function signup(input: SignupInput, meta: RequestMeta): Promise<Aut
     category: "TRANSACTIONAL",
     channel: "whatsapp",
     to: created.user.phone,
+    businessId: created.business.id,
     body: `Your HantiOS phone verification code is ${created.phoneOtp.code}. It expires in 10 minutes.`,
   });
 
@@ -314,6 +315,7 @@ async function challengeNewDeviceIfNeeded(
     category: "SECURITY",
     channel: "whatsapp",
     to: user.phone,
+    businessId: user.business_id,
     body: `A login from a new device requires verification. Your HantiOS code is ${challenge.code}. It expires in 10 minutes.`,
   });
   return { requiresOtp: true, challengeId: challenge.id };

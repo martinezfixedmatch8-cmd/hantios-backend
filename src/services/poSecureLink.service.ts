@@ -8,6 +8,8 @@ import { claimIdempotencyKey, completeIdempotencyKey } from "../lib/idempotency"
 import { generateSecureToken, hashToken } from "../lib/tokens";
 import { assertNegotiationOpen } from "../lib/poNegotiationGuards";
 import { env } from "../lib/config";
+import { getNotificationProvider } from "../notifications/registry";
+import { renderEmailTemplate } from "../notifications/EmailTemplateRenderer";
 
 interface Actor {
   userId: string;
@@ -97,7 +99,42 @@ export async function regenerateSecureLink(poId: string, actor: Actor, idempoten
     secureLinkId: link.id,
   });
 
-  return { ...link, url: buildSecureLinkUrl(rawToken) };
+  const url = buildSecureLinkUrl(rawToken);
+  // Module 33 Session 4A -- the first real email this call site ever sends
+  // (Phase 0 confirmed regenerateSecureLink previously only returned the
+  // URL in the response body, for the owner to relay manually). Sent
+  // fire-and-forget after the transaction has committed, same "DB writes in
+  // the transaction, I/O after" pattern already established by
+  // emailVerification.service.ts. Uses the PO's own supplier_email_snapshot
+  // (already fetched above, zero extra query) rather than a live
+  // suppliers.email lookup -- consistent with this module's own "policy
+  // snapshot" principle (supplier_name_snapshot etc.): a later edit to the
+  // live Supplier record must never retroactively change which address a
+  // historical negotiation link goes to. Fail-soft when no email is on file
+  // -- a supplier having no email is a real, unremarkable state (phone-only
+  // suppliers exist), not an error; the link is still generated and
+  // returned in the response either way.
+  if (po.supplier_email_snapshot) {
+    const business = await prisma.businesses.findUniqueOrThrow({ where: { id: actor.businessId } });
+    const { subject, body } = renderEmailTemplate("po_negotiation_secure_link", {
+      businessName: business.name,
+      poNumber: po.po_number,
+      secureLinkUrl: url,
+    });
+    await getNotificationProvider().send({
+      category: "TRANSACTIONAL",
+      channel: "email",
+      to: po.supplier_email_snapshot,
+      businessId: actor.businessId,
+      senderProfile: "NOTIFICATIONS",
+      subject,
+      body,
+    });
+  } else {
+    console.warn(`[po-negotiation] no supplier email on file for PO ${po.po_number} -- secure link was generated but not emailed`);
+  }
+
+  return { ...link, url };
 }
 
 export async function revokeSecureLink(poId: string, actor: Actor, idempotencyKey: string) {

@@ -7,6 +7,7 @@ import { writeAuditLog } from "../lib/auditLog";
 import { conflict, gone, notFound } from "../lib/errors";
 import { env, CURRENT_TERMS_VERSION, CURRENT_PRIVACY_VERSION } from "../lib/config";
 import { getNotificationProvider } from "../notifications/registry";
+import { renderEmailTemplate } from "../notifications/EmailTemplateRenderer";
 import type { CreateInviteInput, AcceptInviteInput } from "../validation/staffInvite.schema";
 
 interface Actor {
@@ -65,12 +66,20 @@ export async function createStaffInvite(input: CreateInviteInput, actor: Actor) 
 
   const business = await prisma.businesses.findUniqueOrThrow({ where: { id: actor.businessId } });
   const acceptUrl = `${env.APP_BASE_URL}/invite/${token}`;
+  const { subject, body } = renderEmailTemplate("staff_invite_created", {
+    businessName: business.name,
+    inviterName: inviter.name,
+    role: input.role,
+    acceptUrl,
+  });
   await getNotificationProvider().send({
     category: "TRANSACTIONAL",
     channel: "email",
     to: input.email,
-    subject: `You've been invited to join ${business.name} on HantiOS`,
-    body: `${inviter.name} invited you to join ${business.name} as a ${input.role}. Accept your invitation: ${acceptUrl}`,
+    businessId: actor.businessId,
+    senderProfile: "NOTIFICATIONS",
+    subject,
+    body,
   });
 
   return toInviteDto(invite);
@@ -186,12 +195,15 @@ export async function acceptStaffInvite(
     return newUser;
   });
 
+  const acceptedEmail = renderEmailTemplate("staff_invite_accepted", { businessName: invite.businesses.name });
   await getNotificationProvider().send({
     category: "TRANSACTIONAL",
     channel: "email",
     to: user.email,
-    subject: `Your ${invite.businesses.name} account is active`,
-    body: `Your account has been activated. You can now log in with your email and password.`,
+    businessId: invite.business_id,
+    senderProfile: "NOTIFICATIONS",
+    subject: acceptedEmail.subject,
+    body: acceptedEmail.body,
   });
 
   return {

@@ -14,6 +14,9 @@ import {
 } from "./helpers/factories";
 import type { UserRole } from "@prisma/client";
 import { domainEvents } from "../src/lib/events";
+import { setEmailProvider } from "../src/notifications/registry";
+import { SpyEmailProvider } from "./helpers/emailProviderSpy";
+import { ConsoleEmailProvider } from "../src/notifications/ConsoleEmailProvider";
 
 describe("PO Secure Link", () => {
   const businessIds: string[] = [];
@@ -252,6 +255,97 @@ describe("PO Secure Link", () => {
 
       const res = await request(app).get(`/portal/po/${rawToken}`);
       expect(res.status).toBe(410);
+    });
+  });
+
+  describe("Real email dispatch (Module 33 Session 4A)", () => {
+    afterEach(() => {
+      // Restore the real fail-soft default (ConsoleEmailProvider, since no
+      // RESEND_API_KEY is configured in this test environment) so later
+      // tests in this file/suite aren't affected by a spy left in place.
+      setEmailProvider(new ConsoleEmailProvider(), "console");
+    });
+
+    async function createSentPoWithSupplierEmail(email: string) {
+      const supplier = await createTestSupplier(businessId, { email });
+      const product = await createTestProduct(businessId, { costPrice: 10 });
+
+      const createRes = await request(app)
+        .post("/purchase-orders")
+        .set("Authorization", `Bearer ${ownerToken}`)
+        .set("Idempotency-Key", idemKey())
+        .send({ supplierId: supplier.id, branchId, items: [{ productId: product.id, quantityOrdered: 5, unitCostSnapshot: 10 }] });
+      const po = createRes.body.data;
+
+      const sendRes = await request(app)
+        .post(`/purchase-orders/${po.id}/send`)
+        .set("Authorization", `Bearer ${ownerToken}`)
+        .set("Idempotency-Key", idemKey())
+        .send({ version: po.version });
+
+      return { po: sendRes.body.data, supplier };
+    }
+
+    it("sends a real email to the supplier's snapshotted address, via NotificationProvider's real email-channel path (not a special-cased call)", async () => {
+      const spy = new SpyEmailProvider();
+      setEmailProvider(spy, "spy");
+
+      const { po, supplier } = await createSentPoWithSupplierEmail("negotiate@supplier.test");
+      const res = await request(app)
+        .post(`/purchase-orders/${po.id}/secure-link/regenerate`)
+        .set("Authorization", `Bearer ${ownerToken}`)
+        .set("Idempotency-Key", idemKey());
+
+      expect(res.status).toBe(201);
+      expect(spy.sent).toHaveLength(1);
+      expect(spy.sent[0].to).toBe(supplier.email);
+      expect(spy.sent[0].subject).toContain(po.po_number);
+      expect(spy.sent[0].body).toContain(res.body.data.url);
+      expect(spy.sent[0].from).toBe("notifications@hantios.com");
+
+      const logRow = await prisma.email_send_log.findFirst({ where: { business_id: businessId, to_email: "negotiate@supplier.test" } });
+      expect(logRow?.status).toBe("sent");
+      expect(logRow?.category).toBe("TRANSACTIONAL");
+      expect(logRow?.sender_profile).toBe("NOTIFICATIONS");
+      expect(logRow?.attempt_count).toBe(1);
+    });
+
+    it("still succeeds end-to-end (201) when the EmailProvider is mocked to fail -- a failed send never cascades into the caller", async () => {
+      const spy = new SpyEmailProvider();
+      spy.nextResult = { success: false, error: "simulated provider failure", attemptCount: 2 };
+      setEmailProvider(spy, "spy");
+
+      const { po } = await createSentPoWithSupplierEmail("cascade-check@supplier.test");
+      const res = await request(app)
+        .post(`/purchase-orders/${po.id}/secure-link/regenerate`)
+        .set("Authorization", `Bearer ${ownerToken}`)
+        .set("Idempotency-Key", idemKey());
+
+      // The secure link itself (the actual business operation) must succeed
+      // regardless of whether the notification email could be sent.
+      expect(res.status).toBe(201);
+      expect(res.body.data.status).toBe("active");
+      expect(spy.sent).toHaveLength(1);
+
+      const logRow = await prisma.email_send_log.findFirst({ where: { business_id: businessId, to_email: "cascade-check@supplier.test" } });
+      expect(logRow?.status).toBe("failed");
+      expect(logRow?.failure_reason).toBe("simulated provider failure");
+      expect(logRow?.attempt_count).toBe(2);
+    });
+
+    it("skips sending (fail-soft, no error) when the supplier has no email on file, and the link still generates normally", async () => {
+      const spy = new SpyEmailProvider();
+      setEmailProvider(spy, "spy");
+
+      // Deliberately no email override -- createTestSupplier defaults to none.
+      const { po } = await createSentPo();
+      const res = await request(app)
+        .post(`/purchase-orders/${po.id}/secure-link/regenerate`)
+        .set("Authorization", `Bearer ${ownerToken}`)
+        .set("Idempotency-Key", idemKey());
+
+      expect(res.status).toBe(201);
+      expect(spy.sent).toHaveLength(0);
     });
   });
 

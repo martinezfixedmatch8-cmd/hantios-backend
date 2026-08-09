@@ -46,6 +46,7 @@
     "jsonwebtoken": "^9.0.3",
     "libphonenumber-js": "^1.13.9",
     "node-cron": "^4.6.0",
+    "resend": "^6.18.1",
     "world-countries": "^5.1.0",
     "zod": "^4.4.3"
   },

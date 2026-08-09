@@ -166,6 +166,7 @@ model businesses {
   warehouses                          warehouses?
   wsm_counters                        wsm_counters?
   goods_received_items                goods_received_items[]
+  email_send_log                      email_send_log[]
 }
 
 model categories {
@@ -714,18 +715,18 @@ model password_history {
 }
 
 model payment_methods {
-  id             String          @id
-  business_id    String
-  name           String
-  logo_url       String?
-  account_number String?
-  description    String?
-  status         RecordStatus    @default(active)
-  created_at     DateTime        @default(now())
-  businesses     businesses      @relation(fields: [business_id], references: [id])
-  sales          sales[]
-  debt_payments  debt_payments[]
-  expenses       expenses[]
+  id                  String                @id
+  business_id         String
+  name                String
+  logo_url            String?
+  account_number      String?
+  description         String?
+  status              RecordStatus          @default(active)
+  created_at          DateTime              @default(now())
+  businesses          businesses            @relation(fields: [business_id], references: [id])
+  sales               sales[]
+  debt_payments       debt_payments[]
+  expenses            expenses[]
   po_advance_payments po_advance_payments[]
 
   @@index([business_id])
@@ -788,26 +789,26 @@ model products {
 // unlike Customers' phone-uniqueness requirement), no supplier-number
 // sequence (not requested).
 model suppliers {
-  id              String            @id
-  business_id     String
-  name            String
-  phone           String?
-  email           String?
-  notes           String?
+  id                            String                          @id
+  business_id                   String
+  name                          String
+  phone                         String?
+  email                         String?
+  notes                         String?
   // Session 2A -- the supplier's own default/quoted terms, nullable (didn't
   // exist before this session, so every pre-existing supplier has none
   // configured). Snapshotted onto purchase_orders.payment_terms at PO
   // creation time (same "policy snapshot" pattern as costPriceAtSale/
   // supplier_name_snapshot) -- a later edit here never retroactively
   // changes an already-created PO's own terms.
-  payment_terms   PaymentTerms?
-  status          RecordStatus      @default(active)
-  archived_reason String?
-  version         Int               @default(0)
-  created_at      DateTime          @default(now())
-  updated_at      DateTime          @updatedAt
-  businesses      businesses        @relation(fields: [business_id], references: [id])
-  purchase_orders purchase_orders[]
+  payment_terms                 PaymentTerms?
+  status                        RecordStatus                    @default(active)
+  archived_reason               String?
+  version                       Int                             @default(0)
+  created_at                    DateTime                        @default(now())
+  updated_at                    DateTime                        @updatedAt
+  businesses                    businesses                      @relation(fields: [business_id], references: [id])
+  purchase_orders               purchase_orders[]
   supplier_payment_instructions supplier_payment_instructions[]
 
   @@index([business_id, status])
@@ -1106,29 +1107,29 @@ model purchase_order_payments {
 
 /// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
 model supplier_payment_instructions {
-  id               String                @id
-  business_id       String
-  supplier_id       String
-  beneficiary_name  String
-  bank_name         String?
-  account_number    String?
-  iban              String?
-  swift             String?
-  wallet_address    String?
-  network           WalletNetwork?
-  default_currency  String
+  id                  String                @id
+  business_id         String
+  supplier_id         String
+  beneficiary_name    String
+  bank_name           String?
+  account_number      String?
+  iban                String?
+  swift               String?
+  wallet_address      String?
+  network             WalletNetwork?
+  default_currency    String
   // Only one true per supplier at a time -- enforced for real via a raw
   // partial unique index (Postgres has no plain @@unique-among-a-subset
   // syntax in Prisma's DSL, same documented gap as Customer Records'
   // active-only phone uniqueness), not just an app-layer "unset the old one
   // first" convention. See the migration's own hand-added
   // ux_supplier_payment_instructions_one_default index.
-  is_default        Boolean               @default(false)
-  created_at        DateTime              @default(now())
-  created_by        String
-  businesses        businesses            @relation(fields: [business_id], references: [id])
-  suppliers         suppliers             @relation(fields: [supplier_id], references: [id])
-  users             users                 @relation(fields: [created_by], references: [id])
+  is_default          Boolean               @default(false)
+  created_at          DateTime              @default(now())
+  created_by          String
+  businesses          businesses            @relation(fields: [business_id], references: [id])
+  suppliers           suppliers             @relation(fields: [supplier_id], references: [id])
+  users               users                 @relation(fields: [created_by], references: [id])
   po_advance_payments po_advance_payments[]
 
   @@index([business_id])
@@ -1144,9 +1145,9 @@ model proforma_invoice_counters {
 
 /// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
 model po_proforma_invoices {
-  id                    String                @id
-  business_id           String
-  purchase_order_id     String
+  id                                 String                              @id
+  business_id                        String
+  purchase_order_id                  String
   // Nullable -- a PO that never entered negotiation (the common case; a PO
   // going straight DRAFT->SENT->CONFIRMED without a supplier counter-offer)
   // has zero po_negotiation_agreement_snapshots rows. Interpretation flagged
@@ -1154,32 +1155,32 @@ model po_proforma_invoices {
   // Proforma is generated directly from the PO's own current line items
   // instead -- a PO the supplier never countered is trivially "agreed" as
   // sent, so its own items ARE the agreed terms by default.
-  agreement_snapshot_id String?
+  agreement_snapshot_id              String?
   // PFI-000001, sequential per business -- same atomic-counter shape as
   // po_number/expense_number/customer_number (see proformaInvoiceNumber.ts).
-  invoice_number        String
-  subtotal              Decimal               @db.Decimal(14, 2)
-  shipping_cost         Decimal               @default(0) @db.Decimal(14, 2)
-  insurance             Decimal               @default(0) @db.Decimal(14, 2)
-  total                 Decimal               @db.Decimal(14, 2)
-  currency_code         String
-  valid_until           DateTime
-  issued_at             DateTime              @default(now())
-  issued_by             String
+  invoice_number                     String
+  subtotal                           Decimal                             @db.Decimal(14, 2)
+  shipping_cost                      Decimal                             @default(0) @db.Decimal(14, 2)
+  insurance                          Decimal                             @default(0) @db.Decimal(14, 2)
+  total                              Decimal                             @db.Decimal(14, 2)
+  currency_code                      String
+  valid_until                        DateTime
+  issued_at                          DateTime                            @default(now())
+  issued_by                          String
   // Future PDF generation placeholder, same "dormant, no upload feature
   // yet" pattern as Products' images / Expense Attachments' storage_key.
-  storage_key           String?
+  storage_key                        String?
   // Lifecycle ONLY (issued/superseded) -- Invoice Payment Status
   // (UNPAID/PARTIALLY_PAID/FULLY_PREPAID) is a separate, purely-derived
   // concept computed at query time, never stored on this field. See the
   // enum's own comment for why these were deliberately kept apart.
-  status                ProformaInvoiceStatus @default(issued)
-  created_at            DateTime              @default(now())
-  businesses            businesses            @relation(fields: [business_id], references: [id])
-  purchase_orders       purchase_orders       @relation(fields: [purchase_order_id], references: [id])
+  status                             ProformaInvoiceStatus               @default(issued)
+  created_at                         DateTime                            @default(now())
+  businesses                         businesses                          @relation(fields: [business_id], references: [id])
+  purchase_orders                    purchase_orders                     @relation(fields: [purchase_order_id], references: [id])
   po_negotiation_agreement_snapshots po_negotiation_agreement_snapshots? @relation(fields: [agreement_snapshot_id], references: [id])
-  users                 users                 @relation(fields: [issued_by], references: [id])
-  po_advance_payments   po_advance_payments[]
+  users                              users                               @relation(fields: [issued_by], references: [id])
+  po_advance_payments                po_advance_payments[]
 
   @@unique([business_id, invoice_number])
   @@index([purchase_order_id])
@@ -1211,26 +1212,26 @@ model po_advance_payments {
   // same Policy Snapshot pattern as Payment Terms/unitCostSnapshot. If the
   // supplier's bank details change later, historical advance payments keep
   // showing what was actually used at the time.
-  beneficiary_name_snapshot        String
-  bank_name_snapshot               String?
-  account_number_snapshot          String?
-  iban_snapshot                    String?
-  swift_snapshot                   String?
-  wallet_address_snapshot          String?
-  network_snapshot                 WalletNetwork?
-  reference                        String?
+  beneficiary_name_snapshot       String
+  bank_name_snapshot              String?
+  account_number_snapshot         String?
+  iban_snapshot                   String?
+  swift_snapshot                  String?
+  wallet_address_snapshot         String?
+  network_snapshot                WalletNetwork?
+  reference                       String?
   // Free text, e.g. "Deposit 20%", "Second installment" -- display only,
   // never read by any business logic.
-  installment_label                String?
-  paid_at                           DateTime                      @default(now())
-  recorded_by                      String
-  created_at                       DateTime                      @default(now())
-  businesses                       businesses                    @relation(fields: [business_id], references: [id])
-  purchase_orders                  purchase_orders               @relation(fields: [purchase_order_id], references: [id])
-  po_proforma_invoices             po_proforma_invoices          @relation(fields: [proforma_invoice_id], references: [id])
-  supplier_payment_instructions    supplier_payment_instructions @relation(fields: [supplier_payment_instruction_id], references: [id])
-  payment_methods                  payment_methods?              @relation(fields: [payment_method_id], references: [id])
-  users                             users                         @relation(fields: [recorded_by], references: [id])
+  installment_label               String?
+  paid_at                         DateTime                      @default(now())
+  recorded_by                     String
+  created_at                      DateTime                      @default(now())
+  businesses                      businesses                    @relation(fields: [business_id], references: [id])
+  purchase_orders                 purchase_orders               @relation(fields: [purchase_order_id], references: [id])
+  po_proforma_invoices            po_proforma_invoices          @relation(fields: [proforma_invoice_id], references: [id])
+  supplier_payment_instructions   supplier_payment_instructions @relation(fields: [supplier_payment_instruction_id], references: [id])
+  payment_methods                 payment_methods?              @relation(fields: [payment_method_id], references: [id])
+  users                           users                         @relation(fields: [recorded_by], references: [id])
 
   @@index([purchase_order_id])
   @@index([proforma_invoice_id])
@@ -1261,31 +1262,31 @@ model commercial_invoice_counters {
 
 /// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
 model po_commercial_invoices {
-  id                 String                  @id
-  business_id        String
-  purchase_order_id  String
+  id                String                   @id
+  business_id       String
+  purchase_order_id String
   // CI-000001, sequential per business -- same atomic-counter shape as
   // every other numbered document in this repo.
-  invoice_number     String
-  total_amount       Decimal                 @db.Decimal(14, 2)
-  currency_code      String
-  issued_at          DateTime                @default(now())
-  issued_by          String
+  invoice_number    String
+  total_amount      Decimal                  @db.Decimal(14, 2)
+  currency_code     String
+  issued_at         DateTime                 @default(now())
+  issued_by         String
   // Future PDF generation placeholder, same pattern as Proforma Invoice's
   // own storage_key.
-  storage_key        String?
+  storage_key       String?
   // Immutable financial document -- corrections are modeled as a NEW row
   // with supersedes_id pointing back to the one it corrects, exactly the
   // same pattern already used for Proforma Invoice re-issuance and Sales
   // Refunds (refund_of_sale_id). Never an in-place PATCH of totals.
-  status             CommercialInvoiceStatus @default(issued)
-  supersedes_id      String?
-  created_at         DateTime                @default(now())
-  businesses         businesses              @relation(fields: [business_id], references: [id])
-  purchase_orders    purchase_orders         @relation(fields: [purchase_order_id], references: [id])
-  users              users                   @relation(fields: [issued_by], references: [id])
-  supersedes         po_commercial_invoices? @relation("po_commercial_invoices_supersedes", fields: [supersedes_id], references: [id])
-  superseded_by      po_commercial_invoices[] @relation("po_commercial_invoices_supersedes")
+  status            CommercialInvoiceStatus  @default(issued)
+  supersedes_id     String?
+  created_at        DateTime                 @default(now())
+  businesses        businesses               @relation(fields: [business_id], references: [id])
+  purchase_orders   purchase_orders          @relation(fields: [purchase_order_id], references: [id])
+  users             users                    @relation(fields: [issued_by], references: [id])
+  supersedes        po_commercial_invoices?  @relation("po_commercial_invoices_supersedes", fields: [supersedes_id], references: [id])
+  superseded_by     po_commercial_invoices[] @relation("po_commercial_invoices_supersedes")
 
   // Future extension point -- NOT built this session: creditNoteId/
   // debitNoteId would attach here once that feature is ever requested.
@@ -1457,7 +1458,7 @@ model po_shipments {
   customs_cost              Decimal                      @default(0) @db.Decimal(14, 2)
   customs_notes             String?
   status                    ShipmentStatus               @default(pending)
-  priority                  ShipmentPriority              @default(normal)
+  priority                  ShipmentPriority             @default(normal)
   // Addendum #15 -- snapshotted once at shipment creation from whichever of
   // branches.location/warehouses.location the PO actually resolves to (this
   // schema has no dedicated structured address entity anywhere) -- a later
@@ -1513,15 +1514,15 @@ model po_shipments {
 // assuming one shipment per PO.
 /// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
 model po_shipment_items {
-  id                    String                @id
-  business_id           String
-  shipment_id           String
-  po_item_id            String
-  quantity_shipped      Decimal               @db.Decimal(14, 2)
-  created_at            DateTime              @default(now())
-  po_shipments          po_shipments          @relation(fields: [shipment_id], references: [id])
-  purchase_order_items  purchase_order_items  @relation(fields: [po_item_id], references: [id])
-  businesses            businesses            @relation(fields: [business_id], references: [id])
+  id                   String               @id
+  business_id          String
+  shipment_id          String
+  po_item_id           String
+  quantity_shipped     Decimal              @db.Decimal(14, 2)
+  created_at           DateTime             @default(now())
+  po_shipments         po_shipments         @relation(fields: [shipment_id], references: [id])
+  purchase_order_items purchase_order_items @relation(fields: [po_item_id], references: [id])
+  businesses           businesses           @relation(fields: [business_id], references: [id])
 
   @@index([shipment_id])
   @@index([po_item_id])
@@ -1539,19 +1540,19 @@ model po_shipment_items {
 // (owner/storekeeper-initiated via its own existing endpoint), confirmed via
 // Phase 0 that nothing else in this codebase calls it.
 model po_delivery_milestones {
-  id                 String                 @id
-  business_id        String
-  purchase_order_id  String
-  shipment_id        String?
-  milestone          DeliveryMilestoneType
-  planned_date       DateTime?
-  actual_date        DateTime?
-  recorded_from      PoNegotiationParty
-  recorded_by_name   String?
-  created_at         DateTime               @default(now())
-  purchase_orders    purchase_orders        @relation(fields: [purchase_order_id], references: [id])
-  po_shipments       po_shipments?          @relation(fields: [shipment_id], references: [id])
-  businesses         businesses             @relation(fields: [business_id], references: [id])
+  id                String                @id
+  business_id       String
+  purchase_order_id String
+  shipment_id       String?
+  milestone         DeliveryMilestoneType
+  planned_date      DateTime?
+  actual_date       DateTime?
+  recorded_from     PoNegotiationParty
+  recorded_by_name  String?
+  created_at        DateTime              @default(now())
+  purchase_orders   purchase_orders       @relation(fields: [purchase_order_id], references: [id])
+  po_shipments      po_shipments?         @relation(fields: [shipment_id], references: [id])
+  businesses        businesses            @relation(fields: [business_id], references: [id])
 
   @@index([purchase_order_id])
   @@index([shipment_id])
@@ -1563,22 +1564,22 @@ model po_delivery_milestones {
 // on every update (pick "other" if nothing else fits -- never optional,
 // never losing analytics coverage).
 model po_eta_updates {
-  id                        String            @id
+  id                        String             @id
   business_id               String
   purchase_order_id         String
-  shipment_id                String
-  old_expected_arrival_from  DateTime?
-  old_expected_arrival_to    DateTime?
-  new_expected_arrival_from  DateTime?
-  new_expected_arrival_to    DateTime?
-  reason_category            EtaReasonCategory
-  reason                     String
-  updated_by_party           PoNegotiationParty
-  updated_by_name            String?
-  updated_at                 DateTime          @default(now())
-  purchase_orders            purchase_orders   @relation(fields: [purchase_order_id], references: [id])
-  po_shipments               po_shipments      @relation(fields: [shipment_id], references: [id])
-  businesses                 businesses        @relation(fields: [business_id], references: [id])
+  shipment_id               String
+  old_expected_arrival_from DateTime?
+  old_expected_arrival_to   DateTime?
+  new_expected_arrival_from DateTime?
+  new_expected_arrival_to   DateTime?
+  reason_category           EtaReasonCategory
+  reason                    String
+  updated_by_party          PoNegotiationParty
+  updated_by_name           String?
+  updated_at                DateTime           @default(now())
+  purchase_orders           purchase_orders    @relation(fields: [purchase_order_id], references: [id])
+  po_shipments              po_shipments       @relation(fields: [shipment_id], references: [id])
+  businesses                businesses         @relation(fields: [business_id], references: [id])
 
   @@index([shipment_id])
 }
@@ -1587,7 +1588,7 @@ model po_eta_updates {
 // retrofitted onto Expense Attachments) -- no parallel storage abstraction.
 /// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
 model po_shipment_attachments {
-  id                String                  @id
+  id                String                 @id
   business_id       String
   shipment_id       String
   type              ShipmentAttachmentType
@@ -1596,9 +1597,9 @@ model po_shipment_attachments {
   storage_key       String
   uploaded_by_party PoNegotiationParty
   uploaded_by_name  String?
-  uploaded_at       DateTime                @default(now())
-  po_shipments      po_shipments            @relation(fields: [shipment_id], references: [id])
-  businesses        businesses              @relation(fields: [business_id], references: [id])
+  uploaded_at       DateTime               @default(now())
+  po_shipments      po_shipments           @relation(fields: [shipment_id], references: [id])
+  businesses        businesses             @relation(fields: [business_id], references: [id])
 
   @@index([shipment_id])
 }
@@ -1617,17 +1618,17 @@ model po_shipment_attachments {
 // a genuinely different shape audit_logs' own free-text reason field
 // doesn't model as cleanly for building a status-timeline view.
 model po_shipment_status_history {
-  id               String              @id
+  id               String             @id
   business_id      String
   shipment_id      String
   from_status      ShipmentStatus?
   to_status        ShipmentStatus
   changed_by_party PoNegotiationParty
   changed_by_name  String?
-  changed_at       DateTime            @default(now())
+  changed_at       DateTime           @default(now())
   note             String?
-  po_shipments     po_shipments        @relation(fields: [shipment_id], references: [id])
-  businesses       businesses          @relation(fields: [business_id], references: [id])
+  po_shipments     po_shipments       @relation(fields: [shipment_id], references: [id])
+  businesses       businesses         @relation(fields: [business_id], references: [id])
 
   @@index([shipment_id])
 }
@@ -2393,4 +2394,91 @@ enum UserRole {
   cashier
   shareholder
   custom
+}
+
+// Module 33 Session 4A -- Real Email Sending. NotificationCategory was
+// deliberately kept a plain TS union (src/notifications/types.ts) until now,
+// matching Low Stock Alert's own "no DB enum unless something actually
+// persists it" precedent -- promoted to a real Prisma enum here since
+// email_send_log is the first table that ever needs to store it. Values are
+// kept UPPERCASE_SNAKE, matching the literal strings already used at 10+
+// pre-existing call sites (auth/staffInvite/debt/stockAlertSubscriber) --
+// same reasoning that already kept Incoterm UPPERCASE against this schema's
+// general lowercase-enum convention: matching an already-in-use vocabulary
+// beats cosmetic consistency.
+enum NotificationCategory {
+  SECURITY
+  BUSINESS_OPERATIONS
+  MARKETING
+  SYSTEM_ALERTS
+  TRANSACTIONAL
+}
+
+// The 13-address sender-identity system (LOCKED). Only SECURITY/
+// NOTIFICATIONS/NOREPLY get a real call site wired this session (see
+// src/notifications/senderProfiles.ts) -- the rest exist as configured
+// addresses ready for modules that don't exist yet (Sales/Marketing/HR/
+// Legal/...), not speculative call-site logic for features nobody built.
+enum SenderProfile {
+  SECURITY
+  NOTIFICATIONS
+  BILLING
+  SUPPORT
+  SALES
+  MARKETING
+  CAREERS
+  HR
+  PARTNERS
+  LEGAL
+  PRIVACY
+  COMPLIANCE
+  NOREPLY
+}
+
+enum EmailStatus {
+  queued
+  sending
+  sent
+  failed
+  retrying
+}
+
+// One row per outbound email SEND ATTEMPT (a retry updates the SAME row --
+// attempt_count increments in place, see src/notifications/emailDelivery.ts
+// -- never a second row for the same logical send). Deliberately does NOT
+// persist the rendered body: several current call sites embed a one-time
+// verification/invite token directly in the body text, and unlike
+// otp_challenges/staff_invites this table has no expiry/rotation of its
+// own, so storing the body here would create a second, longer-lived place
+// those tokens sit. subject is safe to keep (no token ever appears in a
+// subject line today) and is what actually helps debug a delivery problem.
+/// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
+model email_send_log {
+  id                  String               @id
+  business_id         String
+  category            NotificationCategory
+  sender_profile      SenderProfile
+  to_email            String
+  from_email          String
+  subject             String
+  status              EmailStatus          @default(queued)
+  // Which EmailProvider implementation handled this send ("resend" |
+  // "console") -- future-proofs multi-provider scenarios (Session 7+).
+  provider            String
+  provider_message_id String?
+  attempt_count       Int                  @default(0)
+  last_attempt_at     DateTime?
+  sent_at             DateTime?
+  // Always null this session -- Resend's synchronous send response only
+  // confirms acceptance, never actual delivery; real delivery confirmation
+  // needs webhook infrastructure (Session 4B/7 territory), not built here.
+  // Kept as a real column now so wiring it up later is an UPDATE, not a
+  // migration.
+  delivered_at        DateTime?
+  failure_reason      String?
+  created_at          DateTime             @default(now())
+  businesses          businesses           @relation(fields: [business_id], references: [id])
+
+  @@index([business_id, created_at])
+  @@index([status])
 }

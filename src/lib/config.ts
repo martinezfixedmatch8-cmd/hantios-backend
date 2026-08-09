@@ -19,6 +19,18 @@ const envSchema = z.object({
   APP_BASE_URL: z.string().url().optional(),
   STAFF_INVITE_EXPIRY_HOURS: z.coerce.number().int().positive().default(72),
   EMAIL_VERIFICATION_EXPIRY_HOURS: z.coerce.number().int().positive().default(24),
+
+  // Module 33 Session 4A -- Real Email Sending. Both optional: absence is a
+  // valid, fail-soft state (src/notifications/registry.ts falls back to
+  // ConsoleEmailProvider when RESEND_API_KEY is unset), never a startup
+  // failure -- matching this repo's existing GOOGLE_CLIENT_ID/
+  // TURNSTILE_SECRET_KEY precedent for optional integrations.
+  RESEND_API_KEY: z.string().optional(),
+  // Accepts either a bare address or Resend's "Display Name <addr>" format,
+  // so not validated as a strict email -- also doubles as the NOREPLY
+  // sender-profile address override (src/notifications/senderProfiles.ts)
+  // and what the startup domain-verification check inspects.
+  RESEND_FROM_EMAIL: z.string().optional(),
 });
 
 function loadEnv() {

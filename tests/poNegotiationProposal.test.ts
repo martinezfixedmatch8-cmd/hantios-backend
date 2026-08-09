@@ -390,6 +390,13 @@ describe("PO Negotiation Proposals", () => {
     });
 
     it("applies product_substitution, product_added, and product_removed correctly within one proposal", async () => {
+      // 3 full draft->submit->accept negotiation cycles in one test -- many
+      // sequential real HTTP/DB round trips against the live Neon DB.
+      // Exceeded Jest's default 40s timeout under this environment's real
+      // per-query latency (same class of issue already documented for
+      // Commercial Invoice's own heavier tests) -- unrelated to any
+      // correctness bug, confirmed by isolated re-run and root-cause
+      // analysis before extending the timeout.
       const { po, productB } = await createSentPoWithLink();
       const originalItem = await prisma.purchase_order_items.findFirstOrThrow({ where: { purchase_order_id: po.id } });
 
@@ -432,7 +439,7 @@ describe("PO Negotiation Proposals", () => {
       expect(acceptRes3.status).toBe(200);
       const remaining = await prisma.purchase_order_items.findMany({ where: { purchase_order_id: po.id } });
       expect(remaining.map((i) => i.id)).not.toContain(addedItem.id);
-    });
+    }, 90000);
 
     it("409s a double-accept, exactly once under real concurrency", async () => {
       const { po } = await createSentPoWithLink();

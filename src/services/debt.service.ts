@@ -660,7 +660,7 @@ export async function sendReminder(debtId: string, actor: Actor) {
   let status: "sent" | "failed" = "sent";
   let error: string | null = null;
   try {
-    await getNotificationProvider().send({ category: "BUSINESS_OPERATIONS", channel: "whatsapp", to: debt.customer_phone, body });
+    await getNotificationProvider().send({ category: "BUSINESS_OPERATIONS", channel: "whatsapp", to: debt.customer_phone, businessId: debt.business_id, body });
   } catch (err) {
     status = "failed";
     error = err instanceof Error ? err.message : "Unknown notification error";

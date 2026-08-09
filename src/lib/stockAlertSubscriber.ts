@@ -76,7 +76,7 @@ async function handleStockLow(payload: DomainEventPayloads["StockLow"]): Promise
     let status: "sent" | "failed" = "sent";
     let error: string | null = null;
     try {
-      await getNotificationProvider().send({ category: "BUSINESS_OPERATIONS", channel: "whatsapp", to: recipient.phone, body });
+      await getNotificationProvider().send({ category: "BUSINESS_OPERATIONS", channel: "whatsapp", to: recipient.phone, businessId: payload.businessId, body });
     } catch (err) {
       status = "failed";
       error = err instanceof Error ? err.message : "Unknown notification error";
