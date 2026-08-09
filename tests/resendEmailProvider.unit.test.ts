@@ -86,6 +86,28 @@ describe("ResendEmailProvider -- retry-once on transient failure", () => {
     );
   });
 
+  it("reuses the SAME idempotency key across the internal retry -- never regenerated per attempt", async () => {
+    const client = new FakeResendClient([resendError(429, "rate_limit_exceeded"), resendSuccess("id-retry")]);
+    const provider = new ResendEmailProvider("test-key", { client });
+
+    const result = await provider.sendEmail({ ...baseInput, idempotencyKey: "logical-send-abc123" });
+
+    expect(result.attemptCount).toBe(2);
+    expect(client.callOptions).toHaveLength(2);
+    expect(client.callOptions[0]).toEqual({ idempotencyKey: "logical-send-abc123" });
+    expect(client.callOptions[1]).toEqual({ idempotencyKey: "logical-send-abc123" });
+    expect(client.callOptions[0]).toEqual(client.callOptions[1]);
+  });
+
+  it("passes no idempotency option at all when the caller didn't supply one (never a client-invented random value)", async () => {
+    const client = new FakeResendClient([resendSuccess("id-no-key")]);
+    const provider = new ResendEmailProvider("test-key", { client });
+
+    await provider.sendEmail(baseInput);
+
+    expect(client.callOptions[0]).toBeUndefined();
+  });
+
   it("maps EmailAttachment.mimeType to Resend's own contentType field internally, invisible to the caller", async () => {
     const client = new FakeResendClient([resendSuccess("id-attach")]);
     const provider = new ResendEmailProvider("test-key", { client });

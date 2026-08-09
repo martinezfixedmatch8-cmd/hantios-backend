@@ -2,6 +2,7 @@ import type {
   ResendLikeClient,
   ResendListDomainsResponse,
   ResendSendPayload,
+  ResendSendRequestOptions,
   ResendSendResponse,
 } from "../../src/notifications/ResendEmailProvider";
 
@@ -14,6 +15,10 @@ import type {
 // failure), or "fails once, non-transiently" (no retry at all).
 export class FakeResendClient implements ResendLikeClient {
   calls: ResendSendPayload[] = [];
+  // The options object (including idempotencyKey) passed on each call, in
+  // the same order as `calls` -- lets a test assert the SAME idempotency
+  // key was reused across an internal retry, not regenerated per attempt.
+  callOptions: (ResendSendRequestOptions | undefined)[] = [];
   domainListCalls = 0;
 
   private responseQueue: ResendSendResponse[];
@@ -27,8 +32,9 @@ export class FakeResendClient implements ResendLikeClient {
   }
 
   emails = {
-    send: async (payload: ResendSendPayload): Promise<ResendSendResponse> => {
+    send: async (payload: ResendSendPayload, options?: ResendSendRequestOptions): Promise<ResendSendResponse> => {
       this.calls.push(payload);
+      this.callOptions.push(options);
       const next = this.responseQueue[this.calls.length - 1] ?? this.responseQueue[this.responseQueue.length - 1];
       return next;
     },

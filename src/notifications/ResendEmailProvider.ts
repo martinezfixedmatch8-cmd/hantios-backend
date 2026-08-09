@@ -20,7 +20,7 @@ import type { DomainVerificationResult, EmailAttachment, SendEmailInput, SendEma
 // needs to be unit-tested without hitting the network.
 export interface ResendLikeClient {
   emails: {
-    send(payload: ResendSendPayload): Promise<ResendSendResponse>;
+    send(payload: ResendSendPayload, options?: ResendSendRequestOptions): Promise<ResendSendResponse>;
   };
   // Optional -- only used by checkDomainVerification (the non-blocking
   // startup check), never by sendEmail. Narrowed the same way emails.send
@@ -29,6 +29,15 @@ export interface ResendLikeClient {
   domains?: {
     list(): Promise<ResendListDomainsResponse>;
   };
+}
+
+// Resend's own native idempotency mechanism (confirmed via the installed
+// SDK's own type defs: CreateEmailRequestOptions extends IdempotentRequest,
+// { idempotencyKey?: string } sent as the `Idempotency-Key` header) --
+// request-level, server-side dedup. Reused directly rather than building a
+// parallel app-level dedup scheme for the retry-once case specifically.
+export interface ResendSendRequestOptions {
+  idempotencyKey?: string;
 }
 
 export interface ResendListDomainsResponse {
@@ -123,8 +132,16 @@ export class ResendEmailProvider implements EmailProvider {
 
   async sendEmail(input: SendEmailInput): Promise<SendEmailResult> {
     const payload = toResendPayload(input);
+    // Same idempotencyKey reused across the internal retry-once below --
+    // NEVER regenerated per attempt. This is what makes a network timeout
+    // (statusCode null, the case where we genuinely don't know if Resend
+    // already received and is processing the first attempt) followed by
+    // our own retry safe: Resend recognizes the second attempt as the same
+    // logical request via its own `Idempotency-Key` header and returns the
+    // original result instead of transmitting the email a second time.
+    const idempotencyKey = input.idempotencyKey;
 
-    const first = await this.attemptSend(payload);
+    const first = await this.attemptSend(payload, idempotencyKey);
     if (first.success) {
       return { success: true, providerMessageId: first.providerMessageId, attemptCount: 1 };
     }
@@ -134,7 +151,7 @@ export class ResendEmailProvider implements EmailProvider {
     }
 
     // Exactly one immediate retry on a transient failure -- never more.
-    const second = await this.attemptSend(payload);
+    const second = await this.attemptSend(payload, idempotencyKey);
     if (second.success) {
       return { success: true, providerMessageId: second.providerMessageId, attemptCount: 2 };
     }
@@ -162,9 +179,9 @@ export class ResendEmailProvider implements EmailProvider {
     }
   }
 
-  private async attemptSend(payload: ResendSendPayload): Promise<AttemptOutcome> {
+  private async attemptSend(payload: ResendSendPayload, idempotencyKey?: string): Promise<AttemptOutcome> {
     try {
-      const result = await this.client.emails.send(payload);
+      const result = await this.client.emails.send(payload, idempotencyKey ? { idempotencyKey } : undefined);
       if (!result.error) {
         return { success: true, providerMessageId: result.data?.id, statusCode: null };
       }

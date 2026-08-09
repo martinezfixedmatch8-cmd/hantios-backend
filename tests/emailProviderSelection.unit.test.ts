@@ -5,12 +5,23 @@
 // jest.resetModules() + a dynamic require (no existing jest.mock()
 // precedent in this repo to follow here; this is the standard Jest
 // technique for env-driven module-load-time behavior).
+//
+// Simulating "absent" uses an empty string, never `delete`: this repo's
+// real .env now has a real RESEND_API_KEY (Module 33 Session 4A closed
+// with Resend live), and re-requiring src/lib/config.ts after
+// jest.resetModules() re-runs `import "dotenv/config"`, which repopulates
+// any KEY THAT ISN'T ALREADY PRESENT in process.env from the real .env file
+// on disk -- `delete`-ing the var made it "not present" again, so dotenv
+// silently put the real key right back before the module under test ever
+// read it. An empty string keeps the key present (dotenv only fills in
+// truly-missing keys) while still reading as falsy to
+// emailProviderRegistry.ts's own `env.RESEND_API_KEY ? ... : ...` check.
 describe("EmailProvider selection -- RESEND_API_KEY present/absent", () => {
   const originalApiKey = process.env.RESEND_API_KEY;
 
   afterEach(() => {
     if (originalApiKey === undefined) {
-      delete process.env.RESEND_API_KEY;
+      process.env.RESEND_API_KEY = "";
     } else {
       process.env.RESEND_API_KEY = originalApiKey;
     }
@@ -32,7 +43,7 @@ describe("EmailProvider selection -- RESEND_API_KEY present/absent", () => {
 
   it("falls back to ConsoleEmailProvider when RESEND_API_KEY is absent (fail-soft)", () => {
     jest.resetModules();
-    delete process.env.RESEND_API_KEY;
+    process.env.RESEND_API_KEY = "";
 
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     const registry = require("../src/notifications/emailProviderRegistry");
@@ -45,7 +56,7 @@ describe("EmailProvider selection -- RESEND_API_KEY present/absent", () => {
 
   it("setEmailProvider (the DI test seam) overrides the selected provider and its tracked name", () => {
     jest.resetModules();
-    delete process.env.RESEND_API_KEY;
+    process.env.RESEND_API_KEY = "";
 
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     const registry = require("../src/notifications/emailProviderRegistry");

@@ -39,11 +39,22 @@ export async function sendEmailNotification(notification: Notification): Promise
   const provider = getEmailProvider();
   const providerName = getEmailProviderName();
 
-  let logId: string | null = null;
+  // Generated once, up front -- used both as email_send_log's own primary
+  // key AND, unchanged, as the idempotency key passed to the EmailProvider
+  // (see SendEmailInput.idempotencyKey). This is what "derived from
+  // something stable, not a random value regenerated per attempt" means in
+  // practice: one real, persisted identifier representing this specific
+  // logical send, reused across ResendEmailProvider's own internal
+  // retry-once so a network timeout followed by that retry can never cause
+  // Resend to actually transmit the email twice. Generated unconditionally
+  // (not only on a successful DB write) so the idempotency guarantee holds
+  // even if the email_send_log insert itself fails below.
+  const logId = generateId();
+  let logCreated = false;
   try {
-    const created = await prisma.email_send_log.create({
+    await prisma.email_send_log.create({
       data: {
-        id: generateId(),
+        id: logId,
         business_id: notification.businessId,
         category: notification.category,
         sender_profile: senderProfile,
@@ -54,7 +65,7 @@ export async function sendEmailNotification(notification: Notification): Promise
         provider: providerName,
       },
     });
-    logId = created.id;
+    logCreated = true;
   } catch (err) {
     // A logging failure must never block the actual send attempt below --
     // this table is diagnostic infrastructure, not the source of truth for
@@ -72,6 +83,7 @@ export async function sendEmailNotification(notification: Notification): Promise
       replyTo,
       attachments: notification.attachments,
       category: notification.category,
+      idempotencyKey: logId,
     });
   } catch (err) {
     // Defensive only -- every real EmailProvider implementation already
@@ -86,7 +98,7 @@ export async function sendEmailNotification(notification: Notification): Promise
     console.error(`[email] send failed to ${notification.to}: ${result.error ?? "unknown error"}`);
   }
 
-  if (!logId) return;
+  if (!logCreated) return;
 
   try {
     const now = new Date();

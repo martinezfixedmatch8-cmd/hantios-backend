@@ -31,6 +31,15 @@ export interface SendEmailInput {
   // Optional, forward-prep only (Additional Requirement #1) -- no active
   // branching on this value anywhere this session.
   category?: EmailCategory;
+  // Deterministic per-logical-send identifier (e.g. the caller's own
+  // email_send_log.id, generated once before any attempt is made) -- NOT
+  // regenerated per retry. Providers that support a native idempotency
+  // mechanism (Resend's own `Idempotency-Key` header) pass this same value
+  // on every internal attempt, so a network timeout followed by the
+  // provider's own retry-once can never result in the provider actually
+  // transmitting the same email twice server-side. Provider-neutral concept
+  // (most major providers support request-level idempotency keys).
+  idempotencyKey?: string;
 }
 
 export interface SendEmailResult {
