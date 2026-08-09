@@ -10,6 +10,7 @@ import { assertNegotiationOpen } from "../lib/poNegotiationGuards";
 import { env } from "../lib/config";
 import { getNotificationProvider } from "../notifications/registry";
 import { renderEmailTemplate } from "../notifications/EmailTemplateRenderer";
+import { generateReplyToken, buildReplyToAddress } from "../lib/inboundEmailCorrelation";
 
 interface Actor {
   userId: string;
@@ -53,8 +54,22 @@ export async function regenerateSecureLink(poId: string, actor: Actor, idempoten
   const tokenHash = hashToken(rawToken);
   const expiresAt = new Date(Date.now() + LINK_EXPIRY_DAYS * 24 * 60 * 60 * 1000);
 
+  // Module 33 Session 4B -- lazily generated once, alongside the secure
+  // link itself, and never rotated afterward (unlike the secure link's own
+  // token) -- see negotiation_reply_token's own schema comment for why the
+  // two must not share a lifecycle. Computed outside the transaction (a
+  // fresh value is only actually used if the PO doesn't already have one).
+  const replyToken = po.negotiation_reply_token ?? generateReplyToken();
+
   const link = await prisma.$transaction(async (tx) => {
     await claimIdempotencyKey(tx, actor.businessId, idempotencyKey, regenerateSecureLinkEndpoint(poId));
+
+    if (!po.negotiation_reply_token) {
+      await tx.purchase_orders.updateMany({
+        where: { id: poId, business_id: actor.businessId, negotiation_reply_token: null },
+        data: { negotiation_reply_token: replyToken },
+      });
+    }
 
     // One PO = one active link at a time -- revoke any prior active link
     // before creating the new one, in the same transaction.
@@ -129,6 +144,12 @@ export async function regenerateSecureLink(poId: string, actor: Actor, idempoten
       senderProfile: "NOTIFICATIONS",
       subject,
       body,
+      // Module 33 Session 4B -- the deterministic outbound<->inbound
+      // correlation mechanism (see inboundEmailCorrelation.ts). null (and
+      // therefore omitted) when RESEND_INBOUND_DOMAIN isn't configured --
+      // the email still sends, replies just have nowhere in particular to
+      // land on until a real inbound domain exists.
+      replyTo: buildReplyToAddress(replyToken) ?? undefined,
     });
   } else {
     console.warn(`[po-negotiation] no supplier email on file for PO ${po.po_number} -- secure link was generated but not emailed`);

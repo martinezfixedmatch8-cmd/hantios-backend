@@ -2,8 +2,10 @@ import { z } from "zod";
 
 // 10MB, mirrors expense.schema.ts's own MAX_ATTACHMENT_SIZE_BYTES exactly --
 // same reused limit, backed by the identical chk_..._file_size_range shape
-// (chk_po_negotiation_attachments_file_size_range) at the DB layer.
-const MAX_ATTACHMENT_SIZE_BYTES = 10 * 1024 * 1024;
+// (chk_po_negotiation_attachments_file_size_range) at the DB layer. Exported
+// so Module 33 Session 4B's inbound-email attachment ingestion enforces the
+// identical limit rather than a second, potentially-drifting one.
+export const MAX_ATTACHMENT_SIZE_BYTES = 10 * 1024 * 1024;
 export const MAX_NEGOTIATION_ATTACHMENTS_PER_UPLOAD = 5;
 
 // `type` (PoNegotiationAttachmentType) is DERIVED from mimeType, never a

@@ -1,6 +1,14 @@
-import type { DomainVerificationResult, EmailAttachment, EmailCategory, SendEmailInput, SendEmailResult } from "./emailTypes";
+import type {
+  DomainVerificationResult,
+  EmailAttachment,
+  EmailCategory,
+  ReceivedEmail,
+  ReceivedEmailAttachment,
+  SendEmailInput,
+  SendEmailResult,
+} from "./emailTypes";
 
-export type { DomainVerificationResult, EmailAttachment, EmailCategory, SendEmailInput, SendEmailResult };
+export type { DomainVerificationResult, EmailAttachment, EmailCategory, ReceivedEmail, ReceivedEmailAttachment, SendEmailInput, SendEmailResult };
 
 // Module 33 Session 4A -- Real Email Sending (ARCHITECTURE LOCK).
 //
@@ -27,4 +35,16 @@ export interface EmailProvider {
   // non-blocking startup warning (src/lib/emailDomainCheck.ts) -- never
   // called from a request path.
   checkDomainVerification?(): Promise<DomainVerificationResult>;
+
+  // Module 33 Session 4B -- fetches the full body/attachment-metadata of a
+  // previously-received inbound email, given the provider's own opaque
+  // email id. Optional, same reasoning as checkDomainVerification -- inbound
+  // receiving is a real capability most major providers offer in some form
+  // (SES, Postmark, Mailgun, SendGrid all support inbound parsing), but a
+  // stub/fallback provider has nothing real to fetch. Returns null when the
+  // provider can't retrieve it (never throws) -- the inbound webhook
+  // handler (src/services/resendInboundWebhook.service.ts) treats a null
+  // result as a parse failure and quarantines the event rather than
+  // crashing.
+  getReceivedEmail?(emailId: string): Promise<ReceivedEmail | null>;
 }

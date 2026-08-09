@@ -143,6 +143,10 @@ export interface DomainEventPayloads {
   // execution fields (carrier/tracking/costs/priority), never core
   // identity/contractual-terms fields.
   PurchaseOrderShipmentUpdated: { businessId: string; purchaseOrderId: string; shipmentId: string; changedFields: string[] };
+  // Module 33 Session 4B -- Email Conversation Sync (inbound). Publish-only,
+  // no dispatch, same standing rule as every event above.
+  PurchaseOrderNegotiationEmailReceived: { businessId: string; purchaseOrderId: string; messageId: string; resendEmailId: string };
+  PurchaseOrderNegotiationEmailUnmatched: { businessId: string | null; resendEmailId: string; reason: string };
 }
 
 export type DomainEventName = keyof DomainEventPayloads;

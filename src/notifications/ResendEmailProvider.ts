@@ -1,6 +1,6 @@
 import { Resend } from "resend";
 import type { EmailProvider } from "./EmailProvider";
-import type { DomainVerificationResult, EmailAttachment, SendEmailInput, SendEmailResult } from "./emailTypes";
+import type { DomainVerificationResult, EmailAttachment, ReceivedEmail, SendEmailInput, SendEmailResult } from "./emailTypes";
 
 // The ONLY file in this codebase allowed to `import { Resend }` (or any
 // other email-provider SDK) -- ARCHITECTURE LOCK, enforced by
@@ -21,6 +21,14 @@ import type { DomainVerificationResult, EmailAttachment, SendEmailInput, SendEma
 export interface ResendLikeClient {
   emails: {
     send(payload: ResendSendPayload, options?: ResendSendRequestOptions): Promise<ResendSendResponse>;
+    // Module 33 Session 4B -- only used by getReceivedEmail (inbound
+    // webhook processing). Optional and narrowed to just `receiving.get`,
+    // matching the real SDK's own `resend.emails.receiving.get(id)` shape
+    // and the same minimal-shape-for-testability reasoning as send/
+    // domains.list.
+    receiving?: {
+      get(emailId: string): Promise<ResendGetReceivingEmailResponse>;
+    };
   };
   // Optional -- only used by checkDomainVerification (the non-blocking
   // startup check), never by sendEmail. Narrowed the same way emails.send
@@ -29,6 +37,17 @@ export interface ResendLikeClient {
   domains?: {
     list(): Promise<ResendListDomainsResponse>;
   };
+}
+
+export interface ResendGetReceivingEmailResponse {
+  data: {
+    from: string;
+    to: string[];
+    subject: string;
+    text: string | null;
+    attachments: { id: string; filename: string | null; size: number; content_type: string }[];
+  } | null;
+  error: { message: string; statusCode: number | null; name: string } | null;
 }
 
 // Resend's own native idempotency mechanism (confirmed via the installed
@@ -176,6 +195,37 @@ export class ResendEmailProvider implements EmailProvider {
       return { checked: true, verified: match?.status === "verified", domain };
     } catch {
       return { checked: false, verified: false, domain };
+    }
+  }
+
+  // Module 33 Session 4B -- fetches the full body + attachment metadata of
+  // a previously-received inbound email. The webhook payload itself
+  // (email.received) never carries body text or attachment sizes (confirmed
+  // directly from the SDK's own type defs -- ReceivedEmailEventData has
+  // neither), so this follow-up call is genuinely required, not optional
+  // polish. Never throws -- returns null on any failure so the inbound
+  // webhook handler can quarantine the event as a parse failure instead of
+  // crashing (Lock #6: fail closed on hostile/malformed input).
+  async getReceivedEmail(emailId: string): Promise<ReceivedEmail | null> {
+    if (!this.client.emails.receiving?.get) return null;
+    try {
+      const result = await this.client.emails.receiving.get(emailId);
+      if (result.error || !result.data) return null;
+      return {
+        emailId,
+        from: result.data.from,
+        to: result.data.to,
+        subject: result.data.subject,
+        text: result.data.text,
+        attachments: result.data.attachments.map((a) => ({
+          id: a.id,
+          filename: a.filename,
+          mimeType: a.content_type,
+          sizeBytes: a.size,
+        })),
+      };
+    } catch {
+      return null;
     }
   }
 

@@ -167,6 +167,7 @@ model businesses {
   wsm_counters                        wsm_counters?
   goods_received_items                goods_received_items[]
   email_send_log                      email_send_log[]
+  unmatched_inbound_emails            unmatched_inbound_emails[]
 }
 
 model categories {
@@ -913,6 +914,19 @@ model purchase_orders {
   // computeNegotiationStatus in poNegotiation.service.ts), no scheduler.
   negotiation_round                  Int                                  @default(0)
   negotiation_respond_by             DateTime?
+  // Module 33 Session 4B -- a stable, cryptographically-random, per-PO
+  // correlation token for inbound email reply-matching (src/lib/
+  // inboundEmailCorrelation.ts). Deliberately NOT the same token as
+  // po_secure_links' own rotatable one: that link can be revoked/
+  // regenerated at any time (Session 1's own design), and a reply-to
+  // address derived from it would silently orphan an in-flight email
+  // thread the moment the owner regenerates the link for an unrelated
+  // reason. This token has its own independent lifecycle -- generated
+  // once, lazily, on first use, never rotated. Nullable: only populated
+  // once an inbound-capable outbound negotiation email has actually been
+  // sent (RESEND_INBOUND_DOMAIN configured); most POs in this dev
+  // environment will never populate it.
+  negotiation_reply_token            String?                              @unique
   // Session 2A -- snapshotted once from suppliers.payment_terms at PO
   // creation time (nullable: a supplier with no configured terms yet, or a
   // PO created before this session existed). A later edit to the supplier's
@@ -1690,6 +1704,17 @@ enum PoNegotiationParty {
   system
 }
 
+// Module 33 Session 4B -- how a message actually reached po_negotiation_messages.
+// portal = the existing owner/supplier-portal write endpoints (Session 1,
+// unchanged); email = ingested from an inbound Resend webhook reply; system
+// mirrors PoNegotiationParty's own reserved-but-unused value, kept for
+// symmetry (no code path sets it yet, same as sender_type's own "system").
+enum PoNegotiationMessageSource {
+  portal
+  email
+  system
+}
+
 // Messages are fully immutable except the read_at/read_by pair, which is
 // set exactly once (first read by the OTHER party only) and never
 // overwritten on subsequent reads.
@@ -1714,6 +1739,16 @@ model po_negotiation_messages {
   ip_address          String?
   read_at             DateTime?
   read_by             PoNegotiationParty?
+  // Module 33 Session 4B -- source defaults to "portal" so every one of
+  // Session 1's own existing writes needs zero code change; "email" is set
+  // only by the new inbound-webhook ingestion path. resend_email_id is the
+  // secondary, defense-in-depth uniqueness guard for the same
+  // resend_email_id dedup resend_inbound_claims already enforces as the
+  // PRIMARY atomic claim (see that model's own comment) -- nullable, set
+  // only on source="email" rows, giving direct traceability from a message
+  // back to the exact inbound webhook event that created it.
+  source              PoNegotiationMessageSource   @default(portal)
+  resend_email_id     String?                      @unique
   purchase_orders     purchase_orders              @relation(fields: [purchase_order_id], references: [id])
   businesses          businesses                   @relation(fields: [business_id], references: [id])
   reply_to_message    po_negotiation_messages?     @relation("po_negotiation_messages_replies", fields: [reply_to_message_id], references: [id])
@@ -2481,4 +2516,58 @@ model email_send_log {
 
   @@index([business_id, created_at])
   @@index([status])
+}
+
+// Module 33 Session 4B -- Email Conversation Sync (inbound).
+//
+// The single atomic dedup gate for Lock #5 (webhook idempotency MUST be
+// transaction-safe, never in-memory): one row per Resend email_id EVER
+// received, claimed via an atomic create()-catch-P2002 as the FIRST write
+// inside the SAME transaction that (conditionally) creates the resulting
+// po_negotiation_messages row or unmatched_inbound_emails row -- never a
+// separate, earlier transaction (that would reopen exactly the "claimed
+// but nothing was ever created" gap Lock #9 warns about). A redelivered
+// webhook for an already-claimed email_id is a pure no-op, checked before
+// any matching/verification logic runs at all. Deliberately minimal --
+// this table's only job is "have we seen this email_id before," not a
+// general audit trail (that's what audit_logs / the domain events already
+// published from this flow are for).
+model resend_inbound_claims {
+  id              String   @id
+  resend_email_id String   @unique
+  claimed_at      DateTime @default(now())
+}
+
+// Lock #10's stated priority ("Correct PO > Correct Supplier > Correct
+// Tenant > Message Creation") made concrete: every inbound email that
+// can't be matched with certainty lands here instead of ever touching
+// po_negotiation_messages -- a reviewable record of "emails that didn't
+// make it in," never a silent drop. business_id is deliberately nullable:
+// several rejection reasons (invalid signature, no correlation match at
+// all) may never resolve a business at all.
+enum UnmatchedInboundEmailReason {
+  sender_not_recognized
+  thread_not_found
+  parse_error
+  signature_invalid
+}
+
+model unmatched_inbound_emails {
+  id              String                      @id
+  resend_email_id String                      @unique
+  from_address    String
+  to_address      String
+  subject         String?
+  // A short prefix only, never the full body -- same "don't persist more
+  // of an untrusted external payload than actually helps debugging"
+  // reasoning email_send_log already applies to its own outbound subject-
+  // only (never body) logging.
+  body_preview    String?
+  reason          UnmatchedInboundEmailReason
+  business_id     String?
+  received_at     DateTime                    @default(now())
+  businesses      businesses?                 @relation(fields: [business_id], references: [id])
+
+  @@index([business_id, received_at])
+  @@index([reason])
 }

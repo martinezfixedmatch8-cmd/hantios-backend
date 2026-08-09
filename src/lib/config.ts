@@ -31,6 +31,25 @@ const envSchema = z.object({
   // sender-profile address override (src/notifications/senderProfiles.ts)
   // and what the startup domain-verification check inspects.
   RESEND_FROM_EMAIL: z.string().optional(),
+
+  // Module 33 Session 4B -- Email Conversation Sync (inbound). Both
+  // optional/fail-soft, same reasoning as every other integration secret in
+  // this file: absence is a valid state (the inbound webhook route rejects
+  // every request with 401 when unset -- see resendWebhookAuth.ts -- and
+  // outbound negotiation emails simply omit a dedicated reply-to when unset,
+  // see poSecureLink.service.ts), never a startup failure.
+  //
+  // The Svix signing secret for THIS webhook endpoint specifically (from
+  // Resend's dashboard once a real webhook is configured there -- not the
+  // same thing as RESEND_API_KEY).
+  RESEND_WEBHOOK_SECRET: z.string().optional(),
+  // e.g. "<id>.resend.app" (Resend's zero-DNS-setup sandbox inbound domain)
+  // today, later swappable to a real subdomain (e.g. "reply.hantios.com")
+  // once the founder's own domain exists -- a config-only change, per the
+  // locked "no domain required this session" instruction. Bare domain only
+  // (no local-part, no @) -- src/lib/inboundEmailCorrelation.ts builds the
+  // full per-PO address from it.
+  RESEND_INBOUND_DOMAIN: z.string().optional(),
 });
 
 function loadEnv() {

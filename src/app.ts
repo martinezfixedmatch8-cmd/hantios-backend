@@ -22,6 +22,8 @@ import poNegotiationRoutes from "./routes/poNegotiation.routes";
 import poNegotiationPortalRoutes from "./routes/poNegotiationPortal.routes";
 import poShipmentRoutes from "./routes/poShipment.routes";
 import poShipmentPortalRoutes from "./routes/poShipmentPortal.routes";
+import resendInboundWebhookRoutes from "./routes/resendInboundWebhook.routes";
+import unmatchedInboundEmailRoutes from "./routes/unmatchedInboundEmail.routes";
 import { notFoundHandler, errorHandler } from "./middleware/errorHandler";
 
 export const app = express();
@@ -36,6 +38,16 @@ app.use(
     credentials: true,
   })
 );
+
+// Module 33 Session 4B -- MUST be mounted before express.json() below.
+// Resend's own Svix-based signature verification requires the exact raw
+// request bytes; express.json() would already have parsed (and
+// byte-for-byte altered, e.g. re-serialized whitespace) the body by the
+// time any route-specific middleware saw it otherwise. express.raw() is
+// scoped to this exact mount point only -- every other route in this app
+// still gets the normal JSON body below, unaffected.
+app.use("/api/webhooks", express.raw({ type: "*/*", limit: "2mb" }), resendInboundWebhookRoutes);
+
 app.use(express.json({ limit: "100kb" }));
 app.use(cookieParser());
 
@@ -58,6 +70,7 @@ app.use("/purchase-orders", poShipmentRoutes);
 app.use("/warehouse-movements", warehouseMovementRoutes);
 app.use("/portal", poNegotiationPortalRoutes);
 app.use("/portal", poShipmentPortalRoutes);
+app.use("/api/unmatched-inbound-emails", unmatchedInboundEmailRoutes);
 
 app.use(notFoundHandler);
 app.use(errorHandler);

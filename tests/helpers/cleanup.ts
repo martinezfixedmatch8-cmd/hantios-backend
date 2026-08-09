@@ -14,6 +14,7 @@ export async function cleanupTestBusiness(businessId: string): Promise<void> {
 
   await prisma.audit_logs.deleteMany({ where: { business_id: businessId } });
   await prisma.email_send_log.deleteMany({ where: { business_id: businessId } });
+  await prisma.unmatched_inbound_emails.deleteMany({ where: { business_id: businessId } });
   await prisma.password_history.deleteMany({ where: { users: { business_id: businessId } } });
   await prisma.staff_invites.deleteMany({ where: { business_id: businessId } });
   await prisma.sessions.deleteMany({ where: { business_id: businessId } });

@@ -64,3 +64,28 @@ export interface DomainVerificationResult {
   verified: boolean;
   domain?: string;
 }
+
+// Module 33 Session 4B -- provider-neutral inbound-attachment metadata.
+// Deliberately mirrors this repo's existing metadata-only attachment
+// convention (StorageProvider never touches real bytes anywhere in this
+// codebase, confirmed for Expense/PO-Negotiation/Shipment attachments
+// alike) -- sizeBytes/mimeType/filename only, no content field. A future
+// real StorageProvider implementation that actually needs bytes can fetch
+// them itself via the provider's own attachment-download mechanism; that's
+// out of scope for every attachment feature this repo has built so far,
+// not a gap specific to this session.
+export interface ReceivedEmailAttachment {
+  id: string;
+  filename: string | null;
+  mimeType: string;
+  sizeBytes: number;
+}
+
+export interface ReceivedEmail {
+  emailId: string;
+  from: string;
+  to: string[];
+  subject: string;
+  text: string | null;
+  attachments: ReceivedEmailAttachment[];
+}
