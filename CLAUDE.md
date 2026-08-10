@@ -922,6 +922,20 @@ Cross-cutting on all of the above: RBAC permission matrix (8 canonical roles), D
 
 **Third recurrence, Module 11 Session B (2026-08-02)**: the QA subagent this time failed with an explicit, unambiguous `"Agent terminated early due to an API error: You've hit your session limit · resets 11:50pm (Africa/Nairobi)"` after getting partway through (had confirmed `tsc` clean, was about to run lint) — the same real-quota-error variant already seen once before in the Customer Records session, not the stale-plan-mode variant. Followed the documented mitigation exactly: did not retry spawning another QA subagent, fell back to running lint + a self-directed review pass directly in the main session instead. That fallback pass is what actually caught this session's real bugs (`getOrCreateWarehouse`'s transaction-poisoning race, see above) — via a live concurrency stress script (`Promise.all` bursts against the dev DB through `ts-node`, not just the committed test suite), reinforcing that this fallback path is a fully adequate substitute for the subagent, not a degraded one.
 
+## Deployment (Railway) — build fix, 2026-08-10
+
+First real deploy attempt failed: `prisma generate` was never wired into the install/build pipeline (`prisma` is a devDependency, providing the CLI; `@prisma/client` is a real dependency, but its actual generated types/runtime under `node_modules/@prisma/client` and `node_modules/.prisma/client` don't exist until `prisma generate` runs at least once). Local dev had never hit this because a stale generated client already existed on disk from earlier sessions — Railway's genuinely clean install had nothing to fall back on.
+
+**Fixed**: added `"postinstall": "prisma generate"` to `package.json`'s `scripts` — runs automatically as part of `npm install`, before `npm run build` ever executes, on any environment (Railway's Nixpacks-default build, a fresh local clone, CI, ...).
+
+**Verified by actually reproducing Railway's exact failure condition locally, not assumed**: `rm -rf node_modules && npm install` (pre-fix) reproduced the identical failure class — `Module "@prisma/client" has no exported member 'X'` for every Prisma-generated enum/type, and `Property 'Y' does not exist on type 'Owned'`/`'{}'` for every service function whose return type flows through Prisma-generated model shapes. **This confirmed the `warehouseMovement.service.ts` errors (`Property 'id'/'name' does not exist`) reported from the real Railway build are a pure Prisma-generation cascade, not a separate bug** — the identical error shape appeared across dozens of unrelated files (`sale.service.ts`, `purchaseOrder.service.ts`, `product.service.ts`, `supplier.service.ts`, and more) wherever a function's return type depends on `getOwned<T>`'s generic resolving against a real Prisma model. After the fix (`npm install` → postinstall regenerates the client → `npm run build`), **every one of these errors disappeared completely, `warehouseMovement.service.ts` included** — confirmed via a clean `npm run build` and a clean `npx tsc --noEmit` across the whole project, not just the `src/` build subset.
+
+**Known, environment-specific caveat, not a Railway concern**: this local sandbox's own npm configuration blocks certain package lifecycle scripts by default (`@prisma/engines`' own `postinstall`, which normally pre-fetches query-engine binaries, is deferred/skipped here) — `prisma generate` itself still succeeds regardless, since this repo's `@prisma/adapter-neon`-based setup (Prisma 7's driver-adapter pattern) doesn't depend on that binary download the way a traditional Prisma setup would. Flagging this only so a future session doesn't mistake this sandbox's own script-gating for a real problem; Railway's own fresh containers have no such restriction.
+
+**Could not verify directly (no Railway CLI/dashboard/API access exists in this environment)**: whether Railway's own Settings → Build panel has a custom build command that bypasses `npm install`'s natural `postinstall` lifecycle hook. Since this repo has no `railway.json`/`nixpacks.toml`/`Procfile`/`Dockerfile` overriding the default Node.js auto-detection, Railway's default Nixpacks build (`npm install` → `npm run build` → `npm start`) should pick up the fix automatically with zero dashboard changes — but this is a reasoned expectation, not something checked directly in Railway's own UI. Recommend a human confirm Settings → Build shows no custom override, or update it to include `prisma generate` if one exists.
+
+**Full authoritative env var list** (from `src/lib/config.ts`'s own Zod schema, cross-checked against `.env.example`, which was stale — last updated 2026-07-21, before Module 33 existed — and has now been updated to include the four Resend vars): `NODE_ENV`, `PORT`, `DATABASE_URL`, `JWT_ACCESS_SECRET`, `JWT_REFRESH_SECRET`, `JWT_OTP_SECRET`, `JWT_RESET_SECRET`, `GOOGLE_CLIENT_ID`, `TURNSTILE_SECRET_KEY`, `CORS_ORIGINS`, `APP_BASE_URL`, `STAFF_INVITE_EXPIRY_HOURS`, `EMAIL_VERIFICATION_EXPIRY_HOURS`, `RESEND_API_KEY`, `RESEND_FROM_EMAIL`, `RESEND_WEBHOOK_SECRET`, `RESEND_INBOUND_DOMAIN`. `APP_BASE_URL`/`GOOGLE_CLIENT_ID` become hard-required (not just optional) whenever `NODE_ENV=production` — worth setting explicitly in Railway's own environment variables, both because it's factually correct for a real deploy and because it changes `ConsoleNotificationProvider`/`ConsoleEmailProvider`'s own logging verbosity (redacted summaries only, never full content, in production).
+
 ## Hardening roadmap (resume at Session 7)
 
 Sessions 1–6.5 done: Staff Invitation + password policy, auth hardening tests + CORS + security headers, Zod config validation + secrets fail-fast + payload limits, external integration adapters (Google/WhatsApp/Turnstile), security audit event logging, storage + feature-flag providers, notification architecture.
@@ -968,11 +982,12 @@ The previous loss happened partly because no GitHub remote existed. Going forwar
 
 
 
+
 <!-- cloude-code-toolbox:mcp-skills-awareness-begin -->
 
 ### MCP & Skills awareness (Cloude Code ToolBox)
 
-_Last synced: 2026-08-09T16:22:21.400Z._
+_Last synced: 2026-08-10T06:00:29.485Z._
 
 - **Full report:** `.claude/cloude-code-toolbox-mcp-skills-awareness.md` in this workspace (auto-overwritten on each scan). Use it as ground truth for configured servers and skill folders.
 - **MCP:** For **live tools** in Claude Code, enable the matching server via `/mcp`. Servers are configured in `~/.claude.json` (user) and `.mcp.json` (project).
