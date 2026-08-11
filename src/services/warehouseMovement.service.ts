@@ -7,6 +7,7 @@ import { domainEvents } from "../lib/events";
 import { claimIdempotencyKey, completeIdempotencyKey } from "../lib/idempotency";
 import { getOrCreateWarehouse } from "../lib/warehouse";
 import { recordWarehouseMovement } from "../lib/warehouseStock";
+import { generateReceiptInTransaction, buildWarehouseStockOutReceiptSnapshot } from "./receipt.service";
 import type { StockInInput, StockOutInput } from "../validation/warehouseMovement.schema";
 
 interface Actor {
@@ -93,16 +94,22 @@ export async function stockOut(input: StockOutInput, actor: Actor, idempotencyKe
   }
 
   const quantity = new Prisma.Decimal(input.quantity);
+  const business = await prisma.businesses.findUniqueOrThrow({ where: { id: actor.businessId } });
+  const destinationBranchName = input.destinationBranchId
+    ? (await getOwned(prisma.branches.findUnique({ where: { id: input.destinationBranchId } }), actor.businessId, "Branch")).name
+    : null;
 
   const result = await prisma.$transaction(async (tx) => {
     await claimIdempotencyKey(tx, actor.businessId, idempotencyKey, STOCK_OUT_ENDPOINT);
 
     const warehouse = await getOrCreateWarehouse(tx, actor.businessId);
 
-    // Explicitly does NOT touch branch_inventory even for branch_transfer --
-    // this row is the minimal "Stock Out Receipt" until a real Receipts
-    // module supersedes it (see prisma/schema.prisma's own comment on
-    // warehouse_movements.destination_branch_id). Not silently assumed.
+    // This row is ALSO the minimal "Stock Out Receipt" the schema's own
+    // comment on warehouse_movements.destination_branch_id anticipated --
+    // Module 06 now supersedes it for real with a genuine structured
+    // Warehouse Stock Out Receipt below, generated inside this same
+    // transaction. branch_inventory itself is still deliberately untouched
+    // even for branch_transfer, unrelated to receipts.
     const { movement, quantityAfter } = await recordWarehouseMovement(tx, {
       businessId: actor.businessId,
       warehouseId: warehouse.id,
@@ -112,6 +119,23 @@ export async function stockOut(input: StockOutInput, actor: Actor, idempotencyKe
       destinationBranchId: input.destinationBranchId ?? null,
       reason: input.reason,
       notes: input.notes ?? null,
+      createdBy: actor.userId,
+    });
+
+    const stockOutReceipt = await generateReceiptInTransaction(tx, {
+      businessId: actor.businessId,
+      timezone: business.timezone,
+      settings: business.settings,
+      currencyCode: business.currency,
+      receiptType: "warehouse_stock_out",
+      source: { warehouseMovementId: movement.id },
+      subtotal: 0,
+      total: 0,
+      snapshot: buildWarehouseStockOutReceiptSnapshot(
+        business,
+        [{ productName: product.name, size: null, quantity: quantity.toString(), unitPrice: "0", lineTotal: "0" }],
+        { warehouseName: warehouse.name, destinationBranchName, movementNumber: movement.movement_number }
+      ),
       createdBy: actor.userId,
     });
 
@@ -129,16 +153,23 @@ export async function stockOut(input: StockOutInput, actor: Actor, idempotencyKe
     const responseBody = JSON.parse(JSON.stringify({ data: movement })) as unknown;
     await completeIdempotencyKey(tx, actor.businessId, idempotencyKey, STOCK_OUT_ENDPOINT, 201, responseBody);
 
-    return movement;
+    return { movement, stockOutReceipt };
   }, WAREHOUSE_MOVEMENT_TRANSACTION_OPTIONS);
+  const { movement: stockOutMovement, stockOutReceipt } = result;
 
   domainEvents.publish("WarehouseStockOut", {
     businessId: actor.businessId,
-    warehouseId: result.warehouse_id,
-    productId: result.product_id,
-    movementNumber: result.movement_number,
+    warehouseId: stockOutMovement.warehouse_id,
+    productId: stockOutMovement.product_id,
+    movementNumber: stockOutMovement.movement_number,
     quantity: quantity.toString(),
   });
+  domainEvents.publish("ReceiptGenerated", {
+    businessId: actor.businessId,
+    receiptId: stockOutReceipt.id,
+    receiptNumber: stockOutReceipt.receipt_number,
+    receiptType: stockOutReceipt.receipt_type,
+  });
 
-  return result;
+  return stockOutMovement;
 }

@@ -21,6 +21,15 @@ export async function cleanupTestBusiness(businessId: string): Promise<void> {
   await prisma.login_events.deleteMany({ where: { business_id: businessId } });
   await prisma.otp_challenges.deleteMany({ where: { business_id: businessId } });
   await prisma.idempotency_keys.deleteMany({ where: { business_id: businessId } });
+  // Module 06 -- receipt_delivery_attempts FKs to receipts (RESTRICT), so it
+  // must go first. receipts' own 5 source FKs (sale/debt_payment/warehouse_
+  // movement/goods_received_note/purchase_order_payment) and its self-
+  // relation (refund_of_receipt_id) are all ON DELETE SET NULL, so deleting
+  // receipts here (before those source tables are cleaned up below) is
+  // order-independent/safe either way -- placed early for clarity only.
+  await prisma.receipt_delivery_attempts.deleteMany({ where: { business_id: businessId } });
+  await prisma.receipts.deleteMany({ where: { business_id: businessId } });
+  await prisma.receipt_number_counters.deleteMany({ where: { business_id: businessId } });
   await prisma.receipt_counters.deleteMany({ where: { business_id: businessId } });
   await prisma.inventory_adjustments.deleteMany({ where: { business_id: businessId } });
   await prisma.price_history.deleteMany({ where: { business_id: businessId } });

@@ -125,3 +125,37 @@ export function getDebtInterestPolicy(settings: Prisma.JsonValue): DebtInterestP
         : fallback.percentageBase,
   };
 }
+
+const DEFAULT_RECEIPT_PREFIX = "RCP";
+const DEFAULT_RECEIPT_LANGUAGE = "en";
+// Kept as a plain string union here (not importing SupportedLanguage from
+// messageTemplates.ts) to avoid a cross-lib dependency for a 5-value list;
+// receiptRenderer.ts is the single place that actually enforces this set
+// against SupportedLanguage.
+const VALID_RECEIPT_LANGUAGES = ["en", "so", "ar", "fr", "es"];
+
+export interface ReceiptSettings {
+  prefix: string; // e.g. "RCP" -> RCP-2026-000001. Changing this never resets the underlying sequence.
+  language: string; // Receipt/Invoice Language (Business Settings 12.1) -- independent of Business.language (UI language)
+}
+
+// Settings -> Receipts -> {prefix, language}. Module 06 -- same defensive-
+// read pattern as every Tier-3 setting above. Deliberately its OWN settings
+// key (`receipts`), never Business.language -- the locked requirement is
+// explicit that Receipt/Invoice Language must be independent of UI
+// language, so reusing that column would violate the requirement outright,
+// not just be untidy.
+export function getReceiptSettings(settings: Prisma.JsonValue): ReceiptSettings {
+  const fallback: ReceiptSettings = { prefix: DEFAULT_RECEIPT_PREFIX, language: DEFAULT_RECEIPT_LANGUAGE };
+  if (typeof settings !== "object" || settings === null || Array.isArray(settings)) {
+    return fallback;
+  }
+  const receipts = (settings as Record<string, unknown>).receipts;
+  if (typeof receipts !== "object" || receipts === null || Array.isArray(receipts)) {
+    return fallback;
+  }
+  const r = receipts as Record<string, unknown>;
+  const prefix = typeof r.prefix === "string" && /^[A-Za-z0-9]{1,10}$/.test(r.prefix) ? r.prefix.toUpperCase() : fallback.prefix;
+  const language = typeof r.language === "string" && VALID_RECEIPT_LANGUAGES.includes(r.language) ? r.language : fallback.language;
+  return { prefix, language };
+}

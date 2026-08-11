@@ -9,6 +9,13 @@ import { claimIdempotencyKey, completeIdempotencyKey } from "../lib/idempotency"
 import { getNextReceiptNumber } from "../lib/receiptNumber";
 import { isSameBusinessDay } from "../lib/businessTime";
 import { domainEvents } from "../lib/events";
+import {
+  generateReceiptInTransaction,
+  buildSaleReceiptSnapshot,
+  buildRefundReceiptSnapshot,
+  markSaleReceiptVoided,
+  markSaleReceiptRefunded,
+} from "./receipt.service";
 import { applyStockAlertTransition } from "../lib/stockAlerts";
 import type { PendingStockAlertEvent } from "../lib/stockAlerts";
 import { findOrCreateCustomer } from "./customer.service";
@@ -58,6 +65,7 @@ export async function createSale(input: CreateSaleInput, actor: Actor, idempoten
     throw badRequest("Branch is archived");
   }
 
+  let paymentMethodName: string | null = null;
   if (input.paymentMethodId) {
     const paymentMethod = await getOwned(
       prisma.payment_methods.findUnique({ where: { id: input.paymentMethodId } }),
@@ -67,6 +75,7 @@ export async function createSale(input: CreateSaleInput, actor: Actor, idempoten
     if (paymentMethod.status !== "active") {
       throw badRequest("Payment method is archived");
     }
+    paymentMethodName = paymentMethod.name;
   }
 
   const business = await prisma.businesses.findUniqueOrThrow({ where: { id: actor.businessId } });
@@ -167,7 +176,7 @@ export async function createSale(input: CreateSaleInput, actor: Actor, idempoten
   // reachable once the transaction has resolved.
   const stockAlertEvents: PendingStockAlertEvent[] = [];
 
-  const sale = await prisma.$transaction(async (tx) => {
+  const result = await prisma.$transaction(async (tx) => {
     // Claim first: the unique constraint on (business_id, key, endpoint) is the
     // real guard against a concurrent duplicate submission -- a collision here
     // rolls this whole transaction back, leaving the key free for a legitimate
@@ -268,6 +277,26 @@ export async function createSale(input: CreateSaleInput, actor: Actor, idempoten
       },
     });
 
+    // Module 06 (Receipt System) -- generated inside THIS transaction, same
+    // one as the Sale itself, so a later rollback (for any reason) rolls
+    // the receipt back too (No Orphan Receipts). Published post-commit
+    // below, never from in here.
+    const saleReceipt = await generateReceiptInTransaction(tx, {
+      businessId: actor.businessId,
+      timezone: business.timezone,
+      settings: business.settings,
+      currencyCode: business.currency,
+      receiptType: "sale",
+      source: { saleId: createdSale.id },
+      subtotal: createdSale.subtotal,
+      discount: createdSale.discount,
+      taxAmount: createdSale.tax_amount,
+      feeAmount: createdSale.fee_amount,
+      total: createdSale.total,
+      snapshot: buildSaleReceiptSnapshot(business, items, paymentMethodName),
+      createdBy: actor.userId,
+    });
+
     if (customerId) {
       await tx.customers.updateMany({
         where: { id: customerId },
@@ -330,8 +359,9 @@ export async function createSale(input: CreateSaleInput, actor: Actor, idempoten
     const responseBody = JSON.parse(JSON.stringify({ data: createdSale })) as unknown;
     await completeIdempotencyKey(tx, actor.businessId, idempotencyKey, CREATE_SALE_ENDPOINT, 201, responseBody);
 
-    return createdSale;
+    return { sale: createdSale, receipt: saleReceipt };
   }, SALE_TRANSACTION_OPTIONS);
+  const { sale, receipt: saleReceipt } = result;
 
   // Published after commit, never from inside the transaction -- a listener
   // should never react to data that might still roll back. SaleCreated still
@@ -344,6 +374,12 @@ export async function createSale(input: CreateSaleInput, actor: Actor, idempoten
     branchId: sale.branch_id,
     receiptId: sale.receipt_id,
     total: sale.total.toString(),
+  });
+  domainEvents.publish("ReceiptGenerated", {
+    businessId: actor.businessId,
+    receiptId: saleReceipt.id,
+    receiptNumber: saleReceipt.receipt_number,
+    receiptType: saleReceipt.receipt_type,
   });
   for (const event of stockAlertEvents) {
     domainEvents.publish(event.name, event.payload);
@@ -388,6 +424,12 @@ export async function voidSale(saleId: string, input: VoidSaleInput, actor: Acto
     if (result.count === 0) {
       throw conflict("Sale is not in a voidable state (already voided/refunded, or was modified concurrently)");
     }
+
+    // Module 06 (Receipt System) -- Void creates no new financial row, so no
+    // new receipt either (confirmed Phase 0). Only the EXISTING Sale
+    // Receipt's own status moves, ISSUED -> VOIDED, inside this same
+    // transaction. Never mutates the receipt's financial snapshot.
+    await markSaleReceiptVoided(tx, actor.businessId, saleId);
 
     // A void means the money wasn't really spent -- total_spent is corrected
     // back out. purchase_count/last_purchase_at deliberately do NOT move: the
@@ -496,7 +538,7 @@ export async function refundSale(saleId: string, input: RefundSaleInput, actor: 
     throw badRequest("Sale cannot be refunded on the same business day it was created; use Void instead");
   }
 
-  const refund = await prisma.$transaction(async (tx) => {
+  const refundResult = await prisma.$transaction(async (tx) => {
     await claimIdempotencyKey(tx, actor.businessId, idempotencyKey, refundSaleEndpoint(saleId));
 
     // Same atomic guard shape as Void -- covers already-voided, already-
@@ -544,6 +586,41 @@ export async function refundSale(saleId: string, input: RefundSaleInput, actor: 
       },
     });
 
+    // Module 06 (Receipt System) -- the original's own Sale Receipt moves to
+    // `refunded` (never mutated financially), and a brand-new Refund Receipt
+    // is generated for the reversal event itself, linked back via
+    // refund_of_receipt_id. Both happen inside this same transaction.
+    await markSaleReceiptRefunded(tx, actor.businessId, sale.id);
+    const originalReceipt = await tx.receipts.findFirst({
+      where: { business_id: actor.businessId, sale_id: sale.id, receipt_type: "sale" },
+    });
+    let refundPaymentMethodName: string | null = null;
+    if (sale.payment_method_id) {
+      const pm = await tx.payment_methods.findUnique({ where: { id: sale.payment_method_id } });
+      refundPaymentMethodName = pm?.name ?? null;
+    }
+    const refundReceipt = await generateReceiptInTransaction(tx, {
+      businessId: actor.businessId,
+      timezone: business.timezone,
+      settings: business.settings,
+      currencyCode: business.currency,
+      receiptType: "refund",
+      source: { saleId: reversal.id },
+      subtotal: reversal.subtotal,
+      discount: reversal.discount,
+      taxAmount: reversal.tax_amount,
+      feeAmount: reversal.fee_amount,
+      total: reversal.total,
+      snapshot: buildRefundReceiptSnapshot(
+        business,
+        sale.items as unknown as SaleLineSnapshot[],
+        refundPaymentMethodName,
+        originalReceipt?.receipt_number ?? sale.receipt_id ?? sale.id
+      ),
+      createdBy: actor.userId,
+      refundOfReceiptId: originalReceipt?.id,
+    });
+
     // reversal.total is already negated -- incrementing by it naturally nets
     // total_spent back down by the refunded amount. No fresh customer lookup
     // here: customer_id is copied straight from the original sale above,
@@ -572,8 +649,9 @@ export async function refundSale(saleId: string, input: RefundSaleInput, actor: 
     const responseBody = JSON.parse(JSON.stringify({ data: reversal })) as unknown;
     await completeIdempotencyKey(tx, actor.businessId, idempotencyKey, refundSaleEndpoint(saleId), 201, responseBody);
 
-    return reversal;
+    return { reversal, refundReceipt };
   }, SALE_TRANSACTION_OPTIONS);
+  const { reversal: refund, refundReceipt } = refundResult;
 
   domainEvents.publish("RefundCreated", {
     saleId: sale.id,
@@ -581,6 +659,12 @@ export async function refundSale(saleId: string, input: RefundSaleInput, actor: 
     businessId: actor.businessId,
     total: refund.total.toString(),
     reason: input.reason,
+  });
+  domainEvents.publish("ReceiptGenerated", {
+    businessId: actor.businessId,
+    receiptId: refundReceipt.id,
+    receiptNumber: refundReceipt.receipt_number,
+    receiptType: refundReceipt.receipt_type,
   });
 
   return refund;

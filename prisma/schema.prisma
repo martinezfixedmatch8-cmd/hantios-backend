@@ -58,23 +58,24 @@ model branch_inventory {
 }
 
 model branches {
-  id                               String                  @id
+  id                               String                      @id
   business_id                      String
   name                             String
   location                         String?
   manager_id                       String?
-  status                           RecordStatus            @default(active)
-  created_at                       DateTime                @default(now())
+  status                           RecordStatus                @default(active)
+  created_at                       DateTime                    @default(now())
   branch_inventory                 branch_inventory[]
-  businesses                       businesses              @relation(fields: [business_id], references: [id])
-  users_branches_manager_idTousers users?                  @relation("branches_manager_idTousers", fields: [manager_id], references: [id])
+  businesses                       businesses                  @relation(fields: [business_id], references: [id])
+  users_branches_manager_idTousers users?                      @relation("branches_manager_idTousers", fields: [manager_id], references: [id])
   debts                            debts[]
   expenses                         expenses[]
   inventory_adjustments            inventory_adjustments[]
   purchase_orders                  purchase_orders[]
   sales                            sales[]
-  users_users_branch_idTobranches  users[]                 @relation("users_branch_idTobranches")
+  users_users_branch_idTobranches  users[]                     @relation("users_branch_idTobranches")
   warehouse_movements              warehouse_movements[]
+  receipt_delivery_attempts        receipt_delivery_attempts[]
 
   @@index([business_id])
 }
@@ -156,6 +157,13 @@ model businesses {
   po_shipment_attachments             po_shipment_attachments[]
   po_shipment_status_history          po_shipment_status_history[]
   receipt_counters                    receipt_counters[]
+  // Module 06 (Receipt System) -- deliberately separate from the
+  // pre-existing receipt_counters/sales.receipt_id above (Sales' own
+  // narrower, INV-prefixed mechanism, left untouched -- see receipts'
+  // own schema comment for why the two coexist rather than merge).
+  receipt_number_counters             receipt_number_counters[]
+  receipts                            receipts[]
+  receipt_delivery_attempts           receipt_delivery_attempts[]
   sales                               sales[]
   sessions                            sessions[]
   staff_invites                       staff_invites[]
@@ -194,19 +202,19 @@ model categories {
 /// plain @@unique here; that would forbid reusing a phone number an
 /// archived customer still holds, which is explicitly allowed.
 model customers {
-  id               String       @id
-  business_id      String
+  id                        String                      @id
+  business_id               String
   // CUS-000001, sequential per business, immutable, never reused -- mirrors
   // expenseNumber.ts exactly (no year dimension). See customerNumber.ts.
-  customer_number  String
+  customer_number           String
   // phone_original: raw, as-entered, display-only, never used for lookups.
   // phone_normalized: E.164 via libphonenumber-js -- the only field
   // uniqueness/search/find-or-create ever key off.
-  phone_original   String
-  phone_normalized String
-  name             String?
-  email            String?
-  notes            String?
+  phone_original            String
+  phone_normalized          String
+  name                      String?
+  email                     String?
+  notes                     String?
   // Derived caches, same trust model as debt_balance below -- never
   // authoritative, always recalculable from sales/debts/debt_payments.
   // total_spent/debt_balance are money balances, corrected on
@@ -216,30 +224,33 @@ model customers {
   // recorded) and are never touched by a later void/refund/reversal/
   // write-off, since the event itself still happened even if its balance
   // impact was later corrected.
-  total_spent      Decimal      @default(0) @db.Decimal(14, 2)
-  purchase_count   Int          @default(0)
-  total_debts      Int          @default(0)
-  total_payments   Int          @default(0)
-  last_purchase_at DateTime?
-  last_debt_at     DateTime?
-  last_payment_at  DateTime?
+  total_spent               Decimal                     @default(0) @db.Decimal(14, 2)
+  purchase_count            Int                         @default(0)
+  total_debts               Int                         @default(0)
+  total_payments            Int                         @default(0)
+  last_purchase_at          DateTime?
+  last_debt_at              DateTime?
+  last_payment_at           DateTime?
   // The occurred-at of the most recent event touching this customer across
   // Sales (create/void/refund) and Debts (create/payment/reversal/write-off)
   // -- only ever moves forward, never decremented.
-  last_activity_at DateTime?
+  last_activity_at          DateTime?
   // Derived cache only, kept in sync for cheap reads (CRM dashboards, customer
   // lists, search) -- debts/debt_payments are always the source of truth. If
   // this is ever found to have drifted, recalculate it from those two tables;
   // never trust it over them.
-  debt_balance     Decimal      @default(0) @db.Decimal(14, 2)
-  status           RecordStatus @default(active)
-  archived_reason  String?
-  version          Int          @default(0)
-  created_at       DateTime     @default(now())
-  updated_at       DateTime     @updatedAt
-  businesses       businesses   @relation(fields: [business_id], references: [id])
-  debts            debts[]
-  sales            sales[]
+  debt_balance              Decimal                     @default(0) @db.Decimal(14, 2)
+  status                    RecordStatus                @default(active)
+  archived_reason           String?
+  version                   Int                         @default(0)
+  created_at                DateTime                    @default(now())
+  updated_at                DateTime                    @updatedAt
+  businesses                businesses                  @relation(fields: [business_id], references: [id])
+  debts                     debts[]
+  sales                     sales[]
+  // Module 06 (Receipt System) -- WhatsApp delivery-attempt recipient
+  // reference, snapshotted alongside phone_normalized at attempt time.
+  receipt_delivery_attempts receipt_delivery_attempts[]
 
   @@unique([business_id, customer_number])
   // Plain, non-partial -- backs search/lookup across BOTH active and
@@ -339,6 +350,10 @@ model debt_payments {
   users                  users            @relation(fields: [created_by], references: [id])
   debt_payments          debt_payments?   @relation("debt_payments_reversal", fields: [reversal_of_payment_id], references: [id])
   other_debt_payments    debt_payments[]  @relation("debt_payments_reversal")
+  // Module 06 (Receipt System) -- a payment AND its own later reversal are
+  // each a genuinely separate debt_payments row (never an in-place edit),
+  // so each independently sources at most one Debt Payment Receipt.
+  receipts               receipts[]
 
   @@index([business_id])
   @@index([debt_id])
@@ -1029,6 +1044,8 @@ model goods_received_notes {
   users                  users                  @relation(fields: [received_by], references: [id])
   goods_received_items   goods_received_items[]
   warehouse_movements    warehouse_movements[]
+  // Module 06 (Receipt System) -- Supplier Goods Received type.
+  receipts               receipts[]
 
   @@unique([business_id, grn_number])
   @@index([business_id])
@@ -1101,6 +1118,8 @@ model purchase_order_payments {
   businesses            businesses          @relation(fields: [business_id], references: [id])
   expenses              expenses            @relation(fields: [expense_id], references: [id])
   users                 users               @relation(fields: [created_by], references: [id])
+  // Module 06 (Receipt System) -- PO Settlement type.
+  receipts              receipts[]
 
   @@index([business_id])
   @@index([purchase_order_id])
@@ -1980,6 +1999,11 @@ model sales {
   sales                           sales?                  @relation("salesTosales", fields: [refund_of_sale_id], references: [id])
   other_sales                     sales[]                 @relation("salesTosales")
   customers                       customers?              @relation(fields: [customer_id], references: [id])
+  // Module 06 (Receipt System) -- a sale can be the source of at most one
+  // receipt (Sale type) and, separately, its OWN reversal row (a distinct
+  // sales.id) can be the source of at most one more (Refund type) -- see
+  // receipts.sale_id's own comment for why one column safely covers both.
+  receipts                        receipts[]
 
   @@index([business_id, branch_id])
   @@index([business_id])
@@ -2080,6 +2104,8 @@ model users {
   goods_received_notes                          goods_received_notes[]
   purchase_order_payments                       purchase_order_payments[]
   warehouse_movements                           warehouse_movements[]
+  receipts                                      receipts[]
+  receipt_delivery_attempts                     receipt_delivery_attempts[]
   po_secure_links_created_byTousers             po_secure_links[]                    @relation("po_secure_links_created_byTousers")
   po_secure_links_revoked_byTousers             po_secure_links[]                    @relation("po_secure_links_revoked_byTousers")
   po_negotiation_internal_notes                 po_negotiation_internal_notes[]
@@ -2231,6 +2257,10 @@ model warehouse_movements {
   goods_received_notes  goods_received_notes?    @relation(fields: [grn_id], references: [id])
   branches              branches?                @relation(fields: [destination_branch_id], references: [id])
   users                 users                    @relation(fields: [created_by], references: [id])
+  // Module 06 (Receipt System) -- Stock Out only in practice (Stock In is
+  // GRN-triggered receiving, its own separate receipt type sourced from
+  // goods_received_notes instead).
+  receipts              receipts[]
 
   @@unique([business_id, movement_number])
   @@index([business_id, movement_type])
@@ -2570,4 +2600,203 @@ model unmatched_inbound_emails {
 
   @@index([business_id, received_at])
   @@index([reason])
+}
+
+// ============================================================================
+// Module 06 -- Receipt System (Phase 0 confirmed 2026-08-11)
+// ============================================================================
+//
+// Six confirmed receipt types, one centralized header table (not six
+// separate tables, not a polymorphic entity_type/entity_id design -- the
+// latter was already explicitly rejected once in this schema, PO
+// Negotiation Session 1, for trading away real FK constraints).
+//
+// Deliberately separate from and coexists with the pre-existing
+// sales.receipt_id / receipt_counters / getNextReceiptNumber (Sales'
+// own narrower, INV-prefixed mechanism from Session 3A) -- confirmed
+// Option A: left completely untouched, treated as legacy. A completed
+// Sale now carries two numbers (its old sales.receipt_id and this
+// module's own receipt_number); this is a deliberate, confirmed
+// coexistence, not an oversight.
+enum ReceiptType {
+  sale
+  refund
+  debt_payment
+  warehouse_stock_out
+  supplier_goods_received
+  po_settlement
+}
+
+// VOID/REFUND never delete or mutate the historical receipt record --
+// only this status field moves. A Refund additionally creates a brand
+// new, separate `refund` receipt (see refund_of_receipt_id below); a Void
+// creates no new receipt at all (Sale Void itself creates no new
+// financial row -- confirmed in Phase 0), it only flips the ORIGINAL
+// Sale Receipt's own status here.
+enum ReceiptStatus {
+  issued
+  voided
+  refunded
+  partially_refunded
+}
+
+enum ReceiptDeliveryChannel {
+  whatsapp
+  pos_print
+}
+
+// pending/failed/success only -- delivery here is fully synchronous
+// per-attempt (no async queue exists in this repo, same "not a queue"
+// reasoning Module 33's own retry-once already applies), so "pending" is
+// a real but extremely short-lived state, not evidence of a worker
+// architecture that doesn't exist.
+enum ReceiptDeliveryStatus {
+  pending
+  success
+  failed
+}
+
+/// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
+model receipts {
+  id                        String                      @id
+  business_id               String
+  // RCP-2026-000001 by default -- ONE shared sequence across all six
+  // receipt types per (business, year), confirmed. Prefix is read fresh
+  // from Business.settings at generation time (never stored on the
+  // counter row), which is what makes a later prefix change never reset
+  // the sequence -- see receiptNumberCounter.ts.
+  receipt_number            String
+  receipt_type              ReceiptType
+  status                    ReceiptStatus               @default(issued)
+  // Sparse nullable source-event FKs -- exactly ONE populated per row,
+  // matching receipt_type. Validated at the Zod/service layer (mirrors PO
+  // Negotiation Attachments' own message_id?/proposal_id? XOR pattern)
+  // AND backed by a real DB CHECK (chk_receipts_exactly_one_source,
+  // num_nonnulls(...) = 1) -- never trusted at only one layer.
+  //
+  // 🔒 CRITICAL: per-source-event uniqueness (at most one receipt per
+  // source row) is NOT expressed as a Prisma @@unique here -- a composite
+  // unique spanning sparse nullable columns would never actually catch a
+  // duplicate (Postgres treats NULL <> NULL even inside a multi-column
+  // unique index, so two rows sharing the same sale_id but both NULL on
+  // every other source column would NOT collide). The real guard is 5
+  // hand-added PARTIAL unique indexes in the migration SQL, one per
+  // source column, each `WHERE <column> IS NOT NULL`. See the migration
+  // file itself for the exact DDL -- this is the single most important
+  // integrity guarantee in this table and it lives in raw SQL, not here.
+  sale_id                   String?
+  debt_payment_id           String?
+  warehouse_movement_id     String?
+  goods_received_note_id    String?
+  purchase_order_payment_id String?
+  // Set only on a `refund` receipt, pointing back at the ORIGINAL Sale
+  // Receipt it corrects. The original is never mutated financially --
+  // only its own `status` above moves to refunded/partially_refunded.
+  refund_of_receipt_id      String?
+  issued_at                 DateTime                    @default(now())
+  // Snapshot, not a live read -- a later Business.timezone change must
+  // never alter how an already-issued receipt displays its own issuance
+  // time (addendum: Business Timezone + UTC).
+  business_timezone         String
+  currency_code             String
+  subtotal                  Decimal                     @db.Decimal(14, 2)
+  discount                  Decimal                     @default(0) @db.Decimal(14, 2)
+  tax_amount                Decimal                     @default(0) @db.Decimal(14, 2)
+  fee_amount                Decimal                     @default(0) @db.Decimal(14, 2)
+  total                     Decimal                     @db.Decimal(14, 2)
+  // Receipt Language (Business Settings 12.1) -- independent of
+  // Business.language (UI language, a separate top-level column).
+  // Snapshotted at issuance, never re-read live.
+  language                  String
+  // Full Receipt Content Completeness snapshot (business logo/name/
+  // address, line items incl. size/qty/unit price/line total, subtotal,
+  // discount, tax breakdown, fees, total, payment method, currency,
+  // language labels) -- the sole source of truth. Rendering must never
+  // re-query mutable Sale/Product/Business/Customer records for anything
+  // that belongs here.
+  snapshot                  Json
+  // Versions the SNAPSHOT'S OWN SHAPE, independent of whatever renderer
+  // version later formats it -- lets rendering evolve without making a
+  // historical receipt dependent on a future rendering change.
+  snapshot_version          Int                         @default(1)
+  created_by                String
+  created_at                DateTime                    @default(now())
+  businesses                businesses                  @relation(fields: [business_id], references: [id])
+  users                     users                       @relation(fields: [created_by], references: [id])
+  sales                     sales?                      @relation(fields: [sale_id], references: [id])
+  debt_payments             debt_payments?              @relation(fields: [debt_payment_id], references: [id])
+  warehouse_movements       warehouse_movements?        @relation(fields: [warehouse_movement_id], references: [id])
+  goods_received_notes      goods_received_notes?       @relation(fields: [goods_received_note_id], references: [id])
+  purchase_order_payments   purchase_order_payments?    @relation(fields: [purchase_order_payment_id], references: [id])
+  receipts                  receipts?                   @relation("receipts_refund", fields: [refund_of_receipt_id], references: [id])
+  other_receipts            receipts[]                  @relation("receipts_refund")
+  receipt_delivery_attempts receipt_delivery_attempts[]
+
+  @@unique([business_id, receipt_number])
+  @@index([business_id, receipt_type])
+  @@index([business_id, issued_at])
+  @@index([business_id, status])
+}
+
+// Shared (business, year) sequence for ALL six receipt types -- confirmed
+// distinct from the pre-existing receipt_counters (Sales-only, INV-
+// prefixed). No prefix column here by design: the prefix lives in
+// Business.settings and is read fresh at generation time (getReceiptSettings,
+// businessSettings.ts), so a business changing its prefix never resets or
+// otherwise touches this counter's own last_number. See receiptNumberCounter.ts.
+model receipt_number_counters {
+  id          String     @id
+  business_id String
+  year        Int
+  last_number Int        @default(0)
+  businesses  businesses @relation(fields: [business_id], references: [id])
+
+  @@unique([business_id, year])
+  @@index([business_id])
+}
+
+// Append-only delivery-attempt log -- one row per REAL attempt, never
+// updated in place on retry (deliberately NOT modeled like
+// email_send_log's own single-row-plus-attempt_count shape -- the locked
+// spec's own example, print -> WhatsApp-fail -> WhatsApp-retry-success,
+// needs three genuinely separate, independently-timestamped rows to be
+// reconstructable as real history). business_id is duplicated here
+// alongside receipt_id per the locked defense-in-depth/tenant-isolation
+// requirement, even though it's derivable via the parent receipt.
+model receipt_delivery_attempts {
+  id             String                 @id
+  business_id    String
+  receipt_id     String
+  // Sequential per receipt (1, 2, 3, ...) -- assigned by the service layer
+  // inside a transaction; @@unique below is the real, DB-enforced guard
+  // against a concurrent double-assignment, not just a display counter.
+  attempt_number Int
+  channel        ReceiptDeliveryChannel
+  status         ReceiptDeliveryStatus  @default(pending)
+  requested_at   DateTime               @default(now())
+  completed_at   DateTime?
+  failure_reason String?
+  requested_by   String
+  // WhatsApp-only: the destination customer reference (nullable -- a
+  // receipt doesn't always have a known customer) PLUS a snapshotted
+  // phone number, mirroring debt.customer_phone's own established
+  // "snapshot the phone used for the attempt, never a live customer
+  // join" precedent -- a later customer phone-number edit must never
+  // silently rewrite what a historical delivery attempt says it sent to.
+  customer_id    String?
+  phone_snapshot String?
+  // POS_PRINT-only: execution context, not an external recipient. No POS
+  // terminal/device-ID column -- no such concept exists anywhere in this
+  // repo today (confirmed via Phase 0 search); fabricating one here would
+  // be inventing infrastructure, not reusing it.
+  branch_id      String?
+  businesses     businesses             @relation(fields: [business_id], references: [id])
+  receipts       receipts               @relation(fields: [receipt_id], references: [id])
+  users          users                  @relation(fields: [requested_by], references: [id])
+  customers      customers?             @relation(fields: [customer_id], references: [id])
+  branches       branches?              @relation(fields: [branch_id], references: [id])
+
+  @@unique([receipt_id, attempt_number])
+  @@index([business_id])
+  @@index([receipt_id])
 }

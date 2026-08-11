@@ -12,6 +12,7 @@ import { getPeriodsElapsed, calculateInterest } from "../lib/interestEngine";
 import { domainEvents } from "../lib/events";
 import { getNotificationProvider } from "../notifications/registry";
 import { findOrCreateCustomer } from "./customer.service";
+import { generateReceiptInTransaction, buildDebtPaymentReceiptSnapshot } from "./receipt.service";
 import type {
   CreateDebtInput,
   ListDebtsQuery,
@@ -274,6 +275,7 @@ export async function recordPayment(debtId: string, input: RecordPaymentInput, a
   if (debt.status === "paid" || debt.status === "written_off") {
     throw badRequest(`Cannot record a payment on a debt that is already ${debt.status}`);
   }
+  let paymentMethodName: string | null = null;
   if (input.paymentMethodId) {
     const pm = await getOwned(
       prisma.payment_methods.findUnique({ where: { id: input.paymentMethodId } }),
@@ -281,12 +283,15 @@ export async function recordPayment(debtId: string, input: RecordPaymentInput, a
       "Payment method"
     );
     if (pm.status !== "active") throw badRequest("Payment method is archived");
+    paymentMethodName = pm.name;
   }
 
   const amount = new Prisma.Decimal(input.amount);
   if (amount.greaterThan(debt.amount_remaining)) {
     throw badRequest("Payment amount cannot exceed the remaining balance");
   }
+
+  const business = await prisma.businesses.findUniqueOrThrow({ where: { id: actor.businessId } });
 
   const result = await prisma.$transaction(async (tx) => {
     await claimIdempotencyKey(tx, actor.businessId, idempotencyKey, recordPaymentEndpoint(debtId));
@@ -319,6 +324,35 @@ export async function recordPayment(debtId: string, input: RecordPaymentInput, a
       },
     });
 
+    // Module 06 (Receipt System) -- Debt Payment Receipt. isFullPayment is
+    // derived from newStatus/newRemaining (never stored as its own field) --
+    // this is what makes a full vs. partial payment structurally
+    // distinguishable in the rendered receipt without a separate type.
+    const isFullPayment = newRemaining.equals(0);
+    const debtReceipt = await generateReceiptInTransaction(tx, {
+      businessId: actor.businessId,
+      timezone: business.timezone,
+      settings: business.settings,
+      currencyCode: business.currency,
+      receiptType: "debt_payment",
+      source: { debtPaymentId: payment.id },
+      subtotal: amount,
+      total: amount,
+      snapshot: buildDebtPaymentReceiptSnapshot(
+        business,
+        paymentMethodName,
+        {
+          amountOriginal: debt.amount_original.toString(),
+          amountPaidTotal: newPaid.toString(),
+          remainingBalance: newRemaining.toString(),
+          isFullPayment,
+          isReversal: false,
+        },
+        { description: `Debt Payment - ${debt.customer_name ?? debt.customer_phone}` }
+      ),
+      createdBy: actor.userId,
+    });
+
     // A genuine new payment -- total_payments increments here only, never on
     // a reversal (see reversePayment below), matching purchase_count's own
     // "only a real new occurrence counts" rule.
@@ -346,7 +380,7 @@ export async function recordPayment(debtId: string, input: RecordPaymentInput, a
     const responseBody = JSON.parse(JSON.stringify({ data: payment })) as unknown;
     await completeIdempotencyKey(tx, actor.businessId, idempotencyKey, recordPaymentEndpoint(debtId), 201, responseBody);
 
-    return { payment, newRemaining };
+    return { payment, newRemaining, debtReceipt };
   }, DEBT_TRANSACTION_OPTIONS);
 
   domainEvents.publish("DebtPaymentReceived", {
@@ -355,6 +389,12 @@ export async function recordPayment(debtId: string, input: RecordPaymentInput, a
     paymentId: result.payment.id,
     amount: amount.toString(),
     amountRemaining: result.newRemaining.toString(),
+  });
+  domainEvents.publish("ReceiptGenerated", {
+    businessId: actor.businessId,
+    receiptId: result.debtReceipt.id,
+    receiptNumber: result.debtReceipt.receipt_number,
+    receiptType: result.debtReceipt.receipt_type,
   });
 
   return result.payment;
@@ -377,6 +417,13 @@ export async function reversePayment(
   }
   if (!payment.amount.greaterThan(0)) {
     throw badRequest("Cannot reverse a non-positive payment entry");
+  }
+
+  const business = await prisma.businesses.findUniqueOrThrow({ where: { id: actor.businessId } });
+  let reversalPaymentMethodName: string | null = null;
+  if (payment.payment_method_id) {
+    const pm = await prisma.payment_methods.findUnique({ where: { id: payment.payment_method_id } });
+    reversalPaymentMethodName = pm?.name ?? null;
   }
 
   const result = await prisma.$transaction(async (tx) => {
@@ -420,6 +467,38 @@ export async function reversePayment(
       throw conflict("Debt was modified concurrently, please retry with the latest version");
     }
 
+    // Module 06 (Receipt System) -- confirmed explicitly (not an incidental
+    // side-effect of "a negative amount happened to flow through the same
+    // event handler"): a payment reversal generates its OWN, separate Debt
+    // Payment Receipt, symmetric with how Sale's own Refund generates a
+    // separate Refund Receipt rather than mutating the original. isReversal
+    // is a real, tested field on the snapshot, not inferred from a negative
+    // total at render time.
+    const reversalIsFullPayment = newRemaining.equals(0);
+    const reversalReceipt = await generateReceiptInTransaction(tx, {
+      businessId: actor.businessId,
+      timezone: business.timezone,
+      settings: business.settings,
+      currencyCode: business.currency,
+      receiptType: "debt_payment",
+      source: { debtPaymentId: reversal.id },
+      subtotal: reversal.amount,
+      total: reversal.amount,
+      snapshot: buildDebtPaymentReceiptSnapshot(
+        business,
+        reversalPaymentMethodName,
+        {
+          amountOriginal: debt.amount_original.toString(),
+          amountPaidTotal: newPaid.toString(),
+          remainingBalance: newRemaining.toString(),
+          isFullPayment: reversalIsFullPayment,
+          isReversal: true,
+        },
+        { description: `Debt Payment Reversal - ${debt.customer_name ?? debt.customer_phone}` }
+      ),
+      createdBy: actor.userId,
+    });
+
     // total_payments/last_payment_at deliberately untouched -- a reversal
     // corrects an existing payment rather than being a new one (mirrors how
     // voidSale never touches purchase_count either). last_activity_at still
@@ -443,7 +522,7 @@ export async function reversePayment(
     const responseBody = JSON.parse(JSON.stringify({ data: reversal })) as unknown;
     await completeIdempotencyKey(tx, actor.businessId, idempotencyKey, reversePaymentEndpoint(debtId, paymentId), 201, responseBody);
 
-    return { reversal, newRemaining };
+    return { reversal, newRemaining, reversalReceipt };
   }, DEBT_TRANSACTION_OPTIONS);
 
   domainEvents.publish("DebtPaymentReceived", {
@@ -452,6 +531,12 @@ export async function reversePayment(
     paymentId: result.reversal.id,
     amount: result.reversal.amount.toString(),
     amountRemaining: result.newRemaining.toString(),
+  });
+  domainEvents.publish("ReceiptGenerated", {
+    businessId: actor.businessId,
+    receiptId: result.reversalReceipt.id,
+    receiptNumber: result.reversalReceipt.receipt_number,
+    receiptType: result.reversalReceipt.receipt_type,
   });
 
   return result.reversal;

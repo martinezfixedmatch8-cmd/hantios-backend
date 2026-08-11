@@ -9,6 +9,7 @@ import { claimIdempotencyKey, completeIdempotencyKey } from "../lib/idempotency"
 import { getNextGrnNumber } from "../lib/grnNumber";
 import { getOrCreateWarehouse } from "../lib/warehouse";
 import { recordWarehouseMovement } from "../lib/warehouseStock";
+import { generateReceiptInTransaction, buildSupplierGoodsReceivedReceiptSnapshot } from "./receipt.service";
 import type { CreateGoodsReceivedNoteInput } from "../validation/goodsReceivedNote.schema";
 
 interface Actor {
@@ -71,6 +72,7 @@ export async function createGoodsReceivedNote(
   });
 
   const warehouse = await getOrCreateWarehouse(prisma, actor.businessId);
+  const business = await prisma.businesses.findUniqueOrThrow({ where: { id: actor.businessId } });
 
   const grn = await prisma.$transaction(async (tx) => {
     await claimIdempotencyKey(tx, actor.businessId, idempotencyKey, createGoodsReceivedNoteEndpoint(purchaseOrderId));
@@ -146,6 +148,33 @@ export async function createGoodsReceivedNote(
       throw conflict("Purchase order was modified concurrently, or is no longer in a receivable state -- please retry with the latest version");
     }
 
+    // Module 06 (Receipt System) -- Supplier Goods Received Receipt. Total
+    // value is the actual received cost (line items priced at their real
+    // unit_cost_actual, not the PO's original ordered/estimated cost).
+    const grnTotal = resolvedLines.reduce((sum, line) => sum.plus(line.quantityReceived.times(line.unitCostActual)), new Prisma.Decimal(0));
+    const grnReceipt = await generateReceiptInTransaction(tx, {
+      businessId: actor.businessId,
+      timezone: business.timezone,
+      settings: business.settings,
+      currencyCode: business.currency,
+      receiptType: "supplier_goods_received",
+      source: { goodsReceivedNoteId: createdGrn.id },
+      subtotal: grnTotal,
+      total: grnTotal,
+      snapshot: buildSupplierGoodsReceivedReceiptSnapshot(
+        business,
+        resolvedLines.map((line) => ({
+          productName: line.poItem.product_name_snapshot,
+          size: null,
+          quantity: line.quantityReceived.toString(),
+          unitPrice: line.unitCostActual.toString(),
+          lineTotal: line.quantityReceived.times(line.unitCostActual).toString(),
+        })),
+        { supplierName: po.supplier_name_snapshot ?? "Unknown supplier", poNumber: po.po_number, grnNumber }
+      ),
+      createdBy: actor.userId,
+    });
+
     await writeAuditLog(tx, {
       businessId: actor.businessId,
       userId: actor.userId,
@@ -161,7 +190,7 @@ export async function createGoodsReceivedNote(
     const responseBody = JSON.parse(JSON.stringify({ data: withItems })) as unknown;
     await completeIdempotencyKey(tx, actor.businessId, idempotencyKey, createGoodsReceivedNoteEndpoint(purchaseOrderId), 201, responseBody);
 
-    return { grn: withItems, newStatus };
+    return { grn: withItems, newStatus, grnReceipt };
   }, GRN_TRANSACTION_OPTIONS);
 
   domainEvents.publish("GoodsReceivedNoteCreated", {
@@ -170,6 +199,12 @@ export async function createGoodsReceivedNote(
     grnNumber: grn.grn.grn_number,
     purchaseOrderId,
     purchaseOrderStatus: grn.newStatus,
+  });
+  domainEvents.publish("ReceiptGenerated", {
+    businessId: actor.businessId,
+    receiptId: grn.grnReceipt.id,
+    receiptNumber: grn.grnReceipt.receipt_number,
+    receiptType: grn.grnReceipt.receipt_type,
   });
 
   return grn.grn;

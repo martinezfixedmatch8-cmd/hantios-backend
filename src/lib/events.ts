@@ -147,6 +147,16 @@ export interface DomainEventPayloads {
   // no dispatch, same standing rule as every event above.
   PurchaseOrderNegotiationEmailReceived: { businessId: string; purchaseOrderId: string; messageId: string; resendEmailId: string };
   PurchaseOrderNegotiationEmailUnmatched: { businessId: string | null; resendEmailId: string; reason: string };
+  // Module 06 (Receipt System). Publish-only, no dispatch, same standing
+  // rule as every event above -- published post-commit by each trigger's
+  // OWN service function (createSale/refundSale/recordPayment/
+  // reversePayment/recordWarehouseMovement/createGoodsReceivedNote/
+  // recordPurchaseOrderPayment), never from inside generateReceiptInTransaction
+  // itself (which runs pre-commit, inside the caller's own transaction).
+  ReceiptGenerated: { businessId: string; receiptId: string; receiptNumber: string; receiptType: string };
+  ReceiptDeliveryRequested: { businessId: string; receiptId: string; attemptId: string; channel: string };
+  ReceiptDeliverySucceeded: { businessId: string; receiptId: string; attemptId: string; channel: string };
+  ReceiptDeliveryFailed: { businessId: string; receiptId: string; attemptId: string; channel: string };
 }
 
 export type DomainEventName = keyof DomainEventPayloads;

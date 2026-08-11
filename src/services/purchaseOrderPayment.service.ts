@@ -9,6 +9,7 @@ import { claimIdempotencyKey, completeIdempotencyKey } from "../lib/idempotency"
 import { getCurrency } from "../lib/currencyReference";
 import { createExpenseInTransaction } from "./expense.service";
 import { ensureSystemCategoriesSeeded } from "./expenseCategory.service";
+import { generateReceiptInTransaction, buildPoSettlementReceiptSnapshot } from "./receipt.service";
 import type { RecordPurchaseOrderPaymentInput } from "../validation/purchaseOrderPayment.schema";
 
 interface Actor {
@@ -188,6 +189,28 @@ export async function recordPurchaseOrderPayment(
       },
     });
 
+    // Module 06 (Receipt System) -- PO Settlement Receipt, the business's
+    // own internal record of a payment made TO a supplier (distinct from
+    // that supplier's own Commercial Invoice, which is the reverse
+    // direction's document).
+    const poSettlementReceipt = await generateReceiptInTransaction(tx, {
+      businessId: actor.businessId,
+      timezone: business.timezone,
+      settings: business.settings,
+      currencyCode: business.currency,
+      receiptType: "po_settlement",
+      source: { purchaseOrderPaymentId: payment.id },
+      subtotal: amount,
+      total: amount,
+      snapshot: buildPoSettlementReceiptSnapshot(business, null, {
+        supplierName: po.supplier_name_snapshot ?? "Unknown supplier",
+        poNumber: po.po_number,
+        matchStatus,
+        amount: amount.toString(),
+      }),
+      createdBy: actor.userId,
+    });
+
     await writeAuditLog(tx, {
       businessId: actor.businessId,
       userId: actor.userId,
@@ -205,7 +228,7 @@ export async function recordPurchaseOrderPayment(
     const responseBody = JSON.parse(JSON.stringify({ data: { payment, purchaseOrder: updatedPo, expense } })) as unknown;
     await completeIdempotencyKey(tx, actor.businessId, idempotencyKey, recordPurchaseOrderPaymentEndpoint(purchaseOrderId), 201, responseBody);
 
-    return { payment, purchaseOrder: updatedPo, expense };
+    return { payment, purchaseOrder: updatedPo, expense, poSettlementReceipt };
   }, PO_PAYMENT_TRANSACTION_OPTIONS);
 
   domainEvents.publish("PurchaseOrderPaymentRecorded", {
@@ -243,6 +266,21 @@ export async function recordPurchaseOrderPayment(
     categoryId: result.expense.category_id,
     amount: amount.toString(),
   });
+  domainEvents.publish("ReceiptGenerated", {
+    businessId: actor.businessId,
+    receiptId: result.poSettlementReceipt.id,
+    receiptNumber: result.poSettlementReceipt.receipt_number,
+    receiptType: result.poSettlementReceipt.receipt_type,
+  });
 
-  return result;
+  // poSettlementReceipt is internal-only (used above for the event payload)
+  // -- never part of this endpoint's own public response contract, which
+  // predates Module 06 and must stay byte-identical to before (a receipt is
+  // fetched via GET /receipts/:id, not bundled here). Stripping it back out
+  // is also what keeps the stored Idempotency-Key replay body (built inside
+  // the transaction above, which never included it) consistent with this
+  // live response -- a real regression this session's own full-suite run
+  // caught via the pre-existing "replays the identical response" test.
+  const { poSettlementReceipt: _receipt, ...publicResult } = result;
+  return publicResult;
 }
