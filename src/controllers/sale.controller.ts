@@ -1,6 +1,6 @@
 import type { Request, Response, NextFunction } from "express";
 import { unauthorized } from "../lib/errors";
-import { createSaleSchema, listSalesQuerySchema, voidSaleSchema, refundSaleSchema } from "../validation/sale.schema";
+import { createSaleSchema, listSalesQuerySchema, voidSaleSchema, refundSaleSchema, setSaleAttributionSchema } from "../validation/sale.schema";
 import { idParamSchema } from "../validation/common.schema";
 import * as saleService from "../services/sale.service";
 import { getReplayedResponse } from "../lib/idempotency";
@@ -64,6 +64,26 @@ export async function refundSale(req: Request, res: Response, next: NextFunction
     const input = refundSaleSchema.parse(req.body);
     const refund = await saleService.refundSale(id, input, actor, idempotencyKey);
     res.status(201).json({ data: refund });
+  } catch (err) {
+    next(err);
+  }
+}
+
+export async function setSaleAttribution(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const actor = getActor(req);
+    const { id } = idParamSchema.parse(req.params);
+    const idempotencyKey = req.idempotencyKey as string; // guaranteed by requireIdempotencyKey
+
+    const replayed = await getReplayedResponse(actor.businessId, idempotencyKey, saleService.setSaleAttributionEndpoint(id));
+    if (replayed) {
+      res.status(replayed.status).json(replayed.body);
+      return;
+    }
+
+    const input = setSaleAttributionSchema.parse(req.body);
+    const sale = await saleService.setSaleAttribution(id, input, actor, idempotencyKey);
+    res.status(200).json({ data: sale });
   } catch (err) {
     next(err);
   }

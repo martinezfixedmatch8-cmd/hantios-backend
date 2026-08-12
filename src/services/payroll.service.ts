@@ -9,6 +9,7 @@ import { getReplayedResponse, claimIdempotencyKey, completeIdempotencyKey } from
 import { getBusinessLocalYear, getBusinessLocalMonth } from "../lib/businessTime";
 import { findEffectiveCompensation } from "./employeeCompensation.service";
 import { getApprovedHoursForPeriod } from "./attendance.service";
+import { getEligibleSalesForPeriod } from "./commission.service";
 import { generateReceiptInTransaction, buildPayrollReceiptSnapshot, requestReceiptDelivery } from "./receipt.service";
 import { resolveListQuery, paginate, type PaginationQuery } from "../lib/pagination";
 
@@ -36,13 +37,14 @@ const MONTH_NAMES = [
 // business+month both run this identically, and exactly one INSERT per
 // employee ever lands.
 //
-// FIXED_MONTHLY (Session A) and HOURLY (Session B) have real calculation
-// logic -- an employee whose currently-effective compensation is any other
-// model (or has no compensation structure at all) is SKIPPED, never
-// silently given a wrong/zero amount, and never aborts generation for
-// other employees. Zero approved hours for a period is NOT a skip reason
-// for HOURLY -- per confirmed Phase 0, once the source of truth exists at
-// all it always resolves to a real number, including a legitimate $0.00.
+// FIXED_MONTHLY (Session A), HOURLY (Session B), and PERCENTAGE/
+// FIXED_PLUS_PERCENTAGE (Session C) have real calculation logic -- an
+// employee whose currently-effective compensation is any other model (or
+// has no compensation structure at all) is SKIPPED, never silently given a
+// wrong/zero amount, and never aborts generation for other employees. Zero
+// approved hours/eligible sales for a period is NOT a skip reason -- per
+// confirmed Phase 0, once the source of truth exists at all it always
+// resolves to a real number, including a legitimate $0.00.
 // ============================================================================
 
 export interface GeneratePayrollResult {
@@ -67,6 +69,7 @@ export async function generatePayrollForBusiness(businessId: string, periodYear:
     let amount: Prisma.Decimal;
     let hoursCalculated: Prisma.Decimal | null = null;
     let hourlyRate: Prisma.Decimal | null = null;
+    let calculationBreakdown: Record<string, string> | null = null;
 
     if (compensation.compensation_model === "FIXED_MONTHLY") {
       const config = compensation.compensation_config as unknown as { monthlySalary: number };
@@ -82,14 +85,44 @@ export async function generatePayrollForBusiness(businessId: string, periodYear:
       hoursCalculated = approvedHours.toDecimalPlaces(2);
       hourlyRate = rate.toDecimalPlaces(2);
       amount = approvedHours.mul(rate).toDecimalPlaces(2, Prisma.Decimal.ROUND_HALF_UP);
+    } else if (compensation.compensation_model === "PERCENTAGE") {
+      // Calculation Snapshot (Module 12 Session C) -- commissionRate is a
+      // PERCENTAGE value (5.00 means 5%), confirmed Phase 0. eligibleSales
+      // already correctly nets refunds via getEligibleSalesForPeriod's own
+      // status+timestamp filtering -- no extra netting logic needed here.
+      const config = compensation.compensation_config as unknown as { commissionRate: number };
+      const eligibleSales = await getEligibleSalesForPeriod(businessId, employee.id, periodYear, periodMonth);
+      const rate = new Prisma.Decimal(config.commissionRate);
+      amount = eligibleSales.mul(rate).dividedBy(100).toDecimalPlaces(2, Prisma.Decimal.ROUND_HALF_UP);
+      calculationBreakdown = {
+        type: "PERCENTAGE",
+        eligibleSales: eligibleSales.toDecimalPlaces(2).toString(),
+        commissionRate: rate.toDecimalPlaces(2).toString(),
+      };
+    } else if (compensation.compensation_model === "FIXED_PLUS_PERCENTAGE") {
+      // Confirmed zero-ambiguity extension -- purely additive, base +
+      // commission, no threshold/overtime-style question.
+      const config = compensation.compensation_config as unknown as { fixedBase: number; commissionRate: number };
+      const eligibleSales = await getEligibleSalesForPeriod(businessId, employee.id, periodYear, periodMonth);
+      const rate = new Prisma.Decimal(config.commissionRate);
+      const fixedBase = new Prisma.Decimal(config.fixedBase);
+      const commission = eligibleSales.mul(rate).dividedBy(100).toDecimalPlaces(2, Prisma.Decimal.ROUND_HALF_UP);
+      amount = fixedBase.toDecimalPlaces(2).plus(commission);
+      calculationBreakdown = {
+        type: "FIXED_PLUS_PERCENTAGE",
+        fixedBase: fixedBase.toDecimalPlaces(2).toString(),
+        eligibleSales: eligibleSales.toDecimalPlaces(2).toString(),
+        commissionRate: rate.toDecimalPlaces(2).toString(),
+        commission: commission.toString(),
+      };
     } else {
-      result.skipped.push({ employeeId: employee.id, reason: `Compensation model "${compensation.compensation_model}" has no real calculation logic yet (Session C)` });
+      result.skipped.push({ employeeId: employee.id, reason: `Compensation model "${compensation.compensation_model}" has no real calculation logic yet (no source of truth -- NOT CALCULABLE YET)` });
       continue;
     }
 
     const rows = await prisma.$queryRaw<{ id: string }[]>(Prisma.sql`
-      INSERT INTO payroll_records (id, business_id, employee_id, period_year, period_month, compensation_id, compensation_model, amount, currency_code, hours_calculated, hourly_rate, status, created_at, version)
-      VALUES (${generateId()}, ${businessId}, ${employee.id}, ${periodYear}, ${periodMonth}, ${compensation.id}, ${compensation.compensation_model}::"CompensationModel", ${amount}, ${compensation.currency_code}, ${hoursCalculated}, ${hourlyRate}, 'pending', now(), 0)
+      INSERT INTO payroll_records (id, business_id, employee_id, period_year, period_month, compensation_id, compensation_model, amount, currency_code, hours_calculated, hourly_rate, calculation_breakdown, status, created_at, version)
+      VALUES (${generateId()}, ${businessId}, ${employee.id}, ${periodYear}, ${periodMonth}, ${compensation.id}, ${compensation.compensation_model}::"CompensationModel", ${amount}, ${compensation.currency_code}, ${hoursCalculated}, ${hourlyRate}, ${calculationBreakdown ? JSON.stringify(calculationBreakdown) : null}::jsonb, 'pending', now(), 0)
       ON CONFLICT (business_id, employee_id, period_year, period_month) DO NOTHING
       RETURNING id
     `);
@@ -173,8 +206,15 @@ export async function listPayrollRecords(query: ListPayrollQuery, businessId: st
   return paginate(rows, total, query.page, query.pageSize);
 }
 
+// Module 12 Session C -- bundles its own commission_adjustments on the
+// read, same "bundle related records on the parent's read endpoint"
+// pattern as Expenses/PO GRN/Attendance's own adjustments.
 export async function getPayrollRecord(id: string, businessId: string) {
-  return getOwned(prisma.payroll_records.findUnique({ where: { id } }), businessId, "Payroll record");
+  return getOwned(
+    prisma.payroll_records.findUnique({ where: { id }, include: { commission_adjustments: true } }),
+    businessId,
+    "Payroll record"
+  );
 }
 
 // ============================================================================

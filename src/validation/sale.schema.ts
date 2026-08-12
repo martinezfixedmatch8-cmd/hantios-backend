@@ -31,12 +31,33 @@ export const createSaleSchema = z
     discount: discountSchema.optional(),
     taxRate: decimalField(z.coerce.number().min(0).max(100)).optional(),
     items: z.array(saleLineSchema).min(1, "At least one line item is required"),
+    // Module 12 Session C -- WHO is entitled to commission, deliberately
+    // separate from cashier_id (WHO processed the transaction, always
+    // actor.userId, never client-suppliable). Optional, single-employee,
+    // settable by whoever can create the sale (owner/manager/cashier) --
+    // this is genuinely who is standing at the register, so allowing them
+    // to record it live is the confirmed design. Correcting it afterward
+    // requires the dedicated owner/manager-only endpoint, never a re-POST.
+    salespersonEmployeeId: z.string().uuid().optional(),
   })
   .refine((data) => data.discount?.type !== "percentage" || data.discount.value <= 100, {
     message: "Percentage discount cannot exceed 100",
     path: ["discount", "value"],
   });
 export type CreateSaleInput = z.infer<typeof createSaleSchema>;
+
+// Module 12 Session C -- the ONLY way to correct attribution after creation
+// (never a re-POST of the sale). employeeId is nullable (not just
+// optional) so attribution can be explicitly cleared, not just reassigned
+// -- matching the .optional().nullable() pattern this repo already uses
+// everywhere a genuinely-clearable FK exists (Employee's own branchId/
+// departmentId/positionId on update).
+export const setSaleAttributionSchema = z.object({
+  version: z.number().int().nonnegative(),
+  employeeId: z.string().uuid().nullable(),
+  reason: z.string().trim().min(1).max(500),
+});
+export type SetSaleAttributionInput = z.infer<typeof setSaleAttributionSchema>;
 
 export const listSalesQuerySchema = paginationQuerySchema.extend({
   status: z.nativeEnum(SaleStatus).optional(),

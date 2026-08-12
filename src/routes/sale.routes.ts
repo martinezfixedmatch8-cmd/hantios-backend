@@ -2,7 +2,7 @@ import { Router } from "express";
 import { authenticate } from "../middleware/authenticate";
 import { requireRole } from "../middleware/requireRole";
 import { requireIdempotencyKey } from "../middleware/idempotencyKey";
-import { createSale, listSales, getSale, voidSale, refundSale } from "../controllers/sale.controller";
+import { createSale, listSales, getSale, voidSale, refundSale, setSaleAttribution } from "../controllers/sale.controller";
 
 const router = Router();
 
@@ -26,5 +26,10 @@ router.get("/:id", requireRole(...readRoles), getSale);
 router.post("/:id/void", requireRole("owner", "cashier"), requireIdempotencyKey, voidSale);
 // Refund: post-day-close, financial-only. No cashier at all.
 router.post("/:id/refund", requireRole("owner", "manager"), requireIdempotencyKey, refundSale);
+// Module 12 Session C -- attribution CORRECTION, owner/manager only
+// (confirmed -- no cashier exception, unlike Void). Setting attribution
+// live at creation is a separate path (POST /sales' own optional field),
+// already covered by that endpoint's existing RBAC.
+router.post("/:id/attribution", requireRole("owner", "manager"), requireIdempotencyKey, setSaleAttribution);
 
 export default router;

@@ -30,6 +30,8 @@ import positionRoutes from "./routes/position.routes";
 import employeeRoutes from "./routes/employee.routes";
 import payrollRoutes from "./routes/payroll.routes";
 import attendanceRoutes from "./routes/attendance.routes";
+import commissionRoutes from "./routes/commission.routes";
+import compensationPolicyRoutes from "./routes/compensationPolicy.routes";
 import { notFoundHandler, errorHandler } from "./middleware/errorHandler";
 
 export const app = express();
@@ -83,6 +85,8 @@ app.use("/positions", positionRoutes);
 app.use("/employees", employeeRoutes);
 app.use("/payroll", payrollRoutes);
 app.use("/attendance", attendanceRoutes);
+app.use("/commission-adjustments", commissionRoutes);
+app.use("/compensation-policies", compensationPolicyRoutes);
 
 app.use(notFoundHandler);
 app.use(errorHandler);

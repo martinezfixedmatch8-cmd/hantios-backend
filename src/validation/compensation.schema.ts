@@ -26,12 +26,34 @@ const hourlyConfigSchema = z
   })
   .strict();
 
+// Module 12 Session C -- PERCENTAGE becomes writable. commissionRate is a
+// percentage VALUE (5.00 means 5%), confirmed Phase 0 shape: { "commissionRate": "5.00" }.
+const percentageConfigSchema = z
+  .object({
+    commissionRate: decimalField(z.coerce.number().positive()),
+  })
+  .strict();
+
+// FIXED_PLUS_PERCENTAGE -- confirmed genuinely zero-ambiguity (purely
+// additive: fixedBase + eligibleSales x rate, no threshold/overtime-style
+// question the way FIXED_PLUS_TIME had). fixedBase allows 0 (a
+// commission-only structure that happens to be modeled through this branch
+// is legitimate, not an error) -- commissionRate stays positive (a
+// FIXED_PLUS_PERCENTAGE structure with a 0% rate is just FIXED_MONTHLY,
+// use that model instead).
+const fixedPlusPercentageConfigSchema = z
+  .object({
+    fixedBase: decimalField(z.coerce.number().nonnegative()),
+    commissionRate: decimalField(z.coerce.number().positive()),
+  })
+  .strict();
+
 // A discriminated union on the literal compensationModel, not the full
-// enum -- widens Session A's single-branch closed boundary to two branches
-// while keeping the other 6 models (PERCENTAGE/FIXED_PLUS_PERCENTAGE/
-// FIXED_PLUS_TIME/PIECE_RATE/CONTRACT/CUSTOM) structurally unwritable
-// through this endpoint. Sessions B/C extend this list the same way when
-// they build real logic for another model, never loosen it to the bare enum.
+// enum -- widens Session A/B's boundary to four branches while keeping the
+// other 4 models (FIXED_PLUS_TIME/PIECE_RATE/CONTRACT/CUSTOM) structurally
+// unwritable through this endpoint. A future session extends this list the
+// same way when it builds real logic for another model, never loosens it
+// to the bare enum.
 export const createEmployeeCompensationSchema = z.discriminatedUnion("compensationModel", [
   z.object({
     compensationModel: z.literal("FIXED_MONTHLY"),
@@ -42,6 +64,16 @@ export const createEmployeeCompensationSchema = z.discriminatedUnion("compensati
     compensationModel: z.literal("HOURLY"),
     effectiveFrom: z.coerce.date(),
     config: hourlyConfigSchema,
+  }),
+  z.object({
+    compensationModel: z.literal("PERCENTAGE"),
+    effectiveFrom: z.coerce.date(),
+    config: percentageConfigSchema,
+  }),
+  z.object({
+    compensationModel: z.literal("FIXED_PLUS_PERCENTAGE"),
+    effectiveFrom: z.coerce.date(),
+    config: fixedPlusPercentageConfigSchema,
   }),
 ]);
 export type CreateEmployeeCompensationInput = z.infer<typeof createEmployeeCompensationSchema>;

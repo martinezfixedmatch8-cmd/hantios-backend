@@ -19,7 +19,7 @@ import {
 import { applyStockAlertTransition } from "../lib/stockAlerts";
 import type { PendingStockAlertEvent } from "../lib/stockAlerts";
 import { findOrCreateCustomer } from "./customer.service";
-import type { CreateSaleInput, ListSalesQuery, VoidSaleInput, RefundSaleInput } from "../validation/sale.schema";
+import type { CreateSaleInput, ListSalesQuery, VoidSaleInput, RefundSaleInput, SetSaleAttributionInput } from "../validation/sale.schema";
 
 interface Actor {
   userId: string;
@@ -45,6 +45,7 @@ const SALE_TRANSACTION_OPTIONS = { timeout: 15000 };
 export const CREATE_SALE_ENDPOINT = "POST /sales";
 export const voidSaleEndpoint = (saleId: string): string => `POST /sales/${saleId}/void`;
 export const refundSaleEndpoint = (saleId: string): string => `POST /sales/${saleId}/refund`;
+export const setSaleAttributionEndpoint = (saleId: string): string => `POST /sales/${saleId}/attribution`;
 
 interface SaleLineSnapshot {
   productId: string;
@@ -76,6 +77,12 @@ export async function createSale(input: CreateSaleInput, actor: Actor, idempoten
       throw badRequest("Payment method is archived");
     }
     paymentMethodName = paymentMethod.name;
+  }
+
+  // Module 12 Session C -- validated the same way every other optional FK
+  // on Sale creation already is (getOwned, cross-business -> 404).
+  if (input.salespersonEmployeeId) {
+    await getOwned(prisma.employees.findUnique({ where: { id: input.salespersonEmployeeId } }), actor.businessId, "Employee");
   }
 
   const business = await prisma.businesses.findUniqueOrThrow({ where: { id: actor.businessId } });
@@ -274,8 +281,27 @@ export async function createSale(input: CreateSaleInput, actor: Actor, idempoten
         profit: totalProfit.toDecimalPlaces(2),
         receipt_id: receiptNumber,
         status: "completed",
+        salesperson_employee_id: input.salespersonEmployeeId,
       },
     });
+
+    // Module 12 Session C -- history is complete from event #1: even the
+    // very first assignment at creation gets its own sale_attribution_events
+    // row (source: "creation"), not just later corrections.
+    if (input.salespersonEmployeeId) {
+      await tx.sale_attribution_events.create({
+        data: {
+          id: generateId(),
+          business_id: actor.businessId,
+          sale_id: createdSale.id,
+          previous_employee_id: null,
+          new_employee_id: input.salespersonEmployeeId,
+          changed_by: actor.userId,
+          reason: "Original attribution at sale creation",
+          source: "creation",
+        },
+      });
+    }
 
     // Module 06 (Receipt System) -- generated inside THIS transaction, same
     // one as the Sale itself, so a later rollback (for any reason) rolls
@@ -375,6 +401,14 @@ export async function createSale(input: CreateSaleInput, actor: Actor, idempoten
     receiptId: sale.receipt_id,
     total: sale.total.toString(),
   });
+  if (sale.salesperson_employee_id) {
+    domainEvents.publish("SaleAttributionSet", {
+      businessId: actor.businessId,
+      saleId: sale.id,
+      employeeId: sale.salesperson_employee_id,
+      occurredAt: sale.timestamp.toISOString(),
+    });
+  }
   domainEvents.publish("ReceiptGenerated", {
     businessId: actor.businessId,
     receiptId: saleReceipt.id,
@@ -583,6 +617,15 @@ export async function refundSale(saleId: string, input: RefundSaleInput, actor: 
         receipt_id: receiptNumber,
         status: "refunded",
         refund_of_sale_id: sale.id,
+        // Module 12 Session C -- copied forward, same "never re-derive,
+        // always carry the original's own value" pattern customer_id/items/
+        // payment_method_id already use. This is what makes a refund
+        // naturally net against the SAME employee's eligible sales -- no
+        // separate netting logic needed, see getEligibleSalesForPeriod.
+        // Deliberately NOT logged to sale_attribution_events -- this is an
+        // automatic carry-forward of an already-decided fact, not a new
+        // attribution decision.
+        salesperson_employee_id: sale.salesperson_employee_id,
       },
     });
 
@@ -670,6 +713,79 @@ export async function refundSale(saleId: string, input: RefundSaleInput, actor: 
   return refund;
 }
 
+// Module 12 Session C -- the ONLY way to correct attribution after
+// creation, never a re-POST of the sale. Owner/Manager only (confirmed --
+// no per-resource cashier exception the way Void has one; a correction is
+// a financial-integrity action, not a physical-possession one). Version-
+// guarded (reusing sales' own existing version column, the same field
+// Void/Refund already optimistic-lock against) + Idempotency-Key. Writes
+// exactly one sale_attribution_events row per call, regardless of whether
+// this is the sale's first-ever assignment (created with none) or a real
+// change of an existing one -- both are "correction" source from this
+// endpoint's own point of view; only sale creation itself ever writes
+// source: "creation".
+export async function setSaleAttribution(saleId: string, input: SetSaleAttributionInput, actor: Actor, idempotencyKey: string) {
+  const sale = await getOwned(prisma.sales.findUnique({ where: { id: saleId } }), actor.businessId, "Sale");
+
+  if (input.employeeId) {
+    await getOwned(prisma.employees.findUnique({ where: { id: input.employeeId } }), actor.businessId, "Employee");
+  }
+
+  const endpoint = setSaleAttributionEndpoint(saleId);
+  const previousEmployeeId = sale.salesperson_employee_id;
+
+  const updated = await prisma.$transaction(async (tx) => {
+    await claimIdempotencyKey(tx, actor.businessId, idempotencyKey, endpoint);
+
+    const updateResult = await tx.sales.updateMany({
+      where: { id: saleId, business_id: actor.businessId, version: input.version },
+      data: { salesperson_employee_id: input.employeeId, version: { increment: 1 } },
+    });
+    if (updateResult.count === 0) {
+      throw conflict("Sale was modified concurrently, please retry with the latest version");
+    }
+
+    await tx.sale_attribution_events.create({
+      data: {
+        id: generateId(),
+        business_id: actor.businessId,
+        sale_id: saleId,
+        previous_employee_id: previousEmployeeId,
+        new_employee_id: input.employeeId,
+        changed_by: actor.userId,
+        reason: input.reason,
+        source: "correction",
+      },
+    });
+
+    await writeAuditLog(tx, {
+      businessId: actor.businessId,
+      userId: actor.userId,
+      userName: actor.userName,
+      userRole: actor.userRole,
+      action: "sale.attribution_changed",
+      entityType: "sale",
+      entityId: saleId,
+      reason: input.reason,
+    });
+
+    const result = await tx.sales.findUniqueOrThrow({ where: { id: saleId } });
+    const responseBody = JSON.parse(JSON.stringify({ data: result })) as unknown;
+    await completeIdempotencyKey(tx, actor.businessId, idempotencyKey, endpoint, 200, responseBody);
+    return result;
+  });
+
+  domainEvents.publish("SaleAttributionChanged", {
+    businessId: actor.businessId,
+    saleId,
+    previousEmployeeId,
+    newEmployeeId: input.employeeId,
+    occurredAt: new Date().toISOString(),
+  });
+
+  return updated;
+}
+
 export async function listSales(query: ListSalesQuery, businessId: string) {
   const resolved = resolveListQuery(query, {
     sortableFields: ["timestamp", "total", "subtotal"] as const,
@@ -695,6 +811,13 @@ export async function listSales(query: ListSalesQuery, businessId: string) {
   return paginate(rows, total, resolved.page, resolved.pageSize);
 }
 
+// Module 12 Session C -- bundles its own attribution history on the read,
+// same "bundle related records on the parent's read endpoint" pattern as
+// Expenses/PO GRN/Attendance's own adjustments.
 export async function getSale(id: string, businessId: string) {
-  return getOwned(prisma.sales.findUnique({ where: { id } }), businessId, "Sale");
+  return getOwned(
+    prisma.sales.findUnique({ where: { id }, include: { sale_attribution_events: { orderBy: { changed_at: "asc" } } } }),
+    businessId,
+    "Sale"
+  );
 }

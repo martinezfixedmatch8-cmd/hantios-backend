@@ -174,6 +174,11 @@ model businesses {
   // Module 12 Session B (Attendance)
   attendance_records                  attendance_records[]
   attendance_adjustments              attendance_adjustments[]
+  // Module 12 Session C (Sales Attribution & Commission Engine)
+  sale_attribution_events             sale_attribution_events[]
+  commission_adjustments              commission_adjustments[]
+  compensation_policies                compensation_policies[]
+  compensation_policy_acknowledgements compensation_policy_acknowledgements[]
   sales                               sales[]
   sessions                            sessions[]
   staff_invites                       staff_invites[]
@@ -2000,6 +2005,17 @@ model sales {
   timestamp                       DateTime                @default(now())
   refund_of_sale_id               String?
   version                         Int                     @default(0)
+  // Module 12 Session C -- WHO is entitled to commission for this sale,
+  // deliberately separate from cashier_id (WHO processed the transaction --
+  // re-verified never the same person: a refund's own reversal row sets
+  // cashier_id to whoever processed the refund, not the original
+  // salesperson). Nullable/optional -- confirmed single-employee attribution
+  // only, no splitting. Settable at creation by whoever can create the sale
+  // (owner/manager/cashier); correctable afterward by owner/manager only via
+  // a dedicated endpoint, never by re-POSTing the sale. Every set/change is
+  // logged to sale_attribution_events -- this column is the CURRENT value
+  // only, never the history.
+  salesperson_employee_id         String?
   debts                           debts[]
   inventory_adjustments           inventory_adjustments[]
   branches                        branches                @relation(fields: [branch_id], references: [id])
@@ -2010,6 +2026,9 @@ model sales {
   sales                           sales?                  @relation("salesTosales", fields: [refund_of_sale_id], references: [id])
   other_sales                     sales[]                 @relation("salesTosales")
   customers                       customers?              @relation(fields: [customer_id], references: [id])
+  employees                       employees?              @relation(fields: [salesperson_employee_id], references: [id])
+  sale_attribution_events         sale_attribution_events[]
+  commission_adjustments          commission_adjustments[]
   // Module 06 (Receipt System) -- a sale can be the source of at most one
   // receipt (Sale type) and, separately, its OWN reversal row (a distinct
   // sales.id) can be the source of at most one more (Refund type) -- see
@@ -2021,6 +2040,7 @@ model sales {
   @@index([business_id, status])
   @@index([business_id, timestamp])
   @@index([customer_id])
+  @@index([salesperson_employee_id])
 }
 
 model sessions {
@@ -2123,6 +2143,10 @@ model users {
   attendance_records_recorded_byTousers         attendance_records[]                 @relation("attendance_records_recorded_byTousers")
   attendance_records_approved_byTousers         attendance_records[]                 @relation("attendance_records_approved_byTousers")
   attendance_adjustments                        attendance_adjustments[]
+  sale_attribution_events                       sale_attribution_events[]
+  commission_adjustments                        commission_adjustments[]
+  compensation_policies                         compensation_policies[]
+  compensation_policy_acknowledgements          compensation_policy_acknowledgements[]
   po_secure_links_created_byTousers             po_secure_links[]                    @relation("po_secure_links_created_byTousers")
   po_secure_links_revoked_byTousers             po_secure_links[]                    @relation("po_secure_links_revoked_byTousers")
   po_negotiation_internal_notes                 po_negotiation_internal_notes[]
@@ -2946,6 +2970,9 @@ model employees {
   payroll_records           payroll_records[]
   receipt_delivery_attempts receipt_delivery_attempts[]
   attendance_records        attendance_records[]
+  sales                     sales[]
+  commission_adjustments    commission_adjustments[]
+  compensation_policy_acknowledgements compensation_policy_acknowledgements[]
 
   @@index([business_id, status])
   @@index([branch_id])
@@ -3028,6 +3055,15 @@ model payroll_records {
   // given calculation on demand, without a redundant join table.
   hours_calculated      Decimal?              @db.Decimal(10, 2)
   hourly_rate           Decimal?              @db.Decimal(14, 2)
+  // Module 12 Session C -- a general-purpose, self-describing snapshot for
+  // every model from PERCENTAGE onward, deliberately NOT a growing pile of
+  // model-specific nullable columns (hours_calculated/hourly_rate stay
+  // exactly as shipped in Session B, untouched -- this is additive, not a
+  // replacement). Shape is discriminated by its own "type" key, e.g.
+  // {type:"PERCENTAGE", eligibleSales:"10000.00", commissionRate:"5.00"} or
+  // {type:"FIXED_PLUS_PERCENTAGE", fixedBase:"300.00", eligibleSales:"...",
+  // commissionRate:"...", commission:"..."}. NULL for FIXED_MONTHLY/HOURLY.
+  calculation_breakdown Json?
   status                PayrollRecordStatus   @default(pending)
   payment_method_id     String?
   payment_reference     String?
@@ -3041,10 +3077,142 @@ model payroll_records {
   payment_methods       payment_methods?      @relation(fields: [payment_method_id], references: [id])
   users                 users?                @relation(fields: [paid_by], references: [id])
   receipts              receipts[]
+  commission_adjustments commission_adjustments[]
 
   @@unique([business_id, employee_id, period_year, period_month])
   @@index([business_id, status])
   @@index([business_id, period_year, period_month])
+}
+
+// Module 12 Session C -- Sales Attribution & Commission Engine.
+enum SaleAttributionSource {
+  creation
+  correction
+}
+
+// Append-only, immutable -- current attribution lives on sales.
+// salesperson_employee_id (the fast-queryable live value); this table is
+// the permanent audit trail of every set/change, including the very first
+// assignment at creation (source: "creation"), so history is complete from
+// event #1. Never updated or deleted, same rule as audit_logs/
+// debt_transactions/attendance_adjustments. A refund's own reversal row
+// copies salesperson_employee_id forward from the original (see
+// sale.service.ts) WITHOUT writing its own attribution event -- that's an
+// automatic carry-forward of an already-decided fact, not a new attribution
+// decision, and the reversal row's own refund_of_sale_id link is enough to
+// trace it back to the original's own event history.
+model sale_attribution_events {
+  id                    String                @id
+  business_id           String
+  sale_id               String
+  previous_employee_id  String?
+  new_employee_id       String?
+  changed_by            String
+  changed_at            DateTime              @default(now())
+  reason                String
+  source                SaleAttributionSource
+  businesses            businesses            @relation(fields: [business_id], references: [id])
+  sales                 sales                 @relation(fields: [sale_id], references: [id])
+  users                 users                 @relation(fields: [changed_by], references: [id])
+
+  @@index([business_id, sale_id, changed_at])
+}
+
+// Confirmed Phase 0 (Historical Payroll Protection) -- the ONE case needing
+// real new machinery: an attribution correction made AFTER a period's
+// payroll was already generated has no natural future event to carry it
+// (unlike a refund, which lands in its own real, later period
+// automatically -- see getEligibleSalesForPeriod). This is a manual,
+// one-sided correction primitive against an ALREADY-ISSUED payroll_records
+// row -- confirmed NOT an automated bilateral reallocation engine (that
+// needs further, currently-unconfirmed business rules about timing/
+// settlement). Immutable, signed (chk_commission_adjustments_delta_amount_
+// nonzero), same shape as attendance_adjustments. Recorded for audit/
+// reconciliation -- NOT automatically netted into any future payroll
+// generation run this session.
+model commission_adjustments {
+  id                String          @id
+  business_id       String
+  employee_id       String
+  payroll_record_id String
+  sale_id           String?
+  delta_amount      Decimal         @db.Decimal(14, 2)
+  reason            String
+  created_by        String
+  created_at        DateTime        @default(now())
+  businesses        businesses      @relation(fields: [business_id], references: [id])
+  employees         employees       @relation(fields: [employee_id], references: [id])
+  payroll_records    payroll_records @relation(fields: [payroll_record_id], references: [id])
+  sales              sales?         @relation(fields: [sale_id], references: [id])
+  users              users          @relation(fields: [created_by], references: [id])
+
+  @@index([payroll_record_id])
+  @@index([business_id, employee_id])
+}
+
+enum CompensationPolicyType {
+  GENERAL
+  COMMISSION
+  ATTENDANCE
+  PIECE_RATE
+  CONTRACT
+}
+
+enum CompensationPolicyStatus {
+  active
+  superseded
+}
+
+// Confirmed Phase 0 (Addendum G) -- reuses the exact versioned-acknowledgement
+// SHAPE users.terms_accepted_at/terms_version already establishes in this
+// schema, not a new pattern. A correction is always a NEW version
+// (supersede-not-edit, same immutability principle as po_commercial_
+// invoices) -- an already-superseded version's own historical
+// acknowledgements stay exactly as they were, never retroactively pointed
+// at the new version. This is the human-readable EXPLANATION of the rules,
+// never itself the source of payroll calculation -- the actual commission
+// rate lives on employee_compensation.compensation_config, selected by
+// whatever structure is effective for the payroll period, same as always.
+// Building the backend storage/versioning/API only this session -- no
+// frontend exists anywhere in this repo to render it as an actual web page
+// (confirmed, same boundary every other module already documents).
+model compensation_policies {
+  id            String                    @id
+  business_id   String
+  policy_type   CompensationPolicyType
+  version       String
+  title         String
+  content       String
+  effective_from DateTime                 @db.Date
+  status        CompensationPolicyStatus  @default(active)
+  created_by    String
+  created_at    DateTime                  @default(now())
+  businesses    businesses                @relation(fields: [business_id], references: [id])
+  users         users                     @relation(fields: [created_by], references: [id])
+  compensation_policy_acknowledgements compensation_policy_acknowledgements[]
+
+  @@index([business_id, policy_type, status])
+}
+
+// Mirrors users.terms_accepted_at/terms_version's own precedent, extended
+// to a real per-employee, per-version, real-table shape (rather than a
+// single pair of columns) since an employee may need to acknowledge
+// multiple distinct policy types over time, and a later policy version must
+// never overwrite an earlier version's own historical acknowledgement.
+model compensation_policy_acknowledgements {
+  id          String                 @id
+  business_id String
+  employee_id String
+  policy_id   String
+  accepted_at DateTime               @default(now())
+  recorded_by String
+  businesses  businesses             @relation(fields: [business_id], references: [id])
+  employees   employees              @relation(fields: [employee_id], references: [id])
+  compensation_policies compensation_policies @relation(fields: [policy_id], references: [id])
+  users       users                  @relation(fields: [recorded_by], references: [id])
+
+  @@unique([employee_id, policy_id])
+  @@index([business_id, policy_id])
 }
 
 // Module 12 Session B -- Attendance & Time Tracking. Confirmed Phase 0 (Q1)

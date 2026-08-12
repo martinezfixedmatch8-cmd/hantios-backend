@@ -36,6 +36,14 @@ export async function cleanupTestBusiness(businessId: string): Promise<void> {
   // (RESTRICT), so it must go before employees below.
   await prisma.attendance_adjustments.deleteMany({ where: { business_id: businessId } });
   await prisma.attendance_records.deleteMany({ where: { business_id: businessId } });
+  // Module 12 Session C -- commission_adjustments FKs to employees AND
+  // payroll_records (both RESTRICT), so it must go before both (sale_id is
+  // ON DELETE SET NULL, order-independent against sales). compensation_
+  // policy_acknowledgements FKs to employees AND compensation_policies
+  // (both RESTRICT), so it must go before both too.
+  await prisma.commission_adjustments.deleteMany({ where: { business_id: businessId } });
+  await prisma.compensation_policy_acknowledgements.deleteMany({ where: { business_id: businessId } });
+  await prisma.compensation_policies.deleteMany({ where: { business_id: businessId } });
   // Module 12 Session A -- payroll_records FKs to employees AND
   // employee_compensation (both RESTRICT), so it must go before both;
   // employee_compensation FKs to employees (RESTRICT), so it must go
@@ -57,6 +65,10 @@ export async function cleanupTestBusiness(businessId: string): Promise<void> {
   await prisma.debt_payments.deleteMany({ where: { business_id: businessId, reversal_of_payment_id: { not: null } } });
   await prisma.debt_payments.deleteMany({ where: { business_id: businessId } });
   await prisma.debts.deleteMany({ where: { business_id: businessId } });
+  // Module 12 Session C -- sale_attribution_events FKs to sales (RESTRICT),
+  // so it must go before it (commission_adjustments' own sale_id is SET
+  // NULL, already handled above, order-independent against sales).
+  await prisma.sale_attribution_events.deleteMany({ where: { business_id: businessId } });
   // Refund reversal rows self-reference their original sale via refund_of_sale_id
   // and carry a negative `total` -- chk_sales_total_nonneg only permits that while
   // the FK is still set, so delete them before their referenced row rather than

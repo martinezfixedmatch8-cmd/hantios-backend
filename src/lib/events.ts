@@ -172,6 +172,13 @@ export interface DomainEventPayloads {
   // when a future self-service flow's own separate approval step exists.
   AttendanceRecorded: { businessId: string; attendanceRecordId: string; employeeId: string; workDate: string; hoursWorked: string; occurredAt: string };
   AttendanceAdjustmentCreated: { businessId: string; attendanceRecordId: string; adjustmentId: string; deltaHours: string; occurredAt: string };
+  // Module 12 Session C (Sales Attribution & Commission Engine). Publish-only,
+  // no dispatch, same standing rule as every event above.
+  SaleAttributionSet: { businessId: string; saleId: string; employeeId: string; occurredAt: string };
+  SaleAttributionChanged: { businessId: string; saleId: string; previousEmployeeId: string | null; newEmployeeId: string | null; occurredAt: string };
+  CommissionAdjustmentCreated: { businessId: string; commissionAdjustmentId: string; employeeId: string; payrollRecordId: string; deltaAmount: string; occurredAt: string };
+  CompensationPolicyCreated: { businessId: string; policyId: string; policyType: string; version: string; occurredAt: string };
+  CompensationPolicyAcknowledged: { businessId: string; policyId: string; employeeId: string; occurredAt: string };
 }
 
 export type DomainEventName = keyof DomainEventPayloads;
