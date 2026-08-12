@@ -1,3 +1,4 @@
+import { Prisma } from "@prisma/client";
 import { prisma } from "../lib/prisma";
 import { generateId } from "../lib/ids";
 import { getOwned } from "../lib/ownership";
@@ -40,22 +41,34 @@ export async function createEmployee(input: CreateEmployeeInput, actor: Actor, i
   if (input.positionId) {
     await getOwned(prisma.positions.findUnique({ where: { id: input.positionId } }), actor.businessId, "Position");
   }
+  if (input.userId) {
+    await getOwned(prisma.users.findUnique({ where: { id: input.userId } }), actor.businessId, "User");
+  }
 
   const employee = await prisma.$transaction(async (tx) => {
     await claimIdempotencyKey(tx, actor.businessId, idempotencyKey, CREATE_EMPLOYEE_ENDPOINT);
 
-    const created = await tx.employees.create({
-      data: {
-        id: generateId(),
-        business_id: actor.businessId,
-        name: input.name,
-        phone: input.phone,
-        branch_id: input.branchId,
-        department_id: input.departmentId,
-        position_id: input.positionId,
-        status: "active",
-      },
-    });
+    let created;
+    try {
+      created = await tx.employees.create({
+        data: {
+          id: generateId(),
+          business_id: actor.businessId,
+          name: input.name,
+          phone: input.phone,
+          branch_id: input.branchId,
+          department_id: input.departmentId,
+          position_id: input.positionId,
+          user_id: input.userId,
+          status: "active",
+        },
+      });
+    } catch (err) {
+      if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002") {
+        throw conflict("This user is already linked to another employee record");
+      }
+      throw err;
+    }
 
     await writeAuditLog(tx, {
       businessId: actor.businessId,
@@ -123,19 +136,31 @@ export async function updateEmployee(id: string, input: UpdateEmployeeInput, act
   if (input.positionId) {
     await getOwned(prisma.positions.findUnique({ where: { id: input.positionId } }), actor.businessId, "Position");
   }
+  if (input.userId) {
+    await getOwned(prisma.users.findUnique({ where: { id: input.userId } }), actor.businessId, "User");
+  }
 
   const updated = await prisma.$transaction(async (tx) => {
-    const updateResult = await tx.employees.updateMany({
-      where: { id, business_id: actor.businessId, version: input.version },
-      data: {
-        ...(input.name !== undefined ? { name: input.name } : {}),
-        ...(input.phone !== undefined ? { phone: input.phone } : {}),
-        ...(input.branchId !== undefined ? { branch_id: input.branchId } : {}),
-        ...(input.departmentId !== undefined ? { department_id: input.departmentId } : {}),
-        ...(input.positionId !== undefined ? { position_id: input.positionId } : {}),
-        version: { increment: 1 },
-      },
-    });
+    let updateResult;
+    try {
+      updateResult = await tx.employees.updateMany({
+        where: { id, business_id: actor.businessId, version: input.version },
+        data: {
+          ...(input.name !== undefined ? { name: input.name } : {}),
+          ...(input.phone !== undefined ? { phone: input.phone } : {}),
+          ...(input.branchId !== undefined ? { branch_id: input.branchId } : {}),
+          ...(input.departmentId !== undefined ? { department_id: input.departmentId } : {}),
+          ...(input.positionId !== undefined ? { position_id: input.positionId } : {}),
+          ...(input.userId !== undefined ? { user_id: input.userId } : {}),
+          version: { increment: 1 },
+        },
+      });
+    } catch (err) {
+      if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002") {
+        throw conflict("This user is already linked to another employee record");
+      }
+      throw err;
+    }
     if (updateResult.count === 0) {
       throw conflict("Employee was modified concurrently, please retry with the latest version");
     }

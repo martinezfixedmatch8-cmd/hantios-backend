@@ -2116,6 +2116,7 @@ model users {
   receipt_delivery_attempts                     receipt_delivery_attempts[]
   employee_compensation                         employee_compensation[]
   payroll_records                               payroll_records[]
+  employees                                     employees?
   po_secure_links_created_byTousers             po_secure_links[]                    @relation("po_secure_links_created_byTousers")
   po_secure_links_revoked_byTousers             po_secure_links[]                    @relation("po_secure_links_revoked_byTousers")
   po_negotiation_internal_notes                 po_negotiation_internal_notes[]
@@ -2912,6 +2913,18 @@ model employees {
   phone                     String
   department_id             String?
   position_id               String?
+  // Optional, never required, never assumed -- present only for the case
+  // where a payroll employee is ALSO a system user (e.g. a manager drawing
+  // a salary). @unique so at most one employee record can ever link to a
+  // given user (Postgres does not match NULL=NULL, so any number of
+  // employees may still have user_id: null). No code path this session
+  // infers, sets, or clears this automatically -- creating a user does not
+  // create an employee and vice versa; it is only ever set through an
+  // explicit userId on Employee create/update, same as branch/department/
+  // position. This was part of the confirmed Session A design (Q2) but was
+  // missed during initial implementation -- added as a follow-up fix, see
+  // CLAUDE.md's own "Risks / interpretation flagged" note for the history.
+  user_id                   String?                     @unique
   // active/archived -- an archived employee is excluded from future
   // monthly payroll generation (still fully visible in permanent history).
   status                    RecordStatus                @default(active)
@@ -2922,6 +2935,7 @@ model employees {
   branches                  branches?                   @relation(fields: [branch_id], references: [id])
   departments               departments?                @relation(fields: [department_id], references: [id])
   positions                 positions?                  @relation(fields: [position_id], references: [id])
+  users                     users?                      @relation(fields: [user_id], references: [id])
   employee_compensation     employee_compensation[]
   payroll_records           payroll_records[]
   receipt_delivery_attempts receipt_delivery_attempts[]

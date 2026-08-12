@@ -11,6 +11,12 @@ export const createEmployeeSchema = z.object({
   branchId: z.string().uuid().optional(),
   departmentId: z.string().uuid().optional(),
   positionId: z.string().uuid().optional(),
+  // Optional, never required, never assumed -- links this employee record
+  // to a real system user for the case where they're ALSO a logged-in
+  // staff member (e.g. a manager drawing a salary). Nothing infers this
+  // automatically from RBAC role or anything else -- see employees.user_id
+  // in schema.prisma.
+  userId: z.string().uuid().optional(),
 });
 export type CreateEmployeeInput = z.infer<typeof createEmployeeSchema>;
 
@@ -18,7 +24,7 @@ export type CreateEmployeeInput = z.infer<typeof createEmployeeSchema>;
 // QA-fixed pattern Expenses'/Customers'/Suppliers' own update schemas
 // already established: .optional() alone accepts omission but not an
 // explicit null, so there'd be no way to ever clear a previously-set
-// branch/department/position.
+// branch/department/position/user link.
 export const updateEmployeeSchema = z.object({
   version: z.number().int().nonnegative(),
   name: z.string().trim().min(1).max(200).optional(),
@@ -26,6 +32,7 @@ export const updateEmployeeSchema = z.object({
   branchId: z.string().uuid().optional().nullable(),
   departmentId: z.string().uuid().optional().nullable(),
   positionId: z.string().uuid().optional().nullable(),
+  userId: z.string().uuid().optional().nullable(),
 });
 export type UpdateEmployeeInput = z.infer<typeof updateEmployeeSchema>;
 

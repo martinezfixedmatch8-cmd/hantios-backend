@@ -116,6 +116,67 @@ describe("Module 12 Session A -- Payroll Core", () => {
         .send({ name: "RBAC Test", phone: "+254700000000" });
       expect(res.status).toBe(canWrite ? 201 : 403);
     });
+
+    // Confirmed Phase 0 (Q2) design -- an employee record MAY optionally
+    // link to a real system user (e.g. a manager who also draws a salary),
+    // never required, never inferred automatically. This was originally
+    // part of the confirmed schema but missed during initial
+    // implementation; added as a follow-up fix.
+    describe("Optional link to a system user (Q2)", () => {
+      it("links an employee to a user on create, and can clear it via update", async () => {
+        const managerUser = await createTestUser(businessId, "manager");
+        const empRes = await request(app)
+          .post("/employees")
+          .set("Authorization", `Bearer ${ownerToken}`)
+          .set("Idempotency-Key", idemKey())
+          .send({ name: "Linked Employee", phone: "+254700111222", userId: managerUser.id });
+        expect(empRes.status).toBe(201);
+        expect(empRes.body.data.user_id).toBe(managerUser.id);
+
+        const clearRes = await request(app)
+          .patch(`/employees/${empRes.body.data.id}`)
+          .set("Authorization", `Bearer ${ownerToken}`)
+          .send({ version: empRes.body.data.version, userId: null });
+        expect(clearRes.status).toBe(200);
+        expect(clearRes.body.data.user_id).toBeNull();
+      });
+
+      it("rejects linking two employees to the same user", async () => {
+        const sharedUser = await createTestUser(businessId, "cashier");
+        const first = await request(app)
+          .post("/employees")
+          .set("Authorization", `Bearer ${ownerToken}`)
+          .set("Idempotency-Key", idemKey())
+          .send({ name: "First Linked", phone: "+254700111333", userId: sharedUser.id });
+        expect(first.status).toBe(201);
+
+        const second = await request(app)
+          .post("/employees")
+          .set("Authorization", `Bearer ${ownerToken}`)
+          .set("Idempotency-Key", idemKey())
+          .send({ name: "Second Linked", phone: "+254700111444", userId: sharedUser.id });
+        expect(second.status).toBe(409);
+      });
+
+      it("rejects a userId belonging to a different business", async () => {
+        const otherOwner = await signupTestOwner();
+        businessIds.push(otherOwner.businessId);
+        const otherLogin = await loginTestOwner(otherOwner.email, otherOwner.password, otherOwner.deviceId);
+
+        // A user that genuinely belongs to the FIRST business (`businessId`).
+        const userInFirstBusiness = await createTestUser(businessId, "manager");
+
+        // Attempt to link that user while authenticated as the SECOND
+        // business's owner -- getOwned must reject this as not found, the
+        // same cross-business-404 pattern every other FK in this repo uses.
+        const crossRes = await request(app)
+          .post("/employees")
+          .set("Authorization", `Bearer ${otherLogin.accessToken}`)
+          .set("Idempotency-Key", idemKey())
+          .send({ name: "Cross Business Link Attempt", phone: "+254700111555", userId: userInFirstBusiness.id });
+        expect(crossRes.status).toBe(404);
+      });
+    });
   });
 
   describe("Employee Compensation -- effective-dating", () => {
