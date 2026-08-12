@@ -17,9 +17,31 @@ const fixedMonthlyConfigSchema = z
   })
   .strict();
 
-export const createEmployeeCompensationSchema = z.object({
-  compensationModel: z.literal("FIXED_MONTHLY"),
-  effectiveFrom: z.coerce.date(),
-  config: fixedMonthlyConfigSchema,
-});
+// Module 12 Session B -- HOURLY becomes writable. Same decimalField 2dp
+// guard as FIXED_MONTHLY's own monthlySalary (Decimal precision, never
+// float), confirmed Phase 0 shape: { "hourlyRate": "3.50" }.
+const hourlyConfigSchema = z
+  .object({
+    hourlyRate: decimalField(z.coerce.number().positive()),
+  })
+  .strict();
+
+// A discriminated union on the literal compensationModel, not the full
+// enum -- widens Session A's single-branch closed boundary to two branches
+// while keeping the other 6 models (PERCENTAGE/FIXED_PLUS_PERCENTAGE/
+// FIXED_PLUS_TIME/PIECE_RATE/CONTRACT/CUSTOM) structurally unwritable
+// through this endpoint. Sessions B/C extend this list the same way when
+// they build real logic for another model, never loosen it to the bare enum.
+export const createEmployeeCompensationSchema = z.discriminatedUnion("compensationModel", [
+  z.object({
+    compensationModel: z.literal("FIXED_MONTHLY"),
+    effectiveFrom: z.coerce.date(),
+    config: fixedMonthlyConfigSchema,
+  }),
+  z.object({
+    compensationModel: z.literal("HOURLY"),
+    effectiveFrom: z.coerce.date(),
+    config: hourlyConfigSchema,
+  }),
+]);
 export type CreateEmployeeCompensationInput = z.infer<typeof createEmployeeCompensationSchema>;

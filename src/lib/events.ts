@@ -165,6 +165,13 @@ export interface DomainEventPayloads {
   EmployeeCompensationCreated: { businessId: string; employeeId: string; compensationId: string; compensationModel: string };
   PayrollRecordCreated: { businessId: string; payrollRecordId: string; employeeId: string; periodYear: number; periodMonth: number };
   PayrollMarkedPaid: { businessId: string; payrollRecordId: string; employeeId: string; amount: string };
+  // Module 12 Session B (Attendance & Time Tracking). Publish-only, no
+  // dispatch, same standing rule as every event above. AttendanceRecorded
+  // fires on every create -- it's born "approved" this session (Q2), so
+  // there's no separate AttendanceApproved event yet; held in reserve for
+  // when a future self-service flow's own separate approval step exists.
+  AttendanceRecorded: { businessId: string; attendanceRecordId: string; employeeId: string; workDate: string; hoursWorked: string; occurredAt: string };
+  AttendanceAdjustmentCreated: { businessId: string; attendanceRecordId: string; adjustmentId: string; deltaHours: string; occurredAt: string };
 }
 
 export type DomainEventName = keyof DomainEventPayloads;

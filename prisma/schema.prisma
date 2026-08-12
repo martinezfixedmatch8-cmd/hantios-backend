@@ -171,6 +171,9 @@ model businesses {
   employees                           employees[]
   employee_compensation               employee_compensation[]
   payroll_records                     payroll_records[]
+  // Module 12 Session B (Attendance)
+  attendance_records                  attendance_records[]
+  attendance_adjustments              attendance_adjustments[]
   sales                               sales[]
   sessions                            sessions[]
   staff_invites                       staff_invites[]
@@ -2117,6 +2120,9 @@ model users {
   employee_compensation                         employee_compensation[]
   payroll_records                               payroll_records[]
   employees                                     employees?
+  attendance_records_recorded_byTousers         attendance_records[]                 @relation("attendance_records_recorded_byTousers")
+  attendance_records_approved_byTousers         attendance_records[]                 @relation("attendance_records_approved_byTousers")
+  attendance_adjustments                        attendance_adjustments[]
   po_secure_links_created_byTousers             po_secure_links[]                    @relation("po_secure_links_created_byTousers")
   po_secure_links_revoked_byTousers             po_secure_links[]                    @relation("po_secure_links_revoked_byTousers")
   po_negotiation_internal_notes                 po_negotiation_internal_notes[]
@@ -2939,6 +2945,7 @@ model employees {
   employee_compensation     employee_compensation[]
   payroll_records           payroll_records[]
   receipt_delivery_attempts receipt_delivery_attempts[]
+  attendance_records        attendance_records[]
 
   @@index([business_id, status])
   @@index([branch_id])
@@ -3010,6 +3017,17 @@ model payroll_records {
   compensation_model    CompensationModel
   amount                Decimal               @db.Decimal(14, 2)
   currency_code         String
+  // Session B (Attendance/HOURLY) -- Calculation Snapshot columns, both
+  // permanently NULL for FIXED_MONTHLY and every other model. Populated
+  // once, at generation time, from getApprovedHoursForPeriod's own result
+  // and the compensation structure's own hourlyRate -- never re-derived
+  // later. A no-link-table-back-to-attendance_records design decision
+  // (confirmed): the immutable, indexed (employee_id, work_date) history on
+  // attendance_records, combined with this row's own period_year/
+  // period_month, is sufficient to reconstruct exactly which records fed a
+  // given calculation on demand, without a redundant join table.
+  hours_calculated      Decimal?              @db.Decimal(10, 2)
+  hourly_rate           Decimal?              @db.Decimal(14, 2)
   status                PayrollRecordStatus   @default(pending)
   payment_method_id     String?
   payment_reference     String?
@@ -3027,4 +3045,87 @@ model payroll_records {
   @@unique([business_id, employee_id, period_year, period_month])
   @@index([business_id, status])
   @@index([business_id, period_year, period_month])
+}
+
+// Module 12 Session B -- Attendance & Time Tracking. Confirmed Phase 0 (Q1)
+// design: given most employees have no user_id/login, self-service
+// clock-in/out is deliberately deferred -- the ONE write path this session
+// builds is an authorized role (owner/manager) recording on an employee's
+// own behalf. Confirmed Phase 0 (Q2): recording and approval collapse into
+// one action for this session's own write path, but the approved state is
+// still explicitly, directly persisted -- never inferred from who recorded
+// it. "recorded" stays in the enum, schema-complete but code-unreachable
+// this session, reserved for a future self-service flow (record -> pending
+// approval -> a SEPARATE approval action), same precedent as
+// ExpenseWorkflowStatus.draft.
+enum AttendanceStatus {
+  recorded
+  approved
+}
+
+// Confirmed Phase 0 (Q3): a simple per-day hours entry, not clock-in/
+// clock-out timestamp pairs -- nobody is literally punching a clock given
+// Q1's own recording mechanism. work_date is a plain business-local
+// calendar date (@db.Date, no time-of-day, no further TZ conversion at
+// read time -- same "the business meant this literally" precedent as
+// debts.date_due), explicitly client-supplied (confirmed: back-dated entry
+// is allowed, validated only as not later than the business's own current
+// business day via getBusinessDay -- real usage is batch admin entry at
+// day/week boundaries, not live-instant recording).
+//
+// @@unique([business_id, employee_id, work_date]) is deliberately what
+// FORCES any correction through attendance_adjustments rather than a
+// second/overwritten original entry -- a duplicate POST for the same
+// employee+day is a clean, DB-level-verified 409, never silently accepted
+// or overwritten.
+/// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
+model attendance_records {
+  id                     String                   @id
+  business_id            String
+  employee_id            String
+  work_date              DateTime                 @db.Date
+  hours_worked           Decimal                  @db.Decimal(5, 2)
+  status                 AttendanceStatus         @default(recorded)
+  // Always a real user this session (only an authorized role records
+  // attendance) -- recorded_by and approved_by are kept as genuinely
+  // separate columns (both populated identically this session) so a future
+  // self-service flow can have them diverge without a schema change.
+  recorded_by            String
+  approved_by            String?
+  approved_at            DateTime?
+  created_at             DateTime                 @default(now())
+  businesses             businesses               @relation(fields: [business_id], references: [id])
+  employees              employees                @relation(fields: [employee_id], references: [id])
+  recorded_by_user       users                    @relation("attendance_records_recorded_byTousers", fields: [recorded_by], references: [id])
+  approved_by_user       users?                   @relation("attendance_records_approved_byTousers", fields: [approved_by], references: [id])
+  attendance_adjustments attendance_adjustments[]
+
+  @@unique([business_id, employee_id, work_date])
+  @@index([business_id, employee_id, work_date])
+  @@index([business_id, status])
+}
+
+// Confirmed Phase 0 (Q4/Adjustment model): corrections to an already-
+// APPROVED attendance record never mutate or delete the original --
+// hours_worked is written once, at creation, and never touched again.
+// delta_hours is a signed, additive correction (same signed-ledger
+// convention as debt_transactions.amount), summed against the original at
+// AGGREGATION time (see getApprovedHoursForPeriod in attendance.service.ts),
+// never applied in place. Immutable once created -- no update/delete code
+// path, same rule as audit_logs/debt_transactions/inventory_adjustments.
+/// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
+model attendance_adjustments {
+  id                    String             @id
+  business_id           String
+  attendance_record_id  String
+  delta_hours           Decimal            @db.Decimal(5, 2)
+  reason                String
+  created_by            String
+  created_at            DateTime           @default(now())
+  businesses             businesses         @relation(fields: [business_id], references: [id])
+  attendance_records     attendance_records @relation(fields: [attendance_record_id], references: [id])
+  users                  users              @relation(fields: [created_by], references: [id])
+
+  @@index([attendance_record_id])
+  @@index([business_id])
 }

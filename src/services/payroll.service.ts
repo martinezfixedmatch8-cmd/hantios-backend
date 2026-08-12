@@ -8,6 +8,7 @@ import { domainEvents } from "../lib/events";
 import { getReplayedResponse, claimIdempotencyKey, completeIdempotencyKey } from "../lib/idempotency";
 import { getBusinessLocalYear, getBusinessLocalMonth } from "../lib/businessTime";
 import { findEffectiveCompensation } from "./employeeCompensation.service";
+import { getApprovedHoursForPeriod } from "./attendance.service";
 import { generateReceiptInTransaction, buildPayrollReceiptSnapshot, requestReceiptDelivery } from "./receipt.service";
 import { resolveListQuery, paginate, type PaginationQuery } from "../lib/pagination";
 
@@ -35,10 +36,13 @@ const MONTH_NAMES = [
 // business+month both run this identically, and exactly one INSERT per
 // employee ever lands.
 //
-// Only FIXED_MONTHLY has real calculation logic this session -- an
-// employee whose currently-effective compensation is any other model (or
-// has no compensation structure at all) is SKIPPED, never silently given
-// a wrong/zero amount, and never aborts generation for other employees.
+// FIXED_MONTHLY (Session A) and HOURLY (Session B) have real calculation
+// logic -- an employee whose currently-effective compensation is any other
+// model (or has no compensation structure at all) is SKIPPED, never
+// silently given a wrong/zero amount, and never aborts generation for
+// other employees. Zero approved hours for a period is NOT a skip reason
+// for HOURLY -- per confirmed Phase 0, once the source of truth exists at
+// all it always resolves to a real number, including a legitimate $0.00.
 // ============================================================================
 
 export interface GeneratePayrollResult {
@@ -59,16 +63,33 @@ export async function generatePayrollForBusiness(businessId: string, periodYear:
       result.skipped.push({ employeeId: employee.id, reason: "No compensation structure is effective for this period" });
       continue;
     }
-    if (compensation.compensation_model !== "FIXED_MONTHLY") {
-      result.skipped.push({ employeeId: employee.id, reason: `Compensation model "${compensation.compensation_model}" has no real calculation logic yet (Session B/C)` });
+
+    let amount: Prisma.Decimal;
+    let hoursCalculated: Prisma.Decimal | null = null;
+    let hourlyRate: Prisma.Decimal | null = null;
+
+    if (compensation.compensation_model === "FIXED_MONTHLY") {
+      const config = compensation.compensation_config as unknown as { monthlySalary: number };
+      amount = new Prisma.Decimal(config.monthlySalary);
+    } else if (compensation.compensation_model === "HOURLY") {
+      // Calculation Snapshot (Module 12 Session B) -- Approved Hours x
+      // rate, rounded ONCE at the single point it's first computed, same
+      // "round once, use that value everywhere downstream" rule Sale's own
+      // line-item-subtotal rounding fix already established.
+      const config = compensation.compensation_config as unknown as { hourlyRate: number };
+      const approvedHours = await getApprovedHoursForPeriod(businessId, employee.id, periodYear, periodMonth);
+      const rate = new Prisma.Decimal(config.hourlyRate);
+      hoursCalculated = approvedHours.toDecimalPlaces(2);
+      hourlyRate = rate.toDecimalPlaces(2);
+      amount = approvedHours.mul(rate).toDecimalPlaces(2, Prisma.Decimal.ROUND_HALF_UP);
+    } else {
+      result.skipped.push({ employeeId: employee.id, reason: `Compensation model "${compensation.compensation_model}" has no real calculation logic yet (Session C)` });
       continue;
     }
-    const config = compensation.compensation_config as unknown as { monthlySalary: number };
-    const amount = new Prisma.Decimal(config.monthlySalary);
 
     const rows = await prisma.$queryRaw<{ id: string }[]>(Prisma.sql`
-      INSERT INTO payroll_records (id, business_id, employee_id, period_year, period_month, compensation_id, compensation_model, amount, currency_code, status, created_at, version)
-      VALUES (${generateId()}, ${businessId}, ${employee.id}, ${periodYear}, ${periodMonth}, ${compensation.id}, 'FIXED_MONTHLY', ${amount}, ${compensation.currency_code}, 'pending', now(), 0)
+      INSERT INTO payroll_records (id, business_id, employee_id, period_year, period_month, compensation_id, compensation_model, amount, currency_code, hours_calculated, hourly_rate, status, created_at, version)
+      VALUES (${generateId()}, ${businessId}, ${employee.id}, ${periodYear}, ${periodMonth}, ${compensation.id}, ${compensation.compensation_model}::"CompensationModel", ${amount}, ${compensation.currency_code}, ${hoursCalculated}, ${hourlyRate}, 'pending', now(), 0)
       ON CONFLICT (business_id, employee_id, period_year, period_month) DO NOTHING
       RETURNING id
     `);
