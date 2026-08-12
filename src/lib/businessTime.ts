@@ -11,6 +11,19 @@ export function getBusinessLocalYear(timezone: string, date: Date = new Date()):
   return Number(year);
 }
 
+// Module 12 Session A -- the business's own current calendar month (1-12),
+// same reasoning/shape as getBusinessLocalYear above: monthly payroll
+// generation must key off the business's own local calendar, never
+// server/UTC "now".
+export function getBusinessLocalMonth(timezone: string, date: Date = new Date()): number {
+  const parts = new Intl.DateTimeFormat("en-US", { timeZone: timezone, month: "numeric" }).formatToParts(date);
+  const month = parts.find((p) => p.type === "month")?.value;
+  if (!month) {
+    throw new Error(`Could not resolve month for timezone: ${timezone}`);
+  }
+  return Number(month);
+}
+
 function getLocalDateTimeParts(timezone: string, date: Date) {
   const parts = new Intl.DateTimeFormat("en-US", {
     timeZone: timezone,

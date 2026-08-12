@@ -31,6 +31,16 @@ export async function cleanupTestBusiness(businessId: string): Promise<void> {
   await prisma.receipts.deleteMany({ where: { business_id: businessId } });
   await prisma.receipt_number_counters.deleteMany({ where: { business_id: businessId } });
   await prisma.receipt_counters.deleteMany({ where: { business_id: businessId } });
+  // Module 12 Session A -- payroll_records FKs to employees AND
+  // employee_compensation (both RESTRICT), so it must go before both;
+  // employee_compensation FKs to employees (RESTRICT), so it must go
+  // before that too. positions/departments go last (employees FKs to both
+  // via SET NULL, order-independent, but placed after for clarity).
+  await prisma.payroll_records.deleteMany({ where: { business_id: businessId } });
+  await prisma.employee_compensation.deleteMany({ where: { business_id: businessId } });
+  await prisma.employees.deleteMany({ where: { business_id: businessId } });
+  await prisma.positions.deleteMany({ where: { business_id: businessId } });
+  await prisma.departments.deleteMany({ where: { business_id: businessId } });
   await prisma.inventory_adjustments.deleteMany({ where: { business_id: businessId } });
   await prisma.price_history.deleteMany({ where: { business_id: businessId } });
   await prisma.debt_reminders.deleteMany({ where: { business_id: businessId } });

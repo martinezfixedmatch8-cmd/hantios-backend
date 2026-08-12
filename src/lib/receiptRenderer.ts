@@ -40,6 +40,10 @@ interface ReceiptLabels {
   warehouse: string;
   destinationBranch: string;
   originalReceipt: string;
+  employee: string;
+  position: string;
+  period: string;
+  netPay: string;
 }
 
 // Translation confidence note, same as messageTemplates.ts's own: English/
@@ -53,6 +57,7 @@ const LABELS: Record<SupportedLanguage, ReceiptLabels> = {
     remainingBalance: "Remaining Balance", fullPayment: "Payment in Full", partialPayment: "Partial Payment",
     paymentReversal: "Payment Reversal", supplier: "Supplier", purchaseOrder: "Purchase Order", warehouse: "Warehouse",
     destinationBranch: "Destination Branch", originalReceipt: "Original Receipt",
+    employee: "Employee", position: "Position", period: "Pay Period", netPay: "Net Pay",
   },
   so: {
     receipt: "Rasiid", date: "Taariikh", item: "Alaab", qty: "Tiro", unitPrice: "Qiimaha Halkii", lineTotal: "Wadarta Sadarka",
@@ -61,6 +66,7 @@ const LABELS: Record<SupportedLanguage, ReceiptLabels> = {
     remainingBalance: "Hadhaaga", fullPayment: "Lacag-bixin Buuxda", partialPayment: "Lacag-bixin Qayb ah",
     paymentReversal: "Celin Lacag-bixineed", supplier: "Alaab-siiyaha", purchaseOrder: "Amarka Iibsiga", warehouse: "Bakhaarka",
     destinationBranch: "Laanta la Diray", originalReceipt: "Rasiidka Asalka ah",
+    employee: "Shaqaale", position: "Jagada", period: "Mushaharka Bisha", netPay: "Mushaharka Saafiga ah",
   },
   ar: {
     receipt: "إيصال", date: "التاريخ", item: "الصنف", qty: "الكمية", unitPrice: "سعر الوحدة", lineTotal: "إجمالي السطر",
@@ -69,6 +75,7 @@ const LABELS: Record<SupportedLanguage, ReceiptLabels> = {
     remainingBalance: "الرصيد المتبقي", fullPayment: "دفعة كاملة", partialPayment: "دفعة جزئية",
     paymentReversal: "عكس الدفعة", supplier: "المورد", purchaseOrder: "أمر الشراء", warehouse: "المستودع",
     destinationBranch: "الفرع المستلم", originalReceipt: "الإيصال الأصلي",
+    employee: "الموظف", position: "المنصب", period: "فترة الراتب", netPay: "صافي الراتب",
   },
   fr: {
     receipt: "Reçu", date: "Date", item: "Article", qty: "Qté", unitPrice: "Prix Unitaire", lineTotal: "Total Ligne",
@@ -77,6 +84,7 @@ const LABELS: Record<SupportedLanguage, ReceiptLabels> = {
     remainingBalance: "Solde Restant", fullPayment: "Paiement Intégral", partialPayment: "Paiement Partiel",
     paymentReversal: "Annulation de Paiement", supplier: "Fournisseur", purchaseOrder: "Bon de Commande", warehouse: "Entrepôt",
     destinationBranch: "Succursale de Destination", originalReceipt: "Reçu Original",
+    employee: "Employé", position: "Poste", period: "Période de Paie", netPay: "Salaire Net",
   },
   es: {
     receipt: "Recibo", date: "Fecha", item: "Artículo", qty: "Cant.", unitPrice: "Precio Unitario", lineTotal: "Total Línea",
@@ -85,6 +93,7 @@ const LABELS: Record<SupportedLanguage, ReceiptLabels> = {
     remainingBalance: "Saldo Restante", fullPayment: "Pago Completo", partialPayment: "Pago Parcial",
     paymentReversal: "Reversión de Pago", supplier: "Proveedor", purchaseOrder: "Orden de Compra", warehouse: "Almacén",
     destinationBranch: "Sucursal de Destino", originalReceipt: "Recibo Original",
+    employee: "Empleado", position: "Puesto", period: "Período de Pago", netPay: "Salario Neto",
   },
 };
 
@@ -195,6 +204,15 @@ export function renderReceiptText(input: ReceiptRenderInput): string {
   if (refund) {
     lines.push("");
     lines.push(`${t.originalReceipt}: ${refund.originalReceiptNumber}`);
+  }
+
+  const payroll = input.snapshot.payroll;
+  if (payroll) {
+    lines.push("");
+    lines.push(`${t.employee}: ${payroll.employeeName}`);
+    if (payroll.position) lines.push(`${t.position}: ${payroll.position}`);
+    lines.push(`${t.period}: ${payroll.periodLabel}`);
+    lines.push(`${t.netPay}: ${input.currencyCode} ${input.total}`);
   }
 
   lines.push("");

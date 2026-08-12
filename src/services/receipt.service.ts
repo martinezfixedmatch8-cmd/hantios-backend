@@ -57,6 +57,8 @@ export interface GenerateReceiptSource {
   warehouseMovementId?: string;
   goodsReceivedNoteId?: string;
   purchaseOrderPaymentId?: string;
+  // Module 12 Session A -- 7th source, same sparse-FK treatment as the 5 above.
+  payrollRecordId?: string;
 }
 
 export interface GenerateReceiptParams {
@@ -64,7 +66,7 @@ export interface GenerateReceiptParams {
   timezone: string;
   settings: Prisma.JsonValue;
   currencyCode: string;
-  receiptType: "sale" | "refund" | "debt_payment" | "warehouse_stock_out" | "supplier_goods_received" | "po_settlement";
+  receiptType: "sale" | "refund" | "debt_payment" | "warehouse_stock_out" | "supplier_goods_received" | "po_settlement" | "payroll";
   source: GenerateReceiptSource;
   subtotal: Prisma.Decimal.Value;
   discount?: Prisma.Decimal.Value;
@@ -100,6 +102,7 @@ export async function generateReceiptInTransaction(tx: Prisma.TransactionClient,
         warehouse_movement_id: params.source.warehouseMovementId ?? null,
         goods_received_note_id: params.source.goodsReceivedNoteId ?? null,
         purchase_order_payment_id: params.source.purchaseOrderPaymentId ?? null,
+        payroll_record_id: params.source.payrollRecordId ?? null,
         refund_of_receipt_id: params.refundOfReceiptId ?? null,
         business_timezone: params.timezone,
         currency_code: params.currencyCode,
@@ -280,6 +283,25 @@ export function buildPoSettlementReceiptSnapshot(
   };
 }
 
+// Module 12 Session A -- Payroll Receipt (7th type).
+export function buildPayrollReceiptSnapshot(
+  business: BusinessProfileLike,
+  paymentMethodName: string | null,
+  payrollContext: { employeeName: string; position: string | null; periodLabel: string; compensationModel: string; amount: string }
+): ReceiptSnapshot {
+  return {
+    business: baseSnapshotBusiness(business),
+    items: [{ productName: `Salary - ${payrollContext.employeeName} (${payrollContext.periodLabel})`, size: null, quantity: "1", unitPrice: payrollContext.amount, lineTotal: payrollContext.amount }],
+    paymentMethod: paymentMethodName,
+    payroll: {
+      employeeName: payrollContext.employeeName,
+      position: payrollContext.position,
+      periodLabel: payrollContext.periodLabel,
+      compensationModel: payrollContext.compensationModel,
+    },
+  };
+}
+
 // ============================================================================
 // Read side -- list / get, standard {data, pagination} + reprint (get is
 // reprint; a receipt has no separate "reprint" endpoint, it just re-renders
@@ -412,6 +434,7 @@ export async function requestReceiptDelivery(receiptId: string, input: RequestDe
   // the locked Delivery-Attempt Recipient Semantics (never one shape forced
   // onto both channels).
   let customerId: string | null = null;
+  let employeeId: string | null = null;
   let phoneSnapshot: string | null = null;
   let branchId: string | null = null;
 
@@ -424,6 +447,15 @@ export async function requestReceiptDelivery(receiptId: string, input: RequestDe
       const payment = await prisma.debt_payments.findUnique({ where: { id: receipt.debt_payment_id }, include: { debts: true } });
       customerId = payment?.debts.customer_id ?? null;
       phoneSnapshot = payment?.debts.customer_phone ?? null;
+    } else if (receipt.payroll_record_id) {
+      // Module 12 Session A -- the real recipient here is an Employee, never
+      // a Customer. Snapshotted at attempt time, same reasoning as every
+      // other channel-specific recipient in this table: a later phone
+      // number edit on the Employee record must never rewrite what a
+      // historical delivery attempt says it sent to.
+      const payrollRecord = await prisma.payroll_records.findUnique({ where: { id: receipt.payroll_record_id }, include: { employees: true } });
+      employeeId = payrollRecord?.employees.id ?? null;
+      phoneSnapshot = payrollRecord?.employees.phone ?? null;
     }
     if (!phoneSnapshot) {
       throw badRequest("No phone number is available for this receipt -- cannot deliver via WhatsApp");
@@ -461,6 +493,7 @@ export async function requestReceiptDelivery(receiptId: string, input: RequestDe
             status: "pending",
             requested_by: actor.userId,
             customer_id: customerId,
+            employee_id: employeeId,
             phone_snapshot: phoneSnapshot,
             branch_id: branchId,
           },

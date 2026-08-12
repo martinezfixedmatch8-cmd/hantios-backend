@@ -54,6 +54,17 @@ export interface ReceiptRefundContext {
   originalReceiptNumber: string;
 }
 
+// Module 12 Session A -- Payroll Receipt (7th type). Period is spelled out
+// as a display string (e.g. "August 2026"), not raw year/month ints,
+// since the snapshot exists specifically so rendering never needs to
+// re-derive anything from mutable/live records.
+export interface ReceiptPayrollContext {
+  employeeName: string;
+  position: string | null;
+  periodLabel: string;
+  compensationModel: string;
+}
+
 export interface ReceiptSnapshot {
   business: ReceiptSnapshotBusiness;
   items: ReceiptSnapshotLineItem[];
@@ -63,4 +74,5 @@ export interface ReceiptSnapshot {
   supplierGoodsReceived?: ReceiptSupplierGoodsReceivedContext;
   poSettlement?: ReceiptPoSettlementContext;
   refund?: ReceiptRefundContext;
+  payroll?: ReceiptPayrollContext;
 }

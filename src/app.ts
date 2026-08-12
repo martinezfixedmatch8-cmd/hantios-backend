@@ -25,6 +25,10 @@ import poShipmentRoutes from "./routes/poShipment.routes";
 import poShipmentPortalRoutes from "./routes/poShipmentPortal.routes";
 import resendInboundWebhookRoutes from "./routes/resendInboundWebhook.routes";
 import unmatchedInboundEmailRoutes from "./routes/unmatchedInboundEmail.routes";
+import departmentRoutes from "./routes/department.routes";
+import positionRoutes from "./routes/position.routes";
+import employeeRoutes from "./routes/employee.routes";
+import payrollRoutes from "./routes/payroll.routes";
 import { notFoundHandler, errorHandler } from "./middleware/errorHandler";
 
 export const app = express();
@@ -73,6 +77,10 @@ app.use("/warehouse-movements", warehouseMovementRoutes);
 app.use("/portal", poNegotiationPortalRoutes);
 app.use("/portal", poShipmentPortalRoutes);
 app.use("/api/unmatched-inbound-emails", unmatchedInboundEmailRoutes);
+app.use("/departments", departmentRoutes);
+app.use("/positions", positionRoutes);
+app.use("/employees", employeeRoutes);
+app.use("/payroll", payrollRoutes);
 
 app.use(notFoundHandler);
 app.use(errorHandler);

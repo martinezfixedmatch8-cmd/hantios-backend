@@ -157,6 +157,14 @@ export interface DomainEventPayloads {
   ReceiptDeliveryRequested: { businessId: string; receiptId: string; attemptId: string; channel: string };
   ReceiptDeliverySucceeded: { businessId: string; receiptId: string; attemptId: string; channel: string };
   ReceiptDeliveryFailed: { businessId: string; receiptId: string; attemptId: string; channel: string };
+  // Module 12 Session A (Payroll). Publish-only, no dispatch, same standing
+  // rule as every event above.
+  EmployeeCreated: { businessId: string; employeeId: string; name: string; occurredAt: string };
+  EmployeeUpdated: { businessId: string; employeeId: string; name: string; occurredAt: string };
+  EmployeeArchived: { businessId: string; employeeId: string; name: string; occurredAt: string };
+  EmployeeCompensationCreated: { businessId: string; employeeId: string; compensationId: string; compensationModel: string };
+  PayrollRecordCreated: { businessId: string; payrollRecordId: string; employeeId: string; periodYear: number; periodMonth: number };
+  PayrollMarkedPaid: { businessId: string; payrollRecordId: string; employeeId: string; amount: string };
 }
 
 export type DomainEventName = keyof DomainEventPayloads;

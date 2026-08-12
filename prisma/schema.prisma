@@ -76,6 +76,7 @@ model branches {
   users_users_branch_idTobranches  users[]                     @relation("users_branch_idTobranches")
   warehouse_movements              warehouse_movements[]
   receipt_delivery_attempts        receipt_delivery_attempts[]
+  employees                        employees[]
 
   @@index([business_id])
 }
@@ -164,6 +165,12 @@ model businesses {
   receipt_number_counters             receipt_number_counters[]
   receipts                            receipts[]
   receipt_delivery_attempts           receipt_delivery_attempts[]
+  // Module 12 Session A (Payroll)
+  departments                         departments[]
+  positions                           positions[]
+  employees                           employees[]
+  employee_compensation               employee_compensation[]
+  payroll_records                     payroll_records[]
   sales                               sales[]
   sessions                            sessions[]
   staff_invites                       staff_invites[]
@@ -744,6 +751,7 @@ model payment_methods {
   debt_payments       debt_payments[]
   expenses            expenses[]
   po_advance_payments po_advance_payments[]
+  payroll_records     payroll_records[]
 
   @@index([business_id])
 }
@@ -2106,6 +2114,8 @@ model users {
   warehouse_movements                           warehouse_movements[]
   receipts                                      receipts[]
   receipt_delivery_attempts                     receipt_delivery_attempts[]
+  employee_compensation                         employee_compensation[]
+  payroll_records                               payroll_records[]
   po_secure_links_created_byTousers             po_secure_links[]                    @relation("po_secure_links_created_byTousers")
   po_secure_links_revoked_byTousers             po_secure_links[]                    @relation("po_secure_links_revoked_byTousers")
   po_negotiation_internal_notes                 po_negotiation_internal_notes[]
@@ -2618,6 +2628,9 @@ model unmatched_inbound_emails {
 // Sale now carries two numbers (its old sales.receipt_id and this
 // module's own receipt_number); this is a deliberate, confirmed
 // coexistence, not an oversight.
+// Module 12 Session A: `payroll` is the 7th confirmed type, added by
+// extending this same table rather than a parallel receipt/delivery
+// mechanism -- exactly the extensibility this table was designed for.
 enum ReceiptType {
   sale
   refund
@@ -2625,6 +2638,7 @@ enum ReceiptType {
   warehouse_stock_out
   supplier_goods_received
   po_settlement
+  payroll
 }
 
 // VOID/REFUND never delete or mutate the historical receipt record --
@@ -2689,6 +2703,10 @@ model receipts {
   warehouse_movement_id     String?
   goods_received_note_id    String?
   purchase_order_payment_id String?
+  // Module 12 Session A -- 7th source column, same sparse-FK/partial-
+  // unique-index treatment as the five above (see ux_receipts_source_payroll
+  // in the migration, and the extended chk_receipts_exactly_one_source).
+  payroll_record_id         String?
   // Set only on a `refund` receipt, pointing back at the ORIGINAL Sale
   // Receipt it corrects. The original is never mutated financially --
   // only its own `status` above moves to refunded/partially_refunded.
@@ -2728,6 +2746,7 @@ model receipts {
   warehouse_movements       warehouse_movements?        @relation(fields: [warehouse_movement_id], references: [id])
   goods_received_notes      goods_received_notes?       @relation(fields: [goods_received_note_id], references: [id])
   purchase_order_payments   purchase_order_payments?    @relation(fields: [purchase_order_payment_id], references: [id])
+  payroll_records           payroll_records?            @relation(fields: [payroll_record_id], references: [id])
   receipts                  receipts?                   @relation("receipts_refund", fields: [refund_of_receipt_id], references: [id])
   other_receipts            receipts[]                  @relation("receipts_refund")
   receipt_delivery_attempts receipt_delivery_attempts[]
@@ -2784,6 +2803,11 @@ model receipt_delivery_attempts {
   // join" precedent -- a later customer phone-number edit must never
   // silently rewrite what a historical delivery attempt says it sent to.
   customer_id    String?
+  // Module 12 Session A -- the SAME WhatsApp shape, for a Payroll Receipt's
+  // real recipient (the employee, never a customer). phone_snapshot stays
+  // the one shared field either way -- it was already generic in meaning
+  // ("the phone this specific attempt was sent to"), not customer-specific.
+  employee_id    String?
   phone_snapshot String?
   // POS_PRINT-only: execution context, not an external recipient. No POS
   // terminal/device-ID column -- no such concept exists anywhere in this
@@ -2794,9 +2818,199 @@ model receipt_delivery_attempts {
   receipts       receipts               @relation(fields: [receipt_id], references: [id])
   users          users                  @relation(fields: [requested_by], references: [id])
   customers      customers?             @relation(fields: [customer_id], references: [id])
+  employees      employees?             @relation(fields: [employee_id], references: [id])
   branches       branches?              @relation(fields: [branch_id], references: [id])
 
   @@unique([receipt_id, attempt_number])
   @@index([business_id])
   @@index([receipt_id])
+}
+
+// ============================================================================
+// Module 12 Session A -- Payroll Core (Phase 0 confirmed 2026-08-12)
+// ============================================================================
+//
+// Employee is a genuinely NEW, separate concept from users -- confirmed both
+// by repo research (users requires email/login/RBAC, which payroll
+// employees like a security guard or driver often don't have) and
+// independently by the spec's own illustrative schema sketch, which already
+// modeled `employees` as distinct from `users`. Position (the employee's
+// actual job) is kept fully independent from RBAC role (system permission)
+// -- the same person can have any combination of the two, never inferred
+// from one another (addendum, confirmed).
+
+// 8 recognized values, only FIXED_MONTHLY has real calculation logic this
+// session -- the other 7 exist so Session B (Attendance/HOURLY/
+// FIXED_PLUS_TIME) and Session C (Sales Attribution/PERCENTAGE/
+// FIXED_PLUS_PERCENTAGE/PIECE_RATE/CONTRACT/CUSTOM) can build on top
+// without a schema rewrite. Kept UPPERCASE_SNAKE exactly as the locked spec
+// itself wrote them (a deliberate exception to this schema's general
+// lowercase-enum convention, same reasoning already applied to Incoterm/
+// NotificationCategory/SenderProfile -- an externally-dictated fixed
+// vocabulary, not invented internal casing).
+enum CompensationModel {
+  FIXED_MONTHLY
+  HOURLY
+  PERCENTAGE
+  FIXED_PLUS_PERCENTAGE
+  FIXED_PLUS_TIME
+  PIECE_RATE
+  CONTRACT
+  CUSTOM
+}
+
+enum PayrollRecordStatus {
+  pending
+  paid
+}
+
+// Plain, business-managed reference data -- NOT a hardcoded enum, mirrors
+// `categories`' own precedent exactly (flat lookup, no @@unique on name,
+// same reasoning: this is deliberately minimal foundation, not a
+// department-management feature). Session A ships create+list only, no
+// update/archive -- "no department-management UI workflow" per the
+// addendum's own explicit scope boundary.
+model departments {
+  id          String      @id
+  business_id String
+  name        String
+  created_at  DateTime    @default(now())
+  businesses  businesses  @relation(fields: [business_id], references: [id])
+  positions   positions[]
+  employees   employees[]
+
+  @@index([business_id])
+}
+
+// Position = the employee's actual job (Salesperson, Driver, Manager) --
+// deliberately never conflated with RBAC role (Owner/Manager/Cashier/etc,
+// see users.role). department_id is optional: a position doesn't strictly
+// require a department. No automatic compensation or commission inference
+// from title anywhere in this session's own code -- confirmed, addendum.
+model positions {
+  id            String       @id
+  business_id   String
+  department_id String?
+  title         String
+  created_at    DateTime     @default(now())
+  businesses    businesses   @relation(fields: [business_id], references: [id])
+  departments   departments? @relation(fields: [department_id], references: [id])
+  employees     employees[]
+
+  @@index([business_id])
+  @@index([department_id])
+}
+
+/// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
+model employees {
+  id                        String                      @id
+  business_id               String
+  // Business-wide if null -- same precedent as expenses.branch_id, not a
+  // new pattern.
+  branch_id                 String?
+  name                      String
+  phone                     String
+  department_id             String?
+  position_id               String?
+  // active/archived -- an archived employee is excluded from future
+  // monthly payroll generation (still fully visible in permanent history).
+  status                    RecordStatus                @default(active)
+  version                   Int                         @default(0)
+  created_at                DateTime                    @default(now())
+  updated_at                DateTime                    @updatedAt
+  businesses                businesses                  @relation(fields: [business_id], references: [id])
+  branches                  branches?                   @relation(fields: [branch_id], references: [id])
+  departments               departments?                @relation(fields: [department_id], references: [id])
+  positions                 positions?                  @relation(fields: [position_id], references: [id])
+  employee_compensation     employee_compensation[]
+  payroll_records           payroll_records[]
+  receipt_delivery_attempts receipt_delivery_attempts[]
+
+  @@index([business_id, status])
+  @@index([branch_id])
+}
+
+// Effective-dated compensation structure -- Policy Snapshot principle, same
+// as costPriceAtSale/debts' interest-policy snapshot/PO's supplier
+// snapshots: a payroll record captures whichever row was actually effective
+// for its period at GENERATION time (see payroll_records.compensation_id),
+// and a later compensation change here must NEVER rewrite an
+// already-generated payroll record. effective_to is null while this is the
+// CURRENT structure; creating a new row for an employee atomically closes
+// out whatever was previously current (see employeeCompensation.service.ts)
+// -- a non-overlapping timeline, never two simultaneously-active rows for
+// one employee.
+//
+// compensation_config is Zod-validated at the API boundary
+// (compensation.schema.ts) -- this session's own endpoint only ever
+// accepts compensationModel: "FIXED_MONTHLY" (a Zod literal, not the full
+// enum), so no other model's config can be written through any code path
+// that exists yet. currency_code is snapshotted from Business.currency at
+// the moment this structure is created -- never re-derived later.
+/// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
+model employee_compensation {
+  id                  String            @id
+  business_id         String
+  employee_id         String
+  compensation_model  CompensationModel
+  effective_from      DateTime          @db.Date
+  effective_to        DateTime?         @db.Date
+  currency_code       String
+  compensation_config Json
+  created_by          String
+  created_at          DateTime          @default(now())
+  businesses          businesses        @relation(fields: [business_id], references: [id])
+  employees           employees         @relation(fields: [employee_id], references: [id])
+  users               users             @relation(fields: [created_by], references: [id])
+  payroll_records     payroll_records[]
+
+  @@index([business_id, employee_id, effective_from])
+}
+
+// One record per employee per calendar month -- @@unique below is a REAL,
+// sufficient, non-partial composite unique constraint (unlike Module 06's
+// receipts table): employee_id/period_year/period_month are all NOT NULL
+// always here, so Postgres's NULL<>NULL gotcha (the reason Module 06
+// needed 5 PARTIAL indexes) simply doesn't apply -- a plain @@unique is the
+// correct, sufficient DB-level guard for "one payroll record per employee
+// per month." Layered on top: mark-as-paid is its own atomic guarded
+// updateMany (WHERE status='pending'), the same Final-State-Protection
+// shape as Sale Void/Refund -- that's what actually blocks a duplicate
+// PAYMENT (two requests racing to pay the same still-pending record).
+//
+// compensation_model/amount/currency_code are all SNAPSHOTS, taken at
+// generation time from whichever employee_compensation row was effective
+// for this period -- never re-read live. A later compensation change (or
+// even a later Business.currency change) must never alter an
+// already-generated payroll record's own figures.
+/// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
+model payroll_records {
+  id                    String                @id
+  business_id           String
+  employee_id           String
+  period_year           Int
+  period_month          Int
+  // Traceability only -- which compensation structure was actually
+  // effective when this record was generated.
+  compensation_id       String
+  compensation_model    CompensationModel
+  amount                Decimal               @db.Decimal(14, 2)
+  currency_code         String
+  status                PayrollRecordStatus   @default(pending)
+  payment_method_id     String?
+  payment_reference     String?
+  paid_at               DateTime?
+  paid_by               String?
+  created_at            DateTime              @default(now())
+  version               Int                   @default(0)
+  businesses            businesses            @relation(fields: [business_id], references: [id])
+  employees             employees             @relation(fields: [employee_id], references: [id])
+  employee_compensation employee_compensation @relation(fields: [compensation_id], references: [id])
+  payment_methods       payment_methods?      @relation(fields: [payment_method_id], references: [id])
+  users                 users?                @relation(fields: [paid_by], references: [id])
+  receipts              receipts[]
+
+  @@unique([business_id, employee_id, period_year, period_month])
+  @@index([business_id, status])
+  @@index([business_id, period_year, period_month])
 }
