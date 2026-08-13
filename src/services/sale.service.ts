@@ -19,7 +19,7 @@ import {
 import { applyStockAlertTransition } from "../lib/stockAlerts";
 import type { PendingStockAlertEvent } from "../lib/stockAlerts";
 import { findOrCreateCustomer } from "./customer.service";
-import type { CreateSaleInput, ListSalesQuery, VoidSaleInput, RefundSaleInput, SetSaleAttributionInput } from "../validation/sale.schema";
+import type { CreateSaleInput, ListSalesQuery, VoidSaleInput, RefundSaleInput, RefundSaleLineInput, SetSaleAttributionInput } from "../validation/sale.schema";
 
 interface Actor {
   userId: string;
@@ -564,6 +564,41 @@ export async function voidSale(saleId: string, input: VoidSaleInput, actor: Acto
   return voided;
 }
 
+// Sale Refund, Partial Refund & Inventory Restoration -- one 0-based
+// lineIndex into the ORIGINAL sale's own immutable `items` array,
+// normalized to a canonical {returnedQuantity, restockableQuantity,
+// writeOffQuantity} shape regardless of which of the two input shapes
+// (simple boolean vs. explicit mixed quantity) the client sent. Pure,
+// no DB access -- runs before the transaction.
+interface NormalizedRefundLine {
+  lineIndex: number;
+  returnedQuantity: Prisma.Decimal;
+  restockableQuantity: Prisma.Decimal;
+  writeOffQuantity: Prisma.Decimal;
+}
+
+function normalizeRefundLines(inputLines: RefundSaleLineInput[], items: SaleLineSnapshot[]): NormalizedRefundLine[] {
+  const seen = new Set<number>();
+  return inputLines.map((line) => {
+    if (line.lineIndex < 0 || line.lineIndex >= items.length) {
+      throw badRequest(`lineIndex ${line.lineIndex} is out of range for this sale's ${items.length} line item(s)`);
+    }
+    if (seen.has(line.lineIndex)) {
+      throw badRequest(`Duplicate lineIndex ${line.lineIndex} in refund request`);
+    }
+    seen.add(line.lineIndex);
+
+    const returnedQuantity = new Prisma.Decimal(line.returnedQuantity);
+    const restockableQuantity = "restockable" in line ? (line.restockable ? returnedQuantity : new Prisma.Decimal(0)) : new Prisma.Decimal(line.restockableQuantity);
+    if (restockableQuantity.greaterThan(returnedQuantity)) {
+      throw badRequest(`restockableQuantity cannot exceed returnedQuantity for lineIndex ${line.lineIndex}`);
+    }
+    const writeOffQuantity = returnedQuantity.minus(restockableQuantity);
+
+    return { lineIndex: line.lineIndex, returnedQuantity, restockableQuantity, writeOffQuantity };
+  });
+}
+
 export async function refundSale(saleId: string, input: RefundSaleInput, actor: Actor, idempotencyKey: string) {
   const sale = await getOwned(prisma.sales.findUnique({ where: { id: saleId } }), actor.businessId, "Sale");
 
@@ -572,31 +607,136 @@ export async function refundSale(saleId: string, input: RefundSaleInput, actor: 
     throw badRequest("Sale cannot be refunded on the same business day it was created; use Void instead");
   }
 
+  const items = sale.items as unknown as SaleLineSnapshot[];
+  const normalizedLines = normalizeRefundLines(input.items, items);
+
+  // Batch-fetched upfront, same reasoning as Void's own voidProductMap --
+  // min_stock_level is needed per restocked line to check for a stock
+  // recovery, and the sale's own item snapshot doesn't carry it.
+  const touchedProductIds = normalizedLines.map((l) => items[l.lineIndex].productId);
+  const refundProducts = await prisma.products.findMany({ where: { id: { in: touchedProductIds } } });
+  const refundProductMap = new Map(refundProducts.map((p) => [p.id, p]));
+  const stockAlertEvents: PendingStockAlertEvent[] = [];
+
   const refundResult = await prisma.$transaction(async (tx) => {
     await claimIdempotencyKey(tx, actor.businessId, idempotencyKey, refundSaleEndpoint(saleId));
 
-    // Same atomic guard shape as Void -- covers already-voided, already-
-    // refunded, and concurrent-modification in one statement. The original
-    // row's financial fields (subtotal/discount/tax_amount/total/profit/items)
-    // are never written here; only status + version change (Rule #3's
-    // "never modify the original Sale" is about the financial record, not
-    // lifecycle metadata -- see the Session 3B plan for the full reasoning).
-    const result = await tx.sales.updateMany({
-      where: { id: saleId, business_id: actor.businessId, version: input.version, status: "completed" },
-      data: { status: "refunded", version: { increment: 1 } },
-    });
-    if (result.count === 0) {
-      throw conflict("Sale is not in a refundable state (already voided/refunded, or was modified concurrently)");
+    // Row-level lock on the original sale -- serializes any two concurrent
+    // refund attempts against the SAME sale so the remaining-refundable-
+    // quantity check below can never race (two simultaneous partial
+    // refunds each reading "enough remains" and together over-refunding).
+    // A standard Postgres transactional row lock, not the advisory-lock
+    // approach already tried and abandoned elsewhere in this repo (Module
+    // 11 Session B) for an unrelated table.
+    await tx.$queryRaw`SELECT id FROM sales WHERE id = ${saleId} FOR UPDATE`;
+
+    // Re-fetch INSIDE the lock -- must see truly committed state, never the
+    // pre-transaction read above, which could already be stale.
+    const lockedSale = await tx.sales.findUniqueOrThrow({ where: { id: saleId } });
+    if (lockedSale.version !== input.version) {
+      throw conflict("Sale was modified concurrently, please retry with the latest version");
     }
+    if (lockedSale.status !== "completed" && lockedSale.status !== "partially_refunded") {
+      throw conflict("Sale is not in a refundable state (already fully refunded/voided, or was modified concurrently)");
+    }
+
+    // Remaining-refundable-quantity, computed from sale_refund_items'
+    // own persisted history -- never from a cached/denormalized value that
+    // could drift. business_id repeated here as a defense-in-depth scope
+    // even though sale_id is already confirmed owned above (matches this
+    // repo's own receipt_delivery_attempts precedent for the same reasoning).
+    const existingRefundItems = await tx.sale_refund_items.findMany({
+      where: { business_id: actor.businessId, sale_refunds: { sale_id: saleId } },
+    });
+    const alreadyRefunded = new Map<number, Prisma.Decimal>();
+    for (const r of existingRefundItems) {
+      alreadyRefunded.set(r.line_index, (alreadyRefunded.get(r.line_index) ?? new Prisma.Decimal(0)).plus(r.returned_quantity));
+    }
+
+    for (const line of normalizedLines) {
+      const original = items[line.lineIndex];
+      const originalQty = new Prisma.Decimal(original.quantity);
+      const already = alreadyRefunded.get(line.lineIndex) ?? new Prisma.Decimal(0);
+      const remaining = originalQty.minus(already);
+      if (line.returnedQuantity.greaterThan(remaining)) {
+        throw badRequest(`Cannot refund ${line.returnedQuantity.toString()} of "${original.productName}" (lineIndex ${line.lineIndex}) -- only ${remaining.toString()} remains refundable`);
+      }
+    }
+
+    // Whole-sale exhaustion, across EVERY line of the original sale (not
+    // just the lines touched by this event) -- partially_refunded is a
+    // derived business/UI state, computed here from the same
+    // sale_refund_items history that is the real source of truth.
+    const projectedRefunded = new Map(alreadyRefunded);
+    for (const line of normalizedLines) {
+      projectedRefunded.set(line.lineIndex, (projectedRefunded.get(line.lineIndex) ?? new Prisma.Decimal(0)).plus(line.returnedQuantity));
+    }
+    const fullyRefunded = items.every((item, idx) => (projectedRefunded.get(idx) ?? new Prisma.Decimal(0)).greaterThanOrEqualTo(new Prisma.Decimal(item.quantity)));
+    const newStatus: "refunded" | "partially_refunded" = fullyRefunded ? "refunded" : "partially_refunded";
+
+    // Same atomic guard shape as Void -- covers already-voided, already-
+    // fully-refunded, and concurrent-modification in one statement. Belt-
+    // and-suspenders alongside the early lockedSale check above (matching
+    // Purchase Orders' own established "JS pre-check in addition to the
+    // atomic guard" pattern). The original row's financial fields
+    // (subtotal/discount/tax_amount/total/profit/items) are never written
+    // here; only status + version change (Rule #3's "never modify the
+    // original Sale" is about the financial record, not lifecycle metadata).
+    const guardResult = await tx.sales.updateMany({
+      where: { id: saleId, business_id: actor.businessId, version: input.version, status: { in: ["completed", "partially_refunded"] } },
+      data: { status: newStatus, version: { increment: 1 } },
+    });
+    if (guardResult.count === 0) {
+      throw conflict("Sale is not in a refundable state (already fully refunded/voided, or was modified concurrently)");
+    }
+
+    // Per-line proration of this event's own refunded portion, using the
+    // SAME "round once at the point first computed, sum the rounded
+    // values" discipline Sale Creation's own line-item-subtotal fix
+    // established -- each original line already carries its own immutable
+    // snapshot for its FULL original quantity, prorated down by
+    // returnedQuantity/originalQuantity for a partial-quantity return.
+    const computedLines = normalizedLines.map((line) => {
+      const original = items[line.lineIndex];
+      const originalQty = new Prisma.Decimal(original.quantity);
+      const fraction = line.returnedQuantity.dividedBy(originalQty);
+      const refundLineSubtotal = new Prisma.Decimal(original.lineSubtotal).mul(fraction).toDecimalPlaces(2, Prisma.Decimal.ROUND_HALF_UP);
+      const refundLineDiscount = new Prisma.Decimal(original.discount).mul(fraction).toDecimalPlaces(2, Prisma.Decimal.ROUND_HALF_UP);
+      const refundLineTax = new Prisma.Decimal(original.tax).mul(fraction).toDecimalPlaces(2, Prisma.Decimal.ROUND_HALF_UP);
+      const refundLineProfit = new Prisma.Decimal(original.profit).mul(fraction).toDecimalPlaces(2, Prisma.Decimal.ROUND_HALF_UP);
+      return { ...line, original, refundLineSubtotal, refundLineDiscount, refundLineTax, refundLineProfit };
+    });
+
+    const refundSubtotal = computedLines.reduce((sum, l) => sum.plus(l.refundLineSubtotal), new Prisma.Decimal(0));
+    const refundDiscount = computedLines.reduce((sum, l) => sum.plus(l.refundLineDiscount), new Prisma.Decimal(0));
+    const refundTax = computedLines.reduce((sum, l) => sum.plus(l.refundLineTax), new Prisma.Decimal(0));
+    const refundProfit = computedLines.reduce((sum, l) => sum.plus(l.refundLineProfit), new Prisma.Decimal(0));
+    const refundTotal = refundSubtotal.minus(refundDiscount).plus(refundTax);
+
+    const reversalItems: SaleLineSnapshot[] = computedLines.map((l) => ({
+      productId: l.original.productId,
+      productName: l.original.productName,
+      size: l.original.size,
+      quantity: l.returnedQuantity.toString(),
+      sellingPriceAtSale: l.original.sellingPriceAtSale,
+      costPriceAtSale: l.original.costPriceAtSale,
+      lineSubtotal: l.refundLineSubtotal.toString(),
+      discount: l.refundLineDiscount.toString(),
+      tax: l.refundLineTax.toString(),
+      profit: l.refundLineProfit.toString(),
+    }));
 
     const receiptNumber = await getNextReceiptNumber(tx, actor.businessId, business.timezone);
 
     // Financial reversal: a brand-new sales row, self-linked via the
-    // already-existing refund_of_sale_id column, every money figure negated
-    // 1:1 so `total = subtotal - discount + tax` still holds for this row too.
-    // chk_sales_total_nonneg already permits total < 0 specifically when
-    // refund_of_sale_id is set -- confirmed by reading the live constraint
-    // before this session, not assumed.
+    // already-existing refund_of_sale_id column, SCOPED to just this
+    // event's own refunded lines/quantities (never the whole original
+    // sale) -- every money figure negated 1:1 so `total = subtotal -
+    // discount + tax` still holds for this row too. Each refund event gets
+    // its OWN reversal row, which is what lets Receipts/Customer
+    // total_spent/Commission's getEligibleSalesForPeriod keep working
+    // completely unchanged. chk_sales_total_nonneg already permits total <
+    // 0 specifically when refund_of_sale_id is set.
     const reversal = await tx.sales.create({
       data: {
         id: generateId(),
@@ -605,15 +745,15 @@ export async function refundSale(saleId: string, input: RefundSaleInput, actor: 
         cashier_id: actor.userId,
         customer_phone: sale.customer_phone,
         customer_id: sale.customer_id,
-        items: sale.items as unknown as Prisma.InputJsonValue,
-        subtotal: sale.subtotal.negated(),
-        discount: sale.discount.negated(),
+        items: reversalItems as unknown as Prisma.InputJsonValue,
+        subtotal: refundSubtotal.negated(),
+        discount: refundDiscount.negated(),
         discount_type: sale.discount_type,
-        tax_amount: sale.tax_amount.negated(),
-        total: sale.total.negated(),
+        tax_amount: refundTax.negated(),
+        total: refundTotal.negated(),
         payment_method_id: sale.payment_method_id,
         payment_reference: sale.payment_reference,
-        profit: sale.profit.negated(),
+        profit: refundProfit.negated(),
         receipt_id: receiptNumber,
         status: "refunded",
         refund_of_sale_id: sale.id,
@@ -629,11 +769,101 @@ export async function refundSale(saleId: string, input: RefundSaleInput, actor: 
       },
     });
 
+    const saleRefundId = generateId();
+    await tx.sale_refunds.create({
+      data: {
+        id: saleRefundId,
+        business_id: actor.businessId,
+        sale_id: saleId,
+        reversal_sale_id: reversal.id,
+        reason: input.reason,
+        created_by: actor.userId,
+      },
+    });
+    for (const line of computedLines) {
+      await tx.sale_refund_items.create({
+        data: {
+          id: generateId(),
+          business_id: actor.businessId,
+          sale_refund_id: saleRefundId,
+          line_index: line.lineIndex,
+          product_id: line.original.productId,
+          returned_quantity: line.returnedQuantity,
+          restockable_quantity: line.restockableQuantity,
+          write_off_quantity: line.writeOffQuantity,
+          unit_cost_snapshot: new Prisma.Decimal(line.original.costPriceAtSale),
+        },
+      });
+    }
+
+    // Restore inventory ONLY for the restockable portion of each line,
+    // using that line's own original cost snapshot (never a fresh product
+    // lookup) and the ORIGINAL sale's own branch (never the actor's
+    // current branch) -- reusing Void's exact per-line restoration pattern
+    // (findFirst -> atomic guarded updateMany -> re-read committed state
+    // -> stock-alert transition -> a positive inventory_adjustments row),
+    // never a duplicated mechanism. The write-off portion touches no
+    // inventory at all.
+    for (const line of computedLines) {
+      if (line.restockableQuantity.lessThanOrEqualTo(0)) continue;
+
+      const row = await tx.branch_inventory.findFirst({
+        where: { business_id: actor.businessId, branch_id: sale.branch_id, product_id: line.original.productId, size: line.original.size },
+        orderBy: { id: "asc" },
+      });
+      if (!row) {
+        throw conflict(`No stock record found to restore for product "${line.original.productName}"`);
+      }
+      const restoreResult = await tx.branch_inventory.updateMany({
+        where: { id: row.id },
+        data: { quantity: { increment: line.restockableQuantity }, version: { increment: 1 }, last_updated: new Date() },
+      });
+      if (restoreResult.count === 0) {
+        throw conflict(`Failed to restore stock for product "${line.original.productName}"`);
+      }
+
+      const committedRow = await tx.branch_inventory.findUniqueOrThrow({ where: { id: row.id } });
+      const restoredQuantity = committedRow.quantity;
+      const quantityBefore = restoredQuantity.minus(line.restockableQuantity);
+      const product = refundProductMap.get(line.original.productId);
+      const stockEvent = await applyStockAlertTransition(tx, {
+        businessId: actor.businessId,
+        branchId: sale.branch_id,
+        productId: line.original.productId,
+        branchInventoryId: row.id,
+        wasActive: committedRow.low_stock_alert_active,
+        minStockLevel: product?.min_stock_level ?? null,
+        quantityAfter: restoredQuantity,
+        direction: "increase",
+      });
+      if (stockEvent) stockAlertEvents.push(stockEvent);
+
+      // adjustment_amount must stay positive (CHECK chk_inventory_adj_amount_positive)
+      // -- mirrors Void's own restoration ledger row shape exactly.
+      await tx.inventory_adjustments.create({
+        data: {
+          id: generateId(),
+          business_id: actor.businessId,
+          product_id: line.original.productId,
+          branch_id: sale.branch_id,
+          quantity_before: quantityBefore,
+          quantity_after: restoredQuantity,
+          adjustment_amount: line.restockableQuantity,
+          adjustment_type: "refund_restock",
+          packaging_level: "each",
+          sale_id: sale.id,
+          reason: `Refund restock of sale ${sale.id}: ${line.restockableQuantity.toString()} of "${line.original.productName}"`,
+          adjusted_by: actor.userId,
+        },
+      });
+    }
+
     // Module 06 (Receipt System) -- the original's own Sale Receipt moves to
-    // `refunded` (never mutated financially), and a brand-new Refund Receipt
-    // is generated for the reversal event itself, linked back via
-    // refund_of_receipt_id. Both happen inside this same transaction.
-    await markSaleReceiptRefunded(tx, actor.businessId, sale.id);
+    // `partially_refunded` or the terminal `refunded` (never mutated
+    // financially), and a brand-new Refund Receipt is generated for THIS
+    // event's own scoped reversal, linked back via refund_of_receipt_id.
+    // All inside this same transaction.
+    await markSaleReceiptRefunded(tx, actor.businessId, sale.id, fullyRefunded);
     const originalReceipt = await tx.receipts.findFirst({
       where: { business_id: actor.businessId, sale_id: sale.id, receipt_type: "sale" },
     });
@@ -654,20 +884,15 @@ export async function refundSale(saleId: string, input: RefundSaleInput, actor: 
       taxAmount: reversal.tax_amount,
       feeAmount: reversal.fee_amount,
       total: reversal.total,
-      snapshot: buildRefundReceiptSnapshot(
-        business,
-        sale.items as unknown as SaleLineSnapshot[],
-        refundPaymentMethodName,
-        originalReceipt?.receipt_number ?? sale.receipt_id ?? sale.id
-      ),
+      snapshot: buildRefundReceiptSnapshot(business, reversalItems, refundPaymentMethodName, originalReceipt?.receipt_number ?? sale.receipt_id ?? sale.id),
       createdBy: actor.userId,
       refundOfReceiptId: originalReceipt?.id,
     });
 
     // reversal.total is already negated -- incrementing by it naturally nets
-    // total_spent back down by the refunded amount. No fresh customer lookup
-    // here: customer_id is copied straight from the original sale above,
-    // never re-derived from customer_phone.
+    // total_spent back down by THIS event's own refunded amount. No fresh
+    // customer lookup here: customer_id is copied straight from the
+    // original sale above, never re-derived from customer_phone.
     if (reversal.customer_id) {
       await tx.customers.updateMany({
         where: { id: reversal.customer_id },
@@ -686,7 +911,7 @@ export async function refundSale(saleId: string, input: RefundSaleInput, actor: 
       action: "sale.refunded",
       entityType: "sale",
       entityId: sale.id,
-      reason: `${input.reason} (refund receipt ${receiptNumber}, ${reversal.total.toString()} ${business.currency})`,
+      reason: `${input.reason} (refund receipt ${receiptNumber}, ${reversal.total.toString()} ${business.currency}, ${fullyRefunded ? "fully refunded" : "partially refunded"})`,
     });
 
     const responseBody = JSON.parse(JSON.stringify({ data: reversal })) as unknown;
@@ -709,6 +934,9 @@ export async function refundSale(saleId: string, input: RefundSaleInput, actor: 
     receiptNumber: refundReceipt.receipt_number,
     receiptType: refundReceipt.receipt_type,
   });
+  for (const event of stockAlertEvents) {
+    domainEvents.publish(event.name, event.payload);
+  }
 
   return refund;
 }

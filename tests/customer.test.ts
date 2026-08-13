@@ -357,7 +357,7 @@ describe("Customers (Module 05)", () => {
         .post(`/sales/${saleB.id}/refund`)
         .set("Authorization", `Bearer ${ownerToken}`)
         .set("Idempotency-Key", idemKey())
-        .send({ version: saleB.version, reason: "test refund" });
+        .send({ version: saleB.version, reason: "test refund", items: [{ lineIndex: 0, returnedQuantity: 1, restockable: false }] });
       expect(refundRes.status).toBe(201);
 
       customer = await prisma.customers.findUniqueOrThrow({ where: { id: customerId } });

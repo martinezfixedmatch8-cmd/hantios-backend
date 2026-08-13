@@ -656,7 +656,14 @@ describe("Sales", () => {
       return { sale, product };
     }
 
-    it("creates a financial-only reversal, preserves the original sale's financial figures, updates original status, and publishes RefundCreated", async () => {
+    // Sale Refund, Partial Refund & Inventory Restoration -- refund requests
+    // now require an explicit items[] array (no silent default for
+    // restockable). Tests below whose own intent is unrelated to partial/
+    // mixed behavior (RBAC, day-close, idempotency, concurrency, cross-
+    // business) refund the full quantity with restockable:false, keeping
+    // them financial-only, matching each test's own original framing.
+
+    it("creates a financial-only reversal, preserves the original sale's financial figures, updates original status to the terminal refunded, records sale_refunds/sale_refund_items, and publishes RefundCreated", async () => {
       const { sale, product } = await backdatedSale(ownerToken, 3, 10);
 
       let published: unknown = null;
@@ -668,7 +675,7 @@ describe("Sales", () => {
         .post(`/sales/${sale.id}/refund`)
         .set("Authorization", `Bearer ${ownerToken}`)
         .set("Idempotency-Key", idemKey())
-        .send({ version: sale.version, reason: "Product was defective" });
+        .send({ version: sale.version, reason: "Product was defective", items: [{ lineIndex: 0, returnedQuantity: 3, restockable: false }] });
 
       expect(res.status).toBe(201);
       const refund = res.body.data;
@@ -681,16 +688,25 @@ describe("Sales", () => {
       expect(refund.receipt_id).toMatch(/^INV-\d{4}-\d{6}$/);
 
       // Original sale's financial figures are untouched -- only status/version change.
+      // Fully refunded (all 3 of 3) -> terminal "refunded", not "partially_refunded".
       const originalAfter = await prisma.sales.findUniqueOrThrow({ where: { id: sale.id } });
       expect(originalAfter.status).toBe("refunded");
       expect(Number(originalAfter.subtotal)).toBe(Number(sale.subtotal));
       expect(Number(originalAfter.total)).toBe(Number(sale.total));
       expect(originalAfter.items).toEqual(sale.items);
 
-      // No inventory change -- refund is financial-only (still just the
-      // original sale's decrement, nothing added back).
+      // No inventory change -- restockable:false is a pure write-off (still
+      // just the original sale's decrement, nothing added back).
       const stock = await prisma.branch_inventory.findFirst({ where: { branch_id: branchId, product_id: product.id } });
       expect(Number(stock?.quantity)).toBe(7);
+
+      const saleRefund = await prisma.sale_refunds.findFirstOrThrow({ where: { sale_id: sale.id } });
+      expect(saleRefund.reversal_sale_id).toBe(refund.id);
+      const refundItems = await prisma.sale_refund_items.findMany({ where: { sale_refund_id: saleRefund.id } });
+      expect(refundItems).toHaveLength(1);
+      expect(Number(refundItems[0].returned_quantity)).toBe(3);
+      expect(Number(refundItems[0].restockable_quantity)).toBe(0);
+      expect(Number(refundItems[0].write_off_quantity)).toBe(3);
 
       const auditRows = await prisma.audit_logs.findMany({ where: { entity_id: sale.id, action: "sale.refunded" } });
       expect(auditRows).toHaveLength(1);
@@ -707,7 +723,7 @@ describe("Sales", () => {
         .post(`/sales/${sale.id}/refund`)
         .set("Authorization", `Bearer ${token}`)
         .set("Idempotency-Key", idemKey())
-        .send({ version: sale.version, reason: "x" });
+        .send({ version: sale.version, reason: "x", items: [{ lineIndex: 0, returnedQuantity: 3, restockable: false }] });
       expect(res.status).toBe(201);
     });
 
@@ -732,25 +748,26 @@ describe("Sales", () => {
         .post(`/sales/${sale.id}/refund`)
         .set("Authorization", `Bearer ${ownerToken}`)
         .set("Idempotency-Key", idemKey())
-        .send({ version: sale.version, reason: "Too soon" });
+        .send({ version: sale.version, reason: "Too soon", items: [{ lineIndex: 0, returnedQuantity: 1, restockable: false }] });
       expect(res.status).toBe(400);
     });
 
-    it("rejects refunding the same sale twice", async () => {
+    it("rejects refunding the same sale twice (already fully refunded)", async () => {
       const { sale } = await backdatedSale(ownerToken);
+      const items = [{ lineIndex: 0, returnedQuantity: 3, restockable: false }];
 
       const first = await request(app)
         .post(`/sales/${sale.id}/refund`)
         .set("Authorization", `Bearer ${ownerToken}`)
         .set("Idempotency-Key", idemKey())
-        .send({ version: sale.version, reason: "First refund" });
+        .send({ version: sale.version, reason: "First refund", items });
       expect(first.status).toBe(201);
 
       const second = await request(app)
         .post(`/sales/${sale.id}/refund`)
         .set("Authorization", `Bearer ${ownerToken}`)
         .set("Idempotency-Key", idemKey())
-        .send({ version: sale.version, reason: "Second refund" });
+        .send({ version: sale.version, reason: "Second refund", items });
       expect(second.status).toBe(409);
     });
 
@@ -771,7 +788,7 @@ describe("Sales", () => {
         .post(`/sales/${sale.id}/refund`)
         .set("Authorization", `Bearer ${ownerToken}`)
         .set("Idempotency-Key", idemKey())
-        .send({ version: voided.version, reason: "should be rejected" });
+        .send({ version: voided.version, reason: "should be rejected", items: [{ lineIndex: 0, returnedQuantity: 1, restockable: false }] });
       expect(refundRes.status).toBe(409);
     });
 
@@ -793,7 +810,7 @@ describe("Sales", () => {
         .post(`/sales/${otherSaleRes.body.data.id}/refund`)
         .set("Authorization", `Bearer ${ownerToken}`)
         .set("Idempotency-Key", idemKey())
-        .send({ version: 0, reason: "x" });
+        .send({ version: 0, reason: "x", items: [{ lineIndex: 0, returnedQuantity: 1, restockable: false }] });
       expect(res.status).toBe(404);
     });
 
@@ -809,7 +826,7 @@ describe("Sales", () => {
     it("replays the same response for a repeated Idempotency-Key, creating only one reversal", async () => {
       const { sale } = await backdatedSale(ownerToken);
       const key = idemKey();
-      const body = { version: sale.version, reason: "Testing replay" };
+      const body = { version: sale.version, reason: "Testing replay", items: [{ lineIndex: 0, returnedQuantity: 3, restockable: false }] };
 
       const first = await request(app)
         .post(`/sales/${sale.id}/refund`)
@@ -830,9 +847,9 @@ describe("Sales", () => {
       expect(reversals).toHaveLength(1);
     });
 
-    it("only lets one of two concurrent refund requests win", async () => {
+    it("only lets one of two concurrent refund requests win (row-level lock serializes them)", async () => {
       const { sale } = await backdatedSale(ownerToken);
-      const body = { version: sale.version, reason: "Concurrent refund" };
+      const body = { version: sale.version, reason: "Concurrent refund", items: [{ lineIndex: 0, returnedQuantity: 3, restockable: false }] };
 
       const [first, second] = await Promise.all([
         request(app).post(`/sales/${sale.id}/refund`).set("Authorization", `Bearer ${ownerToken}`).set("Idempotency-Key", idemKey()).send(body),
@@ -909,7 +926,7 @@ describe("Sales", () => {
         .post(`/sales/${refundable.id}/refund`)
         .set("Authorization", `Bearer ${token}`)
         .set("Idempotency-Key", idemKey())
-        .send({ version: refundable.version, reason: "super_admin refund" });
+        .send({ version: refundable.version, reason: "super_admin refund", items: [{ lineIndex: 0, returnedQuantity: 1, restockable: false }] });
       expect(refundRes.status).toBe(201);
     });
   });

@@ -72,6 +72,13 @@ export async function cleanupTestBusiness(businessId: string): Promise<void> {
   // so it must go before it (commission_adjustments' own sale_id is SET
   // NULL, already handled above, order-independent against sales).
   await prisma.sale_attribution_events.deleteMany({ where: { business_id: businessId } });
+  // Sale Refund, Partial Refund & Inventory Restoration -- sale_refund_items
+  // FKs to sale_refunds AND products (both RESTRICT), so it must go before
+  // sale_refunds; sale_refunds FKs to sales TWICE (sale_id AND
+  // reversal_sale_id, both RESTRICT), so it must go before the sales
+  // deletes below.
+  await prisma.sale_refund_items.deleteMany({ where: { business_id: businessId } });
+  await prisma.sale_refunds.deleteMany({ where: { business_id: businessId } });
   // Refund reversal rows self-reference their original sale via refund_of_sale_id
   // and carry a negative `total` -- chk_sales_total_nonneg only permits that while
   // the FK is still set, so delete them before their referenced row rather than

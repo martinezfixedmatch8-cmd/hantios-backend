@@ -39,11 +39,18 @@ export async function getEligibleSalesForPeriod(
   const periodStart = new Date(Date.UTC(periodYear, periodMonth - 1, 1));
   const periodEnd = new Date(Date.UTC(periodYear, periodMonth, 1)); // exclusive, next month's 1st
 
+  // Sale Refund, Partial Refund & Inventory Restoration -- an original sale
+  // now transitions to `partially_refunded` (not directly to the terminal
+  // `refunded`) after a partial refund event, so it must stay in this
+  // filter too, or a partially-refunded original sale would silently
+  // disappear from eligible sales entirely. Its own `total` is never
+  // rewritten regardless of refund status, so including it here still nets
+  // correctly against whatever negated reversal row(s) exist for it.
   const sales = await prisma.sales.findMany({
     where: {
       business_id: businessId,
       salesperson_employee_id: employeeId,
-      status: { in: ["completed", "refunded"] },
+      status: { in: ["completed", "refunded", "partially_refunded"] },
       timestamp: { gte: periodStart, lt: periodEnd },
     },
   });

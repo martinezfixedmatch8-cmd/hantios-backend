@@ -180,6 +180,9 @@ model businesses {
   compensation_policies                compensation_policies[]
   compensation_policy_acknowledgements compensation_policy_acknowledgements[]
   payroll_reversals                    payroll_reversals[]
+  // Sale Refund, Partial Refund & Inventory Restoration
+  sale_refunds                         sale_refunds[]
+  sale_refund_items                    sale_refund_items[]
   sales                               sales[]
   sessions                            sessions[]
   staff_invites                       staff_invites[]
@@ -808,6 +811,7 @@ model products {
   goods_received_items  goods_received_items[]
   warehouse_stock       warehouse_stock[]
   warehouse_movements   warehouse_movements[]
+  sale_refund_items     sale_refund_items[]
 
   @@index([business_id, barcode])
   @@index([business_id, created_at])
@@ -2035,6 +2039,12 @@ model sales {
   // sales.id) can be the source of at most one more (Refund type) -- see
   // receipts.sale_id's own comment for why one column safely covers both.
   receipts                        receipts[]
+  // Sale Refund, Partial Refund & Inventory Restoration -- the ORIGINAL sale
+  // may have many refund events over time (sale_refunds_as_original); a
+  // given reversal `sales` row is itself the scoped reversal for exactly
+  // one refund event (sale_refunds_as_reversal, @unique on the FK side).
+  sale_refunds_as_original         sale_refunds[]        @relation("sale_refunds_sale")
+  sale_refunds_as_reversal         sale_refunds?          @relation("sale_refunds_reversal")
 
   @@index([business_id, branch_id])
   @@index([business_id])
@@ -2042,6 +2052,71 @@ model sales {
   @@index([business_id, timestamp])
   @@index([customer_id])
   @@index([salesperson_employee_id])
+}
+
+// Sale Refund, Partial Refund & Inventory Restoration -- one row per refund
+// EVENT (not per line item; see sale_refund_items for the per-line detail).
+// Header+child shape, mirroring goods_received_notes/goods_received_items'
+// own precedent (a real event that bundles N line-level facts), not
+// debt_transactions/warehouse_movements' flat-ledger shape. The original
+// sale's own items/total/subtotal/etc. are NEVER rewritten by a refund
+// (Rule #3, unchanged) -- this table plus its own scoped reversal `sales`
+// row (reversal_sale_id) are what make partial + repeatable refunds
+// possible without ever touching the original's financial record.
+model sale_refunds {
+  id                String              @id
+  business_id       String
+  sale_id           String
+  // The reversal `sales` row created for THIS specific refund event --
+  // scoped to just the lines/quantities refunded this time (never the
+  // whole original sale, unlike the pre-partial-refund design). Each event
+  // gets its own reversal row, which is what lets Receipts/Customer
+  // total_spent/Commission's getEligibleSalesForPeriod keep working
+  // completely unchanged -- they already know how to net a
+  // status:"refunded" row with a negated total.
+  reversal_sale_id  String              @unique
+  reason            String
+  created_by        String
+  created_at        DateTime            @default(now())
+  businesses        businesses          @relation(fields: [business_id], references: [id])
+  sales_sale        sales               @relation("sale_refunds_sale", fields: [sale_id], references: [id])
+  sales_reversal    sales               @relation("sale_refunds_reversal", fields: [reversal_sale_id], references: [id])
+  users             users               @relation(fields: [created_by], references: [id])
+  sale_refund_items sale_refund_items[]
+
+  @@index([business_id])
+  @@index([sale_id])
+}
+
+// Per-line detail for one refund event. `line_index` is the 0-based
+// position within the ORIGINAL sale's own immutable `items` JSON array --
+// sales.items has no relational SaleItem table/id (confirmed via the
+// SaleLineSnapshot shape, no `id` field), so the array index is the stable
+// identity a refund line correlates back to; safe because the array is
+// never reordered/mutated after the sale is created. `write_off_quantity`
+// is a real, DB-enforced arithmetic derivation (returned - restockable),
+// not independently settable -- same "real arithmetic guarantee at the
+// database layer" precedent as chk_po_proforma_invoices_total_check.
+// unit_cost_snapshot is copied directly from that line's own
+// costPriceAtSale at refund time -- never the product's current cost.
+model sale_refund_items {
+  id                   String       @id
+  business_id          String
+  sale_refund_id       String
+  line_index           Int
+  product_id           String
+  returned_quantity    Decimal      @db.Decimal(14, 2)
+  restockable_quantity Decimal      @db.Decimal(14, 2)
+  write_off_quantity   Decimal      @db.Decimal(14, 2)
+  unit_cost_snapshot   Decimal      @db.Decimal(14, 2)
+  created_at           DateTime     @default(now())
+  businesses           businesses   @relation(fields: [business_id], references: [id])
+  sale_refunds         sale_refunds @relation(fields: [sale_refund_id], references: [id])
+  products             products     @relation(fields: [product_id], references: [id])
+
+  @@unique([sale_refund_id, line_index])
+  @@index([business_id])
+  @@index([sale_refund_id])
 }
 
 model sessions {
@@ -2149,6 +2224,7 @@ model users {
   compensation_policies                         compensation_policies[]
   compensation_policy_acknowledgements          compensation_policy_acknowledgements[]
   payroll_reversals                             payroll_reversals[]
+  sale_refunds                                  sale_refunds[]
   po_secure_links_created_byTousers             po_secure_links[]                    @relation("po_secure_links_created_byTousers")
   po_secure_links_revoked_byTousers             po_secure_links[]                    @relation("po_secure_links_revoked_byTousers")
   po_negotiation_internal_notes                 po_negotiation_internal_notes[]
@@ -2331,6 +2407,10 @@ enum AdjustmentType {
   transfer
   sale
   void
+  // Sale Refund, Partial Refund & Inventory Restoration -- restocking the
+  // resellable portion of a returned line, reusing Void's exact per-line
+  // inventory-restoration pattern (never a duplicated mechanism).
+  refund_restock
 }
 
 enum AuthProvider {
@@ -2490,6 +2570,12 @@ enum SaleStatus {
   completed
   void
   refunded
+  // Sale Refund, Partial Refund & Inventory Restoration -- a business/UI-
+  // facing state only, never the source of truth for remaining refundable
+  // quantity (sale_refund_items is). Set when at least one line still has
+  // quantity remaining after one or more refund events; flips to the
+  // terminal `refunded` once every line is fully exhausted.
+  partially_refunded
   draft
 }
 

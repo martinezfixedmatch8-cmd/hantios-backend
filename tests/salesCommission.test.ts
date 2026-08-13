@@ -238,7 +238,7 @@ describe("Module 12 Session C -- Sales Attribution & Commission Engine", () => {
         .post(`/sales/${sale.id}/refund`)
         .set("Authorization", `Bearer ${ownerToken}`)
         .set("Idempotency-Key", idemKey())
-        .send({ version: sale.version, reason: "Customer return" });
+        .send({ version: sale.version, reason: "Customer return", items: [{ lineIndex: 0, returnedQuantity: 1, restockable: false }] });
       expect(refundRes.status).toBe(201);
       expect(refundRes.body.data.salesperson_employee_id).toBe(employee.id);
 
@@ -290,7 +290,7 @@ describe("Module 12 Session C -- Sales Attribution & Commission Engine", () => {
         .post(`/sales/${sale.id}/refund`)
         .set("Authorization", `Bearer ${ownerToken}`)
         .set("Idempotency-Key", idemKey())
-        .send({ version: reloaded.version, reason: "same-period refund" });
+        .send({ version: reloaded.version, reason: "same-period refund", items: [{ lineIndex: 0, returnedQuantity: 2, restockable: false }] });
       expect(refundRes.status).toBe(201);
       await prisma.sales.update({ where: { id: sale.id }, data: { timestamp: midMonth(period, 10) } });
       await prisma.sales.update({ where: { id: refundRes.body.data.id }, data: { timestamp: midMonth(period, 12) } });
@@ -311,7 +311,7 @@ describe("Module 12 Session C -- Sales Attribution & Commission Engine", () => {
         .post(`/sales/${sale.id}/refund`)
         .set("Authorization", `Bearer ${ownerToken}`)
         .set("Idempotency-Key", idemKey())
-        .send({ version: reloaded.version, reason: "later-period refund" });
+        .send({ version: reloaded.version, reason: "later-period refund", items: [{ lineIndex: 0, returnedQuantity: 1, restockable: false }] });
       expect(refundRes.status).toBe(201);
       await prisma.sales.update({ where: { id: sale.id }, data: { timestamp: midMonth(originalPeriod) } });
       await prisma.sales.update({ where: { id: refundRes.body.data.id }, data: { timestamp: midMonth(refundPeriod) } });

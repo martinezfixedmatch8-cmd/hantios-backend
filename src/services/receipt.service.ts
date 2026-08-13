@@ -146,15 +146,19 @@ export async function markSaleReceiptVoided(tx: Prisma.TransactionClient, busine
   });
 }
 
-// Sale Refund is always a full reversal of the entire original sale in this
-// codebase (no partial-refund concept exists in Sale's own logic) -- so
-// this only ever sets `refunded`, never `partially_refunded`. That status
-// value stays schema-complete but deliberately unreachable this session,
-// same category as ExpenseWorkflowStatus.draft.
-export async function markSaleReceiptRefunded(tx: Prisma.TransactionClient, businessId: string, saleId: string): Promise<void> {
+// Sale Refund, Partial Refund & Inventory Restoration -- partially_refunded
+// is now reachable for real (previously schema-complete but deliberately
+// unreachable, same category as ExpenseWorkflowStatus.draft, since Sale's
+// own refund logic used to be a full reversal only). The WHERE clause
+// matches BOTH `issued` and `partially_refunded` -- a second (or third...)
+// partial refund event against the same sale must still be able to
+// transition the receipt further (partially_refunded -> partially_refunded,
+// or partially_refunded -> the terminal refunded), not silently no-op
+// because the receipt already left its original `issued` state.
+export async function markSaleReceiptRefunded(tx: Prisma.TransactionClient, businessId: string, saleId: string, fullyRefunded: boolean): Promise<void> {
   await tx.receipts.updateMany({
-    where: { business_id: businessId, sale_id: saleId, receipt_type: "sale", status: "issued" },
-    data: { status: "refunded" },
+    where: { business_id: businessId, sale_id: saleId, receipt_type: "sale", status: { in: ["issued", "partially_refunded"] } },
+    data: { status: fullyRefunded ? "refunded" : "partially_refunded" },
   });
 }
 

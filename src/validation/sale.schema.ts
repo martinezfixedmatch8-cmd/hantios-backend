@@ -76,8 +76,45 @@ export const voidSaleSchema = z.object({
 });
 export type VoidSaleInput = z.infer<typeof voidSaleSchema>;
 
+// Sale Refund, Partial Refund & Inventory Restoration -- there must be no
+// silent default for what happens to returned inventory (locked
+// requirement). Each refund line supports EITHER shape:
+//   - simple:  the entire returnedQuantity is uniformly resellable or not,
+//              expressed as a single required boolean.
+//   - mixed:   a client-computed split (some units resellable, some not),
+//              expressed as an explicit restockableQuantity.
+// Both are `.strict()` so Zod's union disambiguates purely on which keys
+// are present -- a client never sends both `restockable` and
+// `restockableQuantity` for the same line, and never both shapes at once.
+// The server never derives writeOffQuantity as client input (Section 9's
+// own "do not require the frontend to redundantly send both" instruction)
+// -- it's always computed server-side as returnedQuantity - restockableQuantity.
+const simpleRefundLineSchema = z
+  .object({
+    lineIndex: z.number().int().nonnegative(),
+    returnedQuantity: decimalField(z.coerce.number().positive()),
+    restockable: z.boolean(),
+  })
+  .strict();
+
+const mixedRefundLineSchema = z
+  .object({
+    lineIndex: z.number().int().nonnegative(),
+    returnedQuantity: decimalField(z.coerce.number().positive()),
+    restockableQuantity: decimalField(z.coerce.number().nonnegative()),
+  })
+  .strict()
+  .refine((line) => line.restockableQuantity <= line.returnedQuantity, {
+    message: "restockableQuantity cannot exceed returnedQuantity",
+    path: ["restockableQuantity"],
+  });
+
+export const refundSaleLineSchema = z.union([simpleRefundLineSchema, mixedRefundLineSchema]);
+export type RefundSaleLineInput = z.infer<typeof refundSaleLineSchema>;
+
 export const refundSaleSchema = z.object({
   version: z.number().int().nonnegative(),
   reason: z.string().trim().min(1).max(500),
+  items: z.array(refundSaleLineSchema).min(1),
 });
 export type RefundSaleInput = z.infer<typeof refundSaleSchema>;

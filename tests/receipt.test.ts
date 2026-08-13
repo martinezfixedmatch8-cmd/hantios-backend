@@ -140,7 +140,7 @@ describe("Module 06 -- Receipt System", () => {
         .post(`/sales/${sale.id}/refund`)
         .set("Authorization", `Bearer ${ownerToken}`)
         .set("Idempotency-Key", idemKey())
-        .send({ version: sale.version, reason: "test refund" });
+        .send({ version: sale.version, reason: "test refund", items: [{ lineIndex: 0, returnedQuantity: 1, restockable: false }] });
       expect(refundRes.status).toBe(201);
       const reversalSaleId = refundRes.body.data.id as string;
 
