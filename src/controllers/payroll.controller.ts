@@ -1,7 +1,13 @@
 import type { Request, Response, NextFunction } from "express";
 import { unauthorized } from "../lib/errors";
 import { idParamSchema } from "../validation/common.schema";
-import { markPayrollPaidSchema, bulkPayPendingSchema, generatePayrollSchema, listPayrollQuerySchema } from "../validation/payroll.schema";
+import {
+  markPayrollPaidSchema,
+  bulkPayPendingSchema,
+  generatePayrollSchema,
+  listPayrollQuerySchema,
+  createPayrollReversalSchema,
+} from "../validation/payroll.schema";
 import * as payrollService from "../services/payroll.service";
 import { getReplayedResponse } from "../lib/idempotency";
 
@@ -84,6 +90,27 @@ export async function generatePayroll(req: Request, res: Response, next: NextFun
     const input = generatePayrollSchema.parse(req.body);
     const result = await payrollService.generatePayrollHandler(actor.businessId, input.periodYear, input.periodMonth);
     res.status(200).json({ data: result });
+  } catch (err) {
+    next(err);
+  }
+}
+
+// Module 12 Session D, Locked Decision #3.
+export async function createPayrollReversal(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const actor = getActor(req);
+    const { id } = idParamSchema.parse(req.params);
+    const idempotencyKey = getIdempotencyKey(req);
+
+    const replayed = await getReplayedResponse(actor.businessId, idempotencyKey, payrollService.createPayrollReversalEndpoint(id));
+    if (replayed) {
+      res.status(replayed.status).json(replayed.body);
+      return;
+    }
+
+    const input = createPayrollReversalSchema.parse(req.body);
+    const result = await payrollService.createPayrollReversal(id, input, actor, idempotencyKey);
+    res.status(201).json({ data: result });
   } catch (err) {
     next(err);
   }

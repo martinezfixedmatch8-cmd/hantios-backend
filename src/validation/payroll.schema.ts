@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { paginationQuerySchema } from "../lib/pagination";
+import { decimalField } from "./common.schema";
 
 export const markPayrollPaidSchema = z.object({
   version: z.number().int().nonnegative(),
@@ -31,3 +32,14 @@ export const listPayrollQuerySchema = paginationQuerySchema.extend({
   periodMonth: z.coerce.number().int().optional(),
 });
 export type ListPayrollQuery = z.infer<typeof listPayrollQuerySchema>;
+
+// Module 12 Session D, Locked Decision #3 -- the PAID Payroll Reversal
+// Ledger. deltaAmount is signed and non-zero (matching Attendance/
+// Commission Adjustments' own precedent, defense-in-depth alongside the DB
+// CHECK), reason required (same bar as every other correction in this
+// repo).
+export const createPayrollReversalSchema = z.object({
+  deltaAmount: decimalField(z.coerce.number().refine((v) => v !== 0, { message: "deltaAmount must not be zero" })),
+  reason: z.string().trim().min(1).max(500),
+});
+export type CreatePayrollReversalInput = z.infer<typeof createPayrollReversalSchema>;

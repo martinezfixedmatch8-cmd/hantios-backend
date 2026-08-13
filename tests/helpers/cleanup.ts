@@ -44,6 +44,9 @@ export async function cleanupTestBusiness(businessId: string): Promise<void> {
   await prisma.commission_adjustments.deleteMany({ where: { business_id: businessId } });
   await prisma.compensation_policy_acknowledgements.deleteMany({ where: { business_id: businessId } });
   await prisma.compensation_policies.deleteMany({ where: { business_id: businessId } });
+  // Module 12 Session D -- payroll_reversals FKs to payroll_records
+  // (RESTRICT), so it must go first.
+  await prisma.payroll_reversals.deleteMany({ where: { business_id: businessId } });
   // Module 12 Session A -- payroll_records FKs to employees AND
   // employee_compensation (both RESTRICT), so it must go before both;
   // employee_compensation FKs to employees (RESTRICT), so it must go

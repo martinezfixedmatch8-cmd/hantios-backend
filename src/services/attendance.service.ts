@@ -2,7 +2,7 @@ import { Prisma } from "@prisma/client";
 import { prisma } from "../lib/prisma";
 import { generateId } from "../lib/ids";
 import { getOwned } from "../lib/ownership";
-import { badRequest, conflict } from "../lib/errors";
+import { badRequest, conflict, notFound } from "../lib/errors";
 import { writeAuditLog } from "../lib/auditLog";
 import { domainEvents } from "../lib/events";
 import { getBusinessDay, dateOnlyString } from "../lib/businessTime";
@@ -30,6 +30,7 @@ export const RECORD_ATTENDANCE_ENDPOINT = "POST /attendance";
 // distinct claims, same reasoning as markPayrollPaidEndpoint(id).
 const bulkEntryEndpoint = (employeeId: string, workDateStr: string): string => `POST /attendance/bulk/${employeeId}/${workDateStr}`;
 export const createAttendanceAdjustmentEndpoint = (attendanceRecordId: string): string => `POST /attendance/${attendanceRecordId}/adjustments`;
+export const RECORD_SELF_ATTENDANCE_ENDPOINT = "POST /attendance/self";
 
 // Confirmed Phase 0 (Q1/Q2): the ONE write path this session builds is an
 // authorized role (owner/manager) recording attendance on an employee's own
@@ -51,7 +52,8 @@ async function createAttendanceRecordEntry(
   input: CreateAttendanceRecordInput,
   actor: Actor,
   idempotencyKey: string,
-  endpoint: string
+  endpoint: string,
+  options: { selfService?: boolean } = {}
 ) {
   // Checked internally, not just by the caller -- this function has two
   // real call sites (the single record endpoint AND bulkRecordAttendance's
@@ -70,7 +72,13 @@ async function createAttendanceRecordEntry(
   const record = await prisma.$transaction(async (tx) => {
     await claimIdempotencyKey(tx, actor.businessId, idempotencyKey, endpoint);
 
-    const approvedAt = new Date();
+    // Module 12 Session D -- self-service creates status:"recorded"
+    // (Session B's own reserved-but-previously-unreachable value, made
+    // reachable for real this session), never "approved" -- self-reported
+    // attendance is not self-approved. Every other rule (duplicate-entry
+    // guard, not-later-than-today validation, idempotency, audit log) is
+    // shared unchanged between both paths.
+    const selfService = options.selfService === true;
     let created;
     try {
       created = await tx.attendance_records.create({
@@ -80,10 +88,10 @@ async function createAttendanceRecordEntry(
           employee_id: input.employeeId,
           work_date: input.workDate,
           hours_worked: new Prisma.Decimal(input.hoursWorked),
-          status: "approved",
+          status: selfService ? "recorded" : "approved",
           recorded_by: actor.userId,
-          approved_by: actor.userId,
-          approved_at: approvedAt,
+          approved_by: selfService ? null : actor.userId,
+          approved_at: selfService ? null : new Date(),
         },
       });
     } catch (err) {
@@ -124,6 +132,38 @@ async function createAttendanceRecordEntry(
 
 export async function recordAttendance(input: CreateAttendanceRecordInput, actor: Actor, idempotencyKey: string) {
   return createAttendanceRecordEntry(input, actor, idempotencyKey, RECORD_ATTENDANCE_ENDPOINT);
+}
+
+// Module 12 Session D, Locked Decision #5 -- self-service, backend-only.
+// Deliberately NO requireRole at the route level -- any authenticated user
+// can call this; the real gate is whether they have a linked, active
+// employee record, exactly the same "service decides, not RBAC role"
+// pattern already established for Compensation Policy acknowledgement.
+// employeeId is NEVER client-suppliable here -- resolved exclusively from
+// the requesting user's own session (req.auth.userId), same "actor
+// identity is never client-suppliable" rule every other module in this
+// repo already follows. A user with no linked employees row is a real,
+// common, expected case (most users aren't linked to a payroll employee
+// at all) -- a clean 404, never a 500.
+export async function recordSelfAttendance(
+  input: { workDate: Date; hoursWorked: number },
+  actor: Actor,
+  idempotencyKey: string
+) {
+  const employee = await prisma.employees.findFirst({
+    where: { business_id: actor.businessId, user_id: actor.userId, status: "active" },
+  });
+  if (!employee) {
+    throw notFound("No active employee record is linked to your account");
+  }
+
+  return createAttendanceRecordEntry(
+    { employeeId: employee.id, workDate: input.workDate, hoursWorked: input.hoursWorked },
+    actor,
+    idempotencyKey,
+    RECORD_SELF_ATTENDANCE_ENDPOINT,
+    { selfService: true }
+  );
 }
 
 // Per-entry isolated, same partial-failure shape as Payroll's own
@@ -297,4 +337,37 @@ export async function getApprovedHoursForPeriod(
     total = total.plus(effective);
   }
   return total;
+}
+
+export interface DayHours {
+  workDate: Date;
+  hours: Prisma.Decimal;
+}
+
+// Module 12 Session D -- FIXED_PLUS_TIME's own per-day overtime threshold
+// needs a per-day breakdown, not a period total. Additive, alongside the
+// existing getApprovedHoursForPeriod above (NOT modified -- HOURLY's
+// already-shipped calculation path is untouched, confirmed Phase 0). Same
+// query, same effective-hours-per-record computation (hours_worked + its
+// own adjustments' deltas) -- just returned per-day instead of reduced to
+// one sum.
+export async function getApprovedHoursByDayForPeriod(
+  businessId: string,
+  employeeId: string,
+  periodYear: number,
+  periodMonth: number
+): Promise<DayHours[]> {
+  const periodStart = new Date(Date.UTC(periodYear, periodMonth - 1, 1));
+  const periodEnd = new Date(Date.UTC(periodYear, periodMonth, 1)); // exclusive, next month's 1st
+
+  const records = await prisma.attendance_records.findMany({
+    where: { business_id: businessId, employee_id: employeeId, status: "approved", work_date: { gte: periodStart, lt: periodEnd } },
+    include: { attendance_adjustments: true },
+    orderBy: { work_date: "asc" },
+  });
+
+  return records.map((record) => ({
+    workDate: record.work_date,
+    hours: record.attendance_adjustments.reduce((sum, a) => sum.plus(a.delta_hours), record.hours_worked),
+  }));
 }

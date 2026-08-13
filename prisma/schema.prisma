@@ -179,6 +179,7 @@ model businesses {
   commission_adjustments              commission_adjustments[]
   compensation_policies                compensation_policies[]
   compensation_policy_acknowledgements compensation_policy_acknowledgements[]
+  payroll_reversals                    payroll_reversals[]
   sales                               sales[]
   sessions                            sessions[]
   staff_invites                       staff_invites[]
@@ -2147,6 +2148,7 @@ model users {
   commission_adjustments                        commission_adjustments[]
   compensation_policies                         compensation_policies[]
   compensation_policy_acknowledgements          compensation_policy_acknowledgements[]
+  payroll_reversals                             payroll_reversals[]
   po_secure_links_created_byTousers             po_secure_links[]                    @relation("po_secure_links_created_byTousers")
   po_secure_links_revoked_byTousers             po_secure_links[]                    @relation("po_secure_links_revoked_byTousers")
   po_negotiation_internal_notes                 po_negotiation_internal_notes[]
@@ -3078,6 +3080,7 @@ model payroll_records {
   users                 users?                @relation(fields: [paid_by], references: [id])
   receipts              receipts[]
   commission_adjustments commission_adjustments[]
+  payroll_reversals      payroll_reversals[]
 
   @@unique([business_id, employee_id, period_year, period_month])
   @@index([business_id, status])
@@ -3148,6 +3151,29 @@ model commission_adjustments {
 
   @@index([payroll_record_id])
   @@index([business_id, employee_id])
+}
+
+// Module 12 Session D -- once a payroll_records row is PAID it is never
+// edited in place (locked since Session A). This is the mechanism for
+// correcting a PAID record's financial history without destroying it,
+// mirroring attendance_adjustments/commission_adjustments exactly.
+// Immutable -- no update/delete code path. The effective paid amount is
+// payroll_records.amount + SUM(payroll_reversals.delta_amount), computed
+// at read time (see getPayrollRecord) -- amount itself is never rewritten.
+model payroll_reversals {
+  id                String          @id
+  business_id       String
+  payroll_record_id String
+  delta_amount      Decimal         @db.Decimal(14, 2)
+  reason            String
+  created_by        String
+  created_at        DateTime        @default(now())
+  businesses        businesses      @relation(fields: [business_id], references: [id])
+  payroll_records   payroll_records @relation(fields: [payroll_record_id], references: [id])
+  users             users           @relation(fields: [created_by], references: [id])
+
+  @@index([payroll_record_id])
+  @@index([business_id])
 }
 
 enum CompensationPolicyType {

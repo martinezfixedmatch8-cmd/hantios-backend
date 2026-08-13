@@ -724,6 +724,28 @@ export async function refundSale(saleId: string, input: RefundSaleInput, actor: 
 // change of an existing one -- both are "correction" source from this
 // endpoint's own point of view; only sale creation itself ever writes
 // source: "creation".
+// Module 12 Session D, Locked Decision #4 + its addendum guardrail --
+// Automatic Commission Reallocation. Bounded, pending-only rule: if the
+// affected sale's own payroll period has a payroll_records row for BOTH
+// the original and newly-attributed employee, and BOTH are still
+// "pending" AND both commission-driven models (PERCENTAGE/
+// FIXED_PLUS_PERCENTAGE), a single value X -- the sale's own commission
+// contribution, computed ONCE from the ORIGINAL record's own already-
+// STORED calculation_breakdown.commissionRate (never re-derived, never a
+// new payroll-generation mechanism) -- is moved as a signed pair of
+// commission_adjustments rows (-X from the original, +X to the new
+// employee), inside this SAME transaction. Any other case (a record
+// missing, either side PAID, either side not commission-driven, or no
+// prior/new attribution at all) is reported back via `reallocation` but
+// never silently guessed, never partially applied, and never creates a
+// missing payroll_records row.
+const COMMISSION_DRIVEN_MODELS = ["PERCENTAGE", "FIXED_PLUS_PERCENTAGE"] as const;
+
+interface ReallocationResult {
+  status: "not_applicable" | "success" | "skipped_missing_records" | "skipped_paid" | "skipped_non_commission_model";
+  amount?: string;
+}
+
 export async function setSaleAttribution(saleId: string, input: SetSaleAttributionInput, actor: Actor, idempotencyKey: string) {
   const sale = await getOwned(prisma.sales.findUnique({ where: { id: saleId } }), actor.businessId, "Sale");
 
@@ -734,7 +756,16 @@ export async function setSaleAttribution(saleId: string, input: SetSaleAttributi
   const endpoint = setSaleAttributionEndpoint(saleId);
   const previousEmployeeId = sale.salesperson_employee_id;
 
-  const updated = await prisma.$transaction(async (tx) => {
+  // The exact same UTC-month bucketing getEligibleSalesForPeriod itself
+  // uses to decide which period a sale belongs to -- deliberately NOT
+  // business-timezone-aware (getBusinessDay is for "today," not "which
+  // period does this specific past sale's own timestamp fall into," and
+  // using a different rule here than the eligibility query itself uses
+  // would risk targeting a period the sale isn't actually counted in).
+  const periodYear = sale.timestamp.getUTCFullYear();
+  const periodMonth = sale.timestamp.getUTCMonth() + 1;
+
+  const { updated, reallocation } = await prisma.$transaction(async (tx) => {
     await claimIdempotencyKey(tx, actor.businessId, idempotencyKey, endpoint);
 
     const updateResult = await tx.sales.updateMany({
@@ -769,10 +800,88 @@ export async function setSaleAttribution(saleId: string, input: SetSaleAttributi
       reason: input.reason,
     });
 
+    let reallocationResult: ReallocationResult = { status: "not_applicable" };
+
+    // Only a genuine employee-to-employee reattribution is a reallocation
+    // candidate -- a set-from-null or clear-to-null has no "other side."
+    if (previousEmployeeId && input.employeeId) {
+      const [originalRecord, newRecord] = await Promise.all([
+        tx.payroll_records.findFirst({ where: { business_id: actor.businessId, employee_id: previousEmployeeId, period_year: periodYear, period_month: periodMonth } }),
+        tx.payroll_records.findFirst({ where: { business_id: actor.businessId, employee_id: input.employeeId, period_year: periodYear, period_month: periodMonth } }),
+      ]);
+
+      if (!originalRecord || !newRecord) {
+        // Never silently create a missing payroll_records row, never
+        // partially reallocate -- consumes only what payroll generation
+        // already produced.
+        reallocationResult = { status: "skipped_missing_records" };
+      } else if (originalRecord.status === "paid" || newRecord.status === "paid") {
+        // Preserve PAID immutability -- the attribution correction above
+        // is still fully recorded via sale_attribution_events; any
+        // financial consequence must go through commission_adjustments
+        // (still-pending side) or payroll_reversals (paid side) manually.
+        reallocationResult = { status: "skipped_paid" };
+      } else if (
+        !COMMISSION_DRIVEN_MODELS.includes(originalRecord.compensation_model as (typeof COMMISSION_DRIVEN_MODELS)[number]) ||
+        !COMMISSION_DRIVEN_MODELS.includes(newRecord.compensation_model as (typeof COMMISSION_DRIVEN_MODELS)[number])
+      ) {
+        reallocationResult = { status: "skipped_non_commission_model" };
+      } else {
+        // The single value-preserving amount X: the sale's own commission
+        // contribution, computed ONCE from the ORIGINAL record's own
+        // already-stored rate -- never re-derived from current
+        // employee_compensation (which could have changed since
+        // generation), never a fresh eligible-sales recalculation (that
+        // would be a new payroll-generation mechanism, explicitly
+        // forbidden). The exact same amount moves on both sides, so total
+        // commission across both records is unchanged by construction.
+        const breakdown = originalRecord.calculation_breakdown as unknown as { commissionRate: string } | null;
+        const rate = new Prisma.Decimal(breakdown?.commissionRate ?? "0");
+        const contribution = sale.total.mul(rate).dividedBy(100).toDecimalPlaces(2, Prisma.Decimal.ROUND_HALF_UP);
+
+        if (contribution.greaterThan(0)) {
+          await tx.commission_adjustments.create({
+            data: {
+              id: generateId(),
+              business_id: actor.businessId,
+              employee_id: previousEmployeeId,
+              payroll_record_id: originalRecord.id,
+              sale_id: saleId,
+              delta_amount: contribution.negated(),
+              reason: `Automatic reallocation: sale ${saleId} reattributed away from this employee`,
+              created_by: actor.userId,
+            },
+          });
+          await tx.commission_adjustments.create({
+            data: {
+              id: generateId(),
+              business_id: actor.businessId,
+              employee_id: input.employeeId,
+              payroll_record_id: newRecord.id,
+              sale_id: saleId,
+              delta_amount: contribution,
+              reason: `Automatic reallocation: sale ${saleId} reattributed to this employee`,
+              created_by: actor.userId,
+            },
+          });
+          reallocationResult = { status: "success", amount: contribution.toString() };
+        } else {
+          // Nothing to move (e.g. the original record's own breakdown had
+          // no positive rate) -- not an error, just nothing to reallocate.
+          reallocationResult = { status: "not_applicable" };
+        }
+      }
+    }
+
     const result = await tx.sales.findUniqueOrThrow({ where: { id: saleId } });
-    const responseBody = JSON.parse(JSON.stringify({ data: result })) as unknown;
+    // Nest reallocation INSIDE data, matching the exact shape the
+    // controller's own non-replayed response produces (`{ ...updated,
+    // reallocation }`) -- a replayed response must be byte-identical to a
+    // fresh one, same rule every other idempotent endpoint in this repo
+    // already follows.
+    const responseBody = JSON.parse(JSON.stringify({ data: { ...result, reallocation: reallocationResult } })) as unknown;
     await completeIdempotencyKey(tx, actor.businessId, idempotencyKey, endpoint, 200, responseBody);
-    return result;
+    return { updated: result, reallocation: reallocationResult };
   });
 
   domainEvents.publish("SaleAttributionChanged", {
@@ -782,8 +891,26 @@ export async function setSaleAttribution(saleId: string, input: SetSaleAttributi
     newEmployeeId: input.employeeId,
     occurredAt: new Date().toISOString(),
   });
+  if (reallocation.status === "success" && previousEmployeeId && input.employeeId) {
+    domainEvents.publish("CommissionAdjustmentCreated", {
+      businessId: actor.businessId,
+      commissionAdjustmentId: "", // two rows were created; see audit log / sale_attribution_events for the pair
+      employeeId: previousEmployeeId,
+      payrollRecordId: "",
+      deltaAmount: `-${reallocation.amount}`,
+      occurredAt: new Date().toISOString(),
+    });
+    domainEvents.publish("CommissionAdjustmentCreated", {
+      businessId: actor.businessId,
+      commissionAdjustmentId: "",
+      employeeId: input.employeeId,
+      payrollRecordId: "",
+      deltaAmount: reallocation.amount ?? "0",
+      occurredAt: new Date().toISOString(),
+    });
+  }
 
-  return updated;
+  return { ...updated, reallocation };
 }
 
 export async function listSales(query: ListSalesQuery, businessId: string) {

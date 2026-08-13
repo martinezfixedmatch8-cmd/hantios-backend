@@ -8,7 +8,7 @@ import { domainEvents } from "../lib/events";
 import { getReplayedResponse, claimIdempotencyKey, completeIdempotencyKey } from "../lib/idempotency";
 import { getBusinessLocalYear, getBusinessLocalMonth } from "../lib/businessTime";
 import { findEffectiveCompensation } from "./employeeCompensation.service";
-import { getApprovedHoursForPeriod } from "./attendance.service";
+import { getApprovedHoursForPeriod, getApprovedHoursByDayForPeriod } from "./attendance.service";
 import { getEligibleSalesForPeriod } from "./commission.service";
 import { generateReceiptInTransaction, buildPayrollReceiptSnapshot, requestReceiptDelivery } from "./receipt.service";
 import { resolveListQuery, paginate, type PaginationQuery } from "../lib/pagination";
@@ -37,14 +37,15 @@ const MONTH_NAMES = [
 // business+month both run this identically, and exactly one INSERT per
 // employee ever lands.
 //
-// FIXED_MONTHLY (Session A), HOURLY (Session B), and PERCENTAGE/
-// FIXED_PLUS_PERCENTAGE (Session C) have real calculation logic -- an
-// employee whose currently-effective compensation is any other model (or
-// has no compensation structure at all) is SKIPPED, never silently given a
-// wrong/zero amount, and never aborts generation for other employees. Zero
-// approved hours/eligible sales for a period is NOT a skip reason -- per
-// confirmed Phase 0, once the source of truth exists at all it always
-// resolves to a real number, including a legitimate $0.00.
+// FIXED_MONTHLY (Session A), HOURLY (Session B), PERCENTAGE/
+// FIXED_PLUS_PERCENTAGE (Session C), and FIXED_PLUS_TIME/CONTRACT/CUSTOM
+// (Session D) have real calculation logic -- only PIECE_RATE remains
+// SKIPPED (no authoritative output source exists anywhere in this repo --
+// NOT CALCULABLE YET, confirmed Session D). An employee with no compensation
+// structure at all for the period is also skipped. Zero approved hours/
+// eligible sales for a period is NOT a skip reason -- per confirmed Phase
+// 0, once the source of truth exists at all it always resolves to a real
+// number, including a legitimate $0.00.
 // ============================================================================
 
 export interface GeneratePayrollResult {
@@ -69,7 +70,7 @@ export async function generatePayrollForBusiness(businessId: string, periodYear:
     let amount: Prisma.Decimal;
     let hoursCalculated: Prisma.Decimal | null = null;
     let hourlyRate: Prisma.Decimal | null = null;
-    let calculationBreakdown: Record<string, string> | null = null;
+    let calculationBreakdown: Record<string, unknown> | null = null;
 
     if (compensation.compensation_model === "FIXED_MONTHLY") {
       const config = compensation.compensation_config as unknown as { monthlySalary: number };
@@ -115,6 +116,113 @@ export async function generatePayrollForBusiness(businessId: string, periodYear:
         commissionRate: rate.toDecimalPlaces(2).toString(),
         commission: commission.toString(),
       };
+    } else if (compensation.compensation_model === "FIXED_PLUS_TIME") {
+      // Module 12 Session D -- confirmed Phase 0: threshold applied PER
+      // DAY, using attendance_records' own per-row shape directly (no
+      // aggregation-then-threshold). getApprovedHoursForPeriod (HOURLY's
+      // own, already-shipped path) is untouched -- this uses the new,
+      // additive getApprovedHoursByDayForPeriod instead.
+      const config = compensation.compensation_config as unknown as {
+        fixedAmount: number;
+        hourlyRate: number;
+        overtimeThresholdHours: number;
+        overtimeMultiplier: number;
+      };
+      const dayHours = await getApprovedHoursByDayForPeriod(businessId, employee.id, periodYear, periodMonth);
+      const threshold = new Prisma.Decimal(config.overtimeThresholdHours);
+      const rate = new Prisma.Decimal(config.hourlyRate);
+      const multiplier = new Prisma.Decimal(config.overtimeMultiplier);
+      const fixedAmount = new Prisma.Decimal(config.fixedAmount);
+
+      let totalNormalHours = new Prisma.Decimal(0);
+      let totalOvertimeHours = new Prisma.Decimal(0);
+      for (const day of dayHours) {
+        const normal = day.hours.greaterThan(threshold) ? threshold : day.hours;
+        const overtimeRaw = day.hours.minus(threshold);
+        const overtime = overtimeRaw.greaterThan(0) ? overtimeRaw : new Prisma.Decimal(0);
+        totalNormalHours = totalNormalHours.plus(normal);
+        totalOvertimeHours = totalOvertimeHours.plus(overtime);
+      }
+      const normalPay = totalNormalHours.mul(rate).toDecimalPlaces(2, Prisma.Decimal.ROUND_HALF_UP);
+      const overtimePay = totalOvertimeHours.mul(rate).mul(multiplier).toDecimalPlaces(2, Prisma.Decimal.ROUND_HALF_UP);
+      amount = fixedAmount.toDecimalPlaces(2).plus(normalPay).plus(overtimePay);
+      calculationBreakdown = {
+        type: "FIXED_PLUS_TIME",
+        fixedAmount: fixedAmount.toDecimalPlaces(2).toString(),
+        normalHours: totalNormalHours.toDecimalPlaces(2).toString(),
+        overtimeHours: totalOvertimeHours.toDecimalPlaces(2).toString(),
+        hourlyRate: rate.toDecimalPlaces(2).toString(),
+        overtimeMultiplier: multiplier.toDecimalPlaces(2).toString(),
+        normalPay: normalPay.toString(),
+        overtimePay: overtimePay.toString(),
+      };
+    } else if (compensation.compensation_model === "CONTRACT") {
+      // Module 12 Session D, Locked Decision #2 -- employee_compensation
+      // itself IS the Compensation Agreement (Path B, confirmed -- no new
+      // module). MONTHLY schedule only this session; any other
+      // paymentSchedule value is already rejected at the Zod layer.
+      const config = compensation.compensation_config as unknown as {
+        contractAmount: number;
+        contractPeriodMonths: number;
+        paymentSchedule: string;
+      };
+      const contractAmount = new Prisma.Decimal(config.contractAmount);
+      amount = contractAmount.dividedBy(config.contractPeriodMonths).toDecimalPlaces(2, Prisma.Decimal.ROUND_HALF_UP);
+      calculationBreakdown = {
+        type: "CONTRACT",
+        contractAmount: contractAmount.toDecimalPlaces(2).toString(),
+        contractPeriodMonths: config.contractPeriodMonths,
+        paymentSchedule: config.paymentSchedule,
+      };
+    } else if (compensation.compensation_model === "CUSTOM") {
+      // Module 12 Session D, Locked Decision #6 -- "Composable
+      // Compensation" (CUSTOM v1, confirmed bounded, NOT a rules engine).
+      // Each present component reuses the EXACT SAME calculation path its
+      // own dedicated model already uses -- zero duplicated math. Field
+      // names below mirror fixedMonthlyConfigSchema/hourlyConfigSchema/
+      // percentageConfigSchema exactly (monthlySalary/hourlyRate/
+      // commissionRate) -- these are the SAME sub-schemas customConfigSchema
+      // itself reuses, not a fresh shape invented for CUSTOM.
+      const config = compensation.compensation_config as unknown as {
+        fixedComponent?: { monthlySalary: number };
+        hourlyComponent?: { hourlyRate: number };
+        percentageComponent?: { commissionRate: number };
+      };
+      let total = new Prisma.Decimal(0);
+      const components: Record<string, unknown>[] = [];
+
+      if (config.fixedComponent) {
+        const componentAmount = new Prisma.Decimal(config.fixedComponent.monthlySalary).toDecimalPlaces(2);
+        total = total.plus(componentAmount);
+        components.push({ type: "fixed", amount: componentAmount.toString() });
+      }
+      if (config.hourlyComponent) {
+        const approvedHours = await getApprovedHoursForPeriod(businessId, employee.id, periodYear, periodMonth);
+        const rate = new Prisma.Decimal(config.hourlyComponent.hourlyRate);
+        const componentAmount = approvedHours.mul(rate).toDecimalPlaces(2, Prisma.Decimal.ROUND_HALF_UP);
+        total = total.plus(componentAmount);
+        components.push({
+          type: "hourly",
+          hours: approvedHours.toDecimalPlaces(2).toString(),
+          rate: rate.toDecimalPlaces(2).toString(),
+          amount: componentAmount.toString(),
+        });
+      }
+      if (config.percentageComponent) {
+        const eligibleSales = await getEligibleSalesForPeriod(businessId, employee.id, periodYear, periodMonth);
+        const rate = new Prisma.Decimal(config.percentageComponent.commissionRate);
+        const componentAmount = eligibleSales.mul(rate).dividedBy(100).toDecimalPlaces(2, Prisma.Decimal.ROUND_HALF_UP);
+        total = total.plus(componentAmount);
+        components.push({
+          type: "percentage",
+          eligibleSales: eligibleSales.toDecimalPlaces(2).toString(),
+          rate: rate.toDecimalPlaces(2).toString(),
+          amount: componentAmount.toString(),
+        });
+      }
+
+      amount = total;
+      calculationBreakdown = { type: "CUSTOM", components, total: total.toString() };
     } else {
       result.skipped.push({ employeeId: employee.id, reason: `Compensation model "${compensation.compensation_model}" has no real calculation logic yet (no source of truth -- NOT CALCULABLE YET)` });
       continue;
@@ -209,12 +317,28 @@ export async function listPayrollRecords(query: ListPayrollQuery, businessId: st
 // Module 12 Session C -- bundles its own commission_adjustments on the
 // read, same "bundle related records on the parent's read endpoint"
 // pattern as Expenses/PO GRN/Attendance's own adjustments.
+// Module 12 Session D, Locked Decision #3 -- bundles BOTH correction
+// mechanisms (Session C's commission_adjustments and this session's own
+// payroll_reversals) and a computed effectiveAmount = amount +
+// Sum(commission_adjustments.delta_amount) + Sum(payroll_reversals.delta_
+// amount), unifying them into one real number. Computed fresh on every
+// read, never stored -- amount itself is never rewritten by either
+// mechanism (Calculation Snapshot preserved). This is what makes "what was
+// actually paid, and why did it change" answerable from one call.
 export async function getPayrollRecord(id: string, businessId: string) {
-  return getOwned(
-    prisma.payroll_records.findUnique({ where: { id }, include: { commission_adjustments: true } }),
+  const record = await getOwned(
+    prisma.payroll_records.findUnique({
+      where: { id },
+      include: { commission_adjustments: true, payroll_reversals: true },
+    }),
     businessId,
     "Payroll record"
   );
+
+  const effectiveAmount = record.commission_adjustments
+    .reduce((sum, a) => sum.plus(a.delta_amount), record.payroll_reversals.reduce((sum, r) => sum.plus(r.delta_amount), record.amount));
+
+  return { ...record, effectiveAmount: effectiveAmount.toString() };
 }
 
 // ============================================================================
@@ -421,4 +545,82 @@ export async function bulkPayPending(input: BulkPayPendingInput, actor: Actor, i
   await prisma.$transaction((tx) => completeIdempotencyKey(tx, actor.businessId, idempotencyKey, BULK_PAY_PENDING_ENDPOINT, 200, responseBody));
 
   return result;
+}
+
+// ============================================================================
+// Module 12 Session D, Locked Decision #3 -- the PAID Payroll Reversal
+// Ledger. Once a payroll_records row is PAID it is never edited in place
+// (locked since Session A) -- this is the mechanism for correcting a PAID
+// record's financial history without destroying it, mirroring
+// attendance_adjustments (Session B) and commission_adjustments (Session
+// C) exactly: immutable, signed, linked, reason required. Validated at
+// creation: target record must be status="paid" -- a reversal against a
+// still-pending record doesn't make sense (a pending record should just
+// be corrected before payment, not reversed).
+// ============================================================================
+
+export const createPayrollReversalEndpoint = (payrollRecordId: string): string => `POST /payroll/${payrollRecordId}/reversals`;
+
+export interface CreatePayrollReversalInput {
+  deltaAmount: number;
+  reason: string;
+}
+
+export async function createPayrollReversal(
+  payrollRecordId: string,
+  input: CreatePayrollReversalInput,
+  actor: Actor,
+  idempotencyKey: string
+) {
+  const endpoint = createPayrollReversalEndpoint(payrollRecordId);
+  const replayed = await getReplayedResponse(actor.businessId, idempotencyKey, endpoint);
+  if (replayed) {
+    return (replayed.body as { data: Awaited<ReturnType<typeof prisma.payroll_reversals.create>> }).data;
+  }
+
+  const record = await getOwned(prisma.payroll_records.findUnique({ where: { id: payrollRecordId } }), actor.businessId, "Payroll record");
+  if (record.status !== "paid") {
+    throw badRequest("A reversal can only be created against a PAID payroll record -- correct a still-pending record directly instead");
+  }
+
+  const reversal = await prisma.$transaction(async (tx) => {
+    await claimIdempotencyKey(tx, actor.businessId, idempotencyKey, endpoint);
+
+    const created = await tx.payroll_reversals.create({
+      data: {
+        id: generateId(),
+        business_id: actor.businessId,
+        payroll_record_id: payrollRecordId,
+        delta_amount: new Prisma.Decimal(input.deltaAmount),
+        reason: input.reason,
+        created_by: actor.userId,
+      },
+    });
+
+    await writeAuditLog(tx, {
+      businessId: actor.businessId,
+      userId: actor.userId,
+      userName: actor.userName,
+      userRole: actor.userRole,
+      action: "payroll.reversal_created",
+      entityType: "payroll_record",
+      entityId: payrollRecordId,
+      reason: `Reversal for paid payroll record: ${input.deltaAmount} (${input.reason})`,
+    });
+
+    const responseBody = JSON.parse(JSON.stringify({ data: created })) as unknown;
+    await completeIdempotencyKey(tx, actor.businessId, idempotencyKey, endpoint, 201, responseBody);
+
+    return created;
+  });
+
+  domainEvents.publish("PayrollReversalCreated", {
+    businessId: actor.businessId,
+    payrollReversalId: reversal.id,
+    payrollRecordId,
+    deltaAmount: reversal.delta_amount.toString(),
+    occurredAt: reversal.created_at.toISOString(),
+  });
+
+  return reversal;
 }

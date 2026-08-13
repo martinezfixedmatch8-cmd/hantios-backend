@@ -6,6 +6,7 @@ import {
   bulkCreateAttendanceSchema,
   listAttendanceQuerySchema,
   createAttendanceAdjustmentSchema,
+  recordSelfAttendanceSchema,
 } from "../validation/attendance.schema";
 import * as attendanceService from "../services/attendance.service";
 import { getReplayedResponse } from "../lib/idempotency";
@@ -32,6 +33,28 @@ export async function recordAttendance(req: Request, res: Response, next: NextFu
 
     const input = createAttendanceRecordSchema.parse(req.body);
     const result = await attendanceService.recordAttendance(input, actor, idempotencyKey);
+    res.status(201).json({ data: result });
+  } catch (err) {
+    next(err);
+  }
+}
+
+// Module 12 Session D, Locked Decision #5 -- self-service, backend-only.
+// Deliberately no requireRole check upstream of this handler -- see
+// attendance.routes.ts's own comment.
+export async function recordSelfAttendance(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const actor = getActor(req);
+    const idempotencyKey = getIdempotencyKey(req);
+
+    const replayed = await getReplayedResponse(actor.businessId, idempotencyKey, attendanceService.RECORD_SELF_ATTENDANCE_ENDPOINT);
+    if (replayed) {
+      res.status(replayed.status).json(replayed.body);
+      return;
+    }
+
+    const input = recordSelfAttendanceSchema.parse(req.body);
+    const result = await attendanceService.recordSelfAttendance(input, actor, idempotencyKey);
     res.status(201).json({ data: result });
   } catch (err) {
     next(err);

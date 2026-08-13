@@ -179,6 +179,16 @@ export interface DomainEventPayloads {
   CommissionAdjustmentCreated: { businessId: string; commissionAdjustmentId: string; employeeId: string; payrollRecordId: string; deltaAmount: string; occurredAt: string };
   CompensationPolicyCreated: { businessId: string; policyId: string; policyType: string; version: string; occurredAt: string };
   CompensationPolicyAcknowledged: { businessId: string; policyId: string; employeeId: string; occurredAt: string };
+  // Module 12 Session D. Publish-only, no dispatch, same standing rule as
+  // every event above. Self-service attendance reuses the existing
+  // AttendanceRecorded event as-is (still "an attendance record was
+  // created," just with status:"recorded" instead of "approved" -- no new
+  // event needed). Automatic reallocation reuses the existing
+  // CommissionAdjustmentCreated event, published twice (once per side) --
+  // it's really just two commission_adjustments rows created
+  // automatically instead of one created manually, the same underlying
+  // fact Session C's own event already represents.
+  PayrollReversalCreated: { businessId: string; payrollReversalId: string; payrollRecordId: string; deltaAmount: string; occurredAt: string };
 }
 
 export type DomainEventName = keyof DomainEventPayloads;

@@ -8,6 +8,7 @@ import {
   markPayrollPaid,
   bulkPayPending,
   generatePayroll,
+  createPayrollReversal,
 } from "../controllers/payroll.controller";
 
 const router = Router();
@@ -28,5 +29,8 @@ router.get("/:id", requireRole(...viewRoles), getPayrollRecord);
 router.post("/:id/mark-paid", requireRole(...writeRoles), requireIdempotencyKey, markPayrollPaid);
 router.post("/pay-all-pending", requireRole(...writeRoles), requireIdempotencyKey, bulkPayPending);
 router.post("/generate", requireRole(...writeRoles), generatePayroll);
+// Module 12 Session D, Locked Decision #3 -- owner/manager only, same
+// elevated bar as every other correction endpoint in this repo.
+router.post("/:id/reversals", requireRole(...writeRoles), requireIdempotencyKey, createPayrollReversal);
 
 export default router;

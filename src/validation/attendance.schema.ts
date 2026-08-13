@@ -43,3 +43,13 @@ export const createAttendanceAdjustmentSchema = z.object({
   reason: z.string().trim().min(1).max(500),
 });
 export type CreateAttendanceAdjustmentInput = z.infer<typeof createAttendanceAdjustmentSchema>;
+
+// Module 12 Session D -- self-service. Deliberately NO employeeId field --
+// it is never client-suppliable here, resolved exclusively from the
+// requesting user's own session (see attendance.service.ts's
+// recordSelfAttendance).
+export const recordSelfAttendanceSchema = z.object({
+  workDate: z.coerce.date(),
+  hoursWorked: decimalField(z.coerce.number().nonnegative()),
+});
+export type RecordSelfAttendanceInput = z.infer<typeof recordSelfAttendanceSchema>;

@@ -420,7 +420,15 @@ describe("Module 12 Session C -- Sales Attribution & Commission Engine", () => {
       expect(res2.status).toBe(201);
     });
 
-    const stillRejectedModels = ["FIXED_PLUS_TIME", "PIECE_RATE", "CONTRACT", "CUSTOM"];
+    // Module 12 Session D widened this boundary for real -- FIXED_PLUS_TIME/
+    // CONTRACT/CUSTOM are now genuinely writable (see tests/payrollSessionD.
+    // test.ts for their own real config coverage), so only PIECE_RATE
+    // remains structurally unwritable (confirmed NOT CALCULABLE YET -- no
+    // Output/Production-tracking source exists anywhere in this repo).
+    // Updated here rather than left stale, per the same "keep test names
+    // accurate to real behavior" discipline this repo already follows --
+    // Session D's own approved decisions are exactly what changed this.
+    const stillRejectedModels = ["PIECE_RATE"];
     it.each(stillRejectedModels)("still rejects %s -- structurally unwritable through this endpoint", async (model) => {
       const employee = await createEmployee();
       const res = await request(app)
