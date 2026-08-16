@@ -55,7 +55,7 @@ describe("Module 06 -- Receipt System", () => {
       .send({ productId: product.id, quantity: 100, unitCost: 20 })
       .catch(() => undefined);
     await prisma.branch_inventory.create({
-      data: { id: generateId(), business_id: businessId, branch_id: branchId, product_id: product.id, quantity: 100 },
+      data: { id: generateId(), business_id: businessId, branch_id: branchId, product_id: product.id, size: "", quantity: 100 },
     });
 
     const saleRes = await request(app)
@@ -346,7 +346,7 @@ describe("Module 06 -- Receipt System", () => {
     it("is concurrency-safe: N truly-parallel sales never collide on the same receipt number", async () => {
       const product = await createTestProduct(businessId, { sellingPrice: 5 });
       await prisma.branch_inventory.create({
-        data: { id: generateId(), business_id: businessId, branch_id: branchId, product_id: product.id, quantity: 1000 },
+        data: { id: generateId(), business_id: businessId, branch_id: branchId, product_id: product.id, size: "", quantity: 1000 },
       });
       const N = 5;
       const responses = await Promise.all(
@@ -389,7 +389,7 @@ describe("Module 06 -- Receipt System", () => {
     it("a Sale that fails validation (insufficient stock) produces NO receipt at all", async () => {
       const product = await createTestProduct(businessId, { sellingPrice: 10 });
       await prisma.branch_inventory.create({
-        data: { id: generateId(), business_id: businessId, branch_id: branchId, product_id: product.id, quantity: 1 },
+        data: { id: generateId(), business_id: businessId, branch_id: branchId, product_id: product.id, size: "", quantity: 1 },
       });
       const res = await request(app)
         .post("/sales")

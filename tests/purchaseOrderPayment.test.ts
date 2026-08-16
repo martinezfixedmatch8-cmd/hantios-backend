@@ -301,4 +301,192 @@ describe("Purchase Order Payments", () => {
       .send({ version: po.version, amount: 10, invoiceAmount: 10, paymentDate: "2026-08-01" });
     expect(res.status).toBe(404);
   });
+
+  describe("HNT-PO-001: Commercial invoice supersede racing with payment matching", () => {
+    // A SENT-not-confirmed PO with a dispatched shipment -- the minimum
+    // fixture the Commercial Invoice issuance gate (Module 11 Session 3)
+    // requires, mirroring poCommercialInvoice.test.ts's own createShippedPo
+    // helper (duplicated locally, matching this repo's own established
+    // per-file fixture-helper convention rather than sharing across files).
+    async function createShippedPo(costPrice = 10, quantity = 10) {
+      const supplier = await createTestSupplier(businessId);
+      const product = await createTestProduct(businessId, { costPrice });
+      const createRes = await request(app)
+        .post("/purchase-orders")
+        .set("Authorization", `Bearer ${ownerToken}`)
+        .set("Idempotency-Key", idemKey())
+        .send({ supplierId: supplier.id, branchId, items: [{ productId: product.id, quantityOrdered: quantity, unitCostSnapshot: costPrice }] });
+      const sendRes = await request(app)
+        .post(`/purchase-orders/${createRes.body.data.id}/send`)
+        .set("Authorization", `Bearer ${ownerToken}`)
+        .set("Idempotency-Key", idemKey())
+        .send({ version: createRes.body.data.version });
+      const poRes = await request(app).get(`/purchase-orders/${sendRes.body.data.id}`).set("Authorization", `Bearer ${ownerToken}`);
+      const po = poRes.body.data;
+
+      const shipmentRes = await request(app)
+        .post(`/purchase-orders/${po.id}/shipments`)
+        .set("Authorization", `Bearer ${ownerToken}`)
+        .set("Idempotency-Key", idemKey())
+        .send({ method: "sea", items: [{ poItemId: po.purchase_order_items[0].id, quantityShipped: quantity }] });
+      await request(app)
+        .patch(`/purchase-orders/${po.id}/shipments/${shipmentRes.body.data.id}/status`)
+        .set("Authorization", `Bearer ${ownerToken}`)
+        .set("Idempotency-Key", idemKey())
+        .send({ version: shipmentRes.body.data.version, status: "dispatched" });
+
+      return { po, supplier, product };
+    }
+
+    async function issueCommercialInvoice(poId: string, totalAmount: number) {
+      const res = await request(app)
+        .post(`/purchase-orders/${poId}/commercial-invoices`)
+        .set("Authorization", `Bearer ${ownerToken}`)
+        .set("Idempotency-Key", idemKey())
+        .send({ totalAmount });
+      expect(res.status).toBe(201);
+      return res.body.data;
+    }
+
+    it("a payment using a version that predates a Commercial Invoice supersede is rejected (409), never silently matched against the superseded invoice", async () => {
+      const { po } = await createShippedPo(10, 10); // total_expected_value = 100
+      await issueCommercialInvoice(po.id, 100);
+      const poBeforeSupersede = await request(app).get(`/purchase-orders/${po.id}`).set("Authorization", `Bearer ${ownerToken}`);
+      const staleVersion = poBeforeSupersede.body.data.version;
+
+      // Supersede to a real correction -- this is the event that, before
+      // the HNT-PO-001 fix, never touched purchase_orders.version at all.
+      const listRes = await request(app).get(`/purchase-orders/${po.id}/commercial-invoices`).set("Authorization", `Bearer ${ownerToken}`);
+      const currentInvoiceId = listRes.body.data[0].id;
+      const supersedeRes = await request(app)
+        .post(`/purchase-orders/${po.id}/commercial-invoices/${currentInvoiceId}/supersede`)
+        .set("Authorization", `Bearer ${ownerToken}`)
+        .set("Idempotency-Key", idemKey())
+        .send({ totalAmount: 150, reason: "Final freight costs came in higher than estimated" });
+      expect(supersedeRes.status).toBe(201);
+
+      // Confirmed: the supersede itself advanced the PO's own version.
+      const poAfterSupersede = await request(app).get(`/purchase-orders/${po.id}`).set("Authorization", `Bearer ${ownerToken}`);
+      expect(poAfterSupersede.body.data.version).toBeGreaterThan(staleVersion);
+
+      // A payment attempt using the STALE, pre-supersede version must be
+      // rejected -- it can never silently proceed against the now-
+      // superseded $100 invoice while $150 is the real, current one.
+      const staleRes = await request(app)
+        .post(`/purchase-orders/${po.id}/payments`)
+        .set("Authorization", `Bearer ${ownerToken}`)
+        .set("Idempotency-Key", idemKey())
+        .send({ version: staleVersion, amount: 50, paymentDate: "2026-08-01", matchOverride: { reason: "test override" } });
+      expect(staleRes.status).toBe(409);
+
+      // A payment using the CURRENT version succeeds and correctly matches
+      // against the invoice that's actually current ($150), never the
+      // superseded $100 one -- confirmed by reading invoice_amount back.
+      const freshRes = await request(app)
+        .post(`/purchase-orders/${po.id}/payments`)
+        .set("Authorization", `Bearer ${ownerToken}`)
+        .set("Idempotency-Key", idemKey())
+        .send({ version: poAfterSupersede.body.data.version, amount: 50, paymentDate: "2026-08-01", matchOverride: { reason: "test override" } });
+      expect(freshRes.status).toBe(201);
+      expect(freshRes.body.data.payment.invoice_amount).toBe("150");
+    });
+
+    it("exactly one Commercial Invoice is ever 'issued' (current) at a time, even after multiple supersedes", async () => {
+      const { po } = await createShippedPo(10, 10);
+      await issueCommercialInvoice(po.id, 100);
+
+      const list1 = await request(app).get(`/purchase-orders/${po.id}/commercial-invoices`).set("Authorization", `Bearer ${ownerToken}`);
+      await request(app)
+        .post(`/purchase-orders/${po.id}/commercial-invoices/${list1.body.data[0].id}/supersede`)
+        .set("Authorization", `Bearer ${ownerToken}`)
+        .set("Idempotency-Key", idemKey())
+        .send({ totalAmount: 120, reason: "correction 1" });
+
+      const list2 = await request(app).get(`/purchase-orders/${po.id}/commercial-invoices`).set("Authorization", `Bearer ${ownerToken}`);
+      const currentAfterFirst = list2.body.data.find((inv: { status: string }) => inv.status === "issued");
+      await request(app)
+        .post(`/purchase-orders/${po.id}/commercial-invoices/${currentAfterFirst.id}/supersede`)
+        .set("Authorization", `Bearer ${ownerToken}`)
+        .set("Idempotency-Key", idemKey())
+        .send({ totalAmount: 140, reason: "correction 2" });
+
+      const allInvoices = await prisma.po_commercial_invoices.findMany({ where: { purchase_order_id: po.id } });
+      const issued = allInvoices.filter((inv) => inv.status === "issued");
+      expect(issued).toHaveLength(1);
+      expect(issued[0].total_amount.toString()).toBe("140");
+      expect(allInvoices.filter((inv) => inv.status === "superseded")).toHaveLength(2);
+    });
+
+    it("a payment using the current, un-stale version still succeeds normally after an unrelated supersede on a DIFFERENT PO (no false-positive rejection)", async () => {
+      const { po: poA } = await createShippedPo(10, 10);
+      await issueCommercialInvoice(poA.id, 100);
+      const { po: poB } = await createShippedPo(10, 5);
+      const invoiceB = await issueCommercialInvoice(poB.id, 50);
+
+      // PO B already has some non-zero version from its own create/send/
+      // shipment flow (unrelated to this fix) -- capture it fresh, BEFORE
+      // PO A's own supersede, so the real assertion is "unchanged," not a
+      // specific hardcoded number.
+      const poBBefore = await request(app).get(`/purchase-orders/${poB.id}`).set("Authorization", `Bearer ${ownerToken}`);
+      const versionBefore = poBBefore.body.data.version;
+
+      // Supersede PO A's own invoice -- must have zero effect on PO B.
+      const listA = await request(app).get(`/purchase-orders/${poA.id}/commercial-invoices`).set("Authorization", `Bearer ${ownerToken}`);
+      await request(app)
+        .post(`/purchase-orders/${poA.id}/commercial-invoices/${listA.body.data[0].id}/supersede`)
+        .set("Authorization", `Bearer ${ownerToken}`)
+        .set("Idempotency-Key", idemKey())
+        .send({ totalAmount: 200, reason: "unrelated correction on a different PO" });
+
+      const poBFresh = await request(app).get(`/purchase-orders/${poB.id}`).set("Authorization", `Bearer ${ownerToken}`);
+      expect(poBFresh.body.data.version).toBe(versionBefore); // untouched by PO A's own supersede
+
+      const res = await request(app)
+        .post(`/purchase-orders/${poB.id}/payments`)
+        .set("Authorization", `Bearer ${ownerToken}`)
+        .set("Idempotency-Key", idemKey())
+        .send({ version: poBFresh.body.data.version, amount: 50, paymentDate: "2026-08-01", matchOverride: { reason: "test override" } });
+      expect(res.status).toBe(201);
+      expect(res.body.data.payment.invoice_amount).toBe(invoiceB.total_amount);
+    });
+
+    it("no duplicate Expense/payment is created on an Idempotency-Key replay, even with the rewritten in-transaction match logic", async () => {
+      const { po } = await createFullyReceivedPo();
+      const key = idemKey();
+      const body = { version: po.version, amount: 50, invoiceAmount: 100, paymentDate: "2026-08-01" };
+
+      const first = await request(app).post(`/purchase-orders/${po.id}/payments`).set("Authorization", `Bearer ${ownerToken}`).set("Idempotency-Key", key).send(body);
+      expect(first.status).toBe(201);
+      const second = await request(app).post(`/purchase-orders/${po.id}/payments`).set("Authorization", `Bearer ${ownerToken}`).set("Idempotency-Key", key).send(body);
+      expect(second.status).toBe(201);
+      expect(second.body.data.payment.id).toBe(first.body.data.payment.id);
+
+      const payments = await prisma.purchase_order_payments.findMany({ where: { purchase_order_id: po.id } });
+      expect(payments).toHaveLength(1);
+      const expenses = await prisma.expenses.findMany({ where: { purchase_order_id: po.id } });
+      expect(expenses).toHaveLength(1);
+    });
+
+    it("payment racing against a GRN update -- a stale version (from before a new GRN was received) is rejected", async () => {
+      const { po } = await createConfirmedPo(10, 10);
+      const poItemId = po.purchase_order_items[0].id;
+      const staleVersion = po.version;
+
+      // A GRN receipt commits, which (already, pre-existing behavior)
+      // advances the PO's own version via its status-derivation recompute.
+      const grnRes = await request(app)
+        .post(`/purchase-orders/${po.id}/goods-received-notes`)
+        .set("Authorization", `Bearer ${ownerToken}`)
+        .set("Idempotency-Key", idemKey())
+        .send({ version: po.version, items: [{ poItemId, quantityReceived: 10, unitCostActual: 10 }] });
+      expect(grnRes.status).toBe(201);
+
+      const staleRes = await request(app)
+        .post(`/purchase-orders/${po.id}/payments`)
+        .set("Authorization", `Bearer ${ownerToken}`)
+        .set("Idempotency-Key", idemKey())
+        .send({ version: staleVersion, amount: 50, invoiceAmount: 100, paymentDate: "2026-08-01" });
+      expect(staleRes.status).toBe(409);
+    });
+  });
 });

@@ -863,6 +863,141 @@ describe("Expenses", () => {
     });
   });
 
+  describe("HNT-FIN-001: financial-field freeze + corrections once paid", () => {
+    async function createPaidExpenseAs(token: string, overrides: Record<string, unknown> = {}) {
+      const expense = await createExpenseAs(token, overrides);
+      const approved = await request(app)
+        .post(`/expenses/${expense.id}/approve`)
+        .set("Authorization", `Bearer ${token}`)
+        .set("Idempotency-Key", idemKey())
+        .send({ version: expense.version });
+      const paid = await request(app)
+        .post(`/expenses/${expense.id}/mark-paid`)
+        .set("Authorization", `Bearer ${token}`)
+        .set("Idempotency-Key", idemKey())
+        .send({ version: approved.body.data.version });
+      return paid.body.data;
+    }
+
+    it.each(["amount", "categoryId", "taxAmount", "expenseDate"])(
+      "PATCH on a paid expense's %s returns 409, not a silent mutation",
+      async (field) => {
+        const paid = await createPaidExpenseAs(ownerToken);
+        const patchValue =
+          field === "amount"
+            ? { amount: 999 }
+            : field === "categoryId"
+              ? { categoryId }
+              : field === "taxAmount"
+                ? { taxAmount: 10 }
+                : { expenseDate: isoDate(-1) };
+        const res = await request(app)
+          .patch(`/expenses/${paid.id}`)
+          .set("Authorization", `Bearer ${ownerToken}`)
+          .set("Idempotency-Key", idemKey())
+          .send({ version: paid.version, ...patchValue });
+        expect(res.status).toBe(409);
+
+        const reloaded = await prisma.expenses.findUniqueOrThrow({ where: { id: paid.id } });
+        expect(Number(reloaded.amount)).toBe(500); // provably unchanged
+      }
+    );
+
+    it("PATCH on a paid expense's paymentMethodId also returns 409", async () => {
+      const pm = await createTestPaymentMethod(businessId);
+      const paid = await createPaidExpenseAs(ownerToken);
+      const res = await request(app)
+        .patch(`/expenses/${paid.id}`)
+        .set("Authorization", `Bearer ${ownerToken}`)
+        .set("Idempotency-Key", idemKey())
+        .send({ version: paid.version, paymentMethodId: pm.id });
+      expect(res.status).toBe(409);
+    });
+
+    it("non-financial annotations (description/notes/tagIds) remain freely editable once paid", async () => {
+      const paid = await createPaidExpenseAs(ownerToken);
+      const res = await request(app)
+        .patch(`/expenses/${paid.id}`)
+        .set("Authorization", `Bearer ${ownerToken}`)
+        .set("Idempotency-Key", idemKey())
+        .send({ version: paid.version, description: "Updated note, non-financial" });
+      expect(res.status).toBe(200);
+      expect(res.body.data.description).toBe("Updated note, non-financial");
+    });
+
+    it("records a correction, leaves the original row's amount untouched, and effectiveAmount reflects the correction", async () => {
+      const paid = await createPaidExpenseAs(ownerToken); // amount = 500
+      const res = await request(app)
+        .post(`/expenses/${paid.id}/corrections`)
+        .set("Authorization", `Bearer ${ownerToken}`)
+        .set("Idempotency-Key", idemKey())
+        .send({ reason: "Original receipt undercounted VAT-inclusive total", effectiveDate: isoDate(-1), newAmount: 550 });
+      expect(res.status).toBe(201);
+      expect(res.body.data.new_amount).toBe("550");
+
+      // Original row's own amount is provably unchanged -- the correction
+      // record is what carries the true value, never an in-place rewrite.
+      const reloaded = await prisma.expenses.findUniqueOrThrow({ where: { id: paid.id } });
+      expect(Number(reloaded.amount)).toBe(500);
+
+      const getRes = await request(app).get(`/expenses/${paid.id}`).set("Authorization", `Bearer ${ownerToken}`);
+      expect(getRes.body.data.effectiveAmount).toBe("550");
+      expect(getRes.body.data.expense_corrections).toHaveLength(1);
+    });
+
+    it("a duplicate correction attempt (same Idempotency-Key) is idempotent -- no second row", async () => {
+      const paid = await createPaidExpenseAs(ownerToken);
+      const key = idemKey();
+      const body = { reason: "Correction", effectiveDate: isoDate(-1), newAmount: 600 };
+
+      const first = await request(app).post(`/expenses/${paid.id}/corrections`).set("Authorization", `Bearer ${ownerToken}`).set("Idempotency-Key", key).send(body);
+      expect(first.status).toBe(201);
+      const second = await request(app).post(`/expenses/${paid.id}/corrections`).set("Authorization", `Bearer ${ownerToken}`).set("Idempotency-Key", key).send(body);
+      expect(second.status).toBe(201);
+      expect(second.body.data.id).toBe(first.body.data.id);
+
+      const corrections = await prisma.expense_corrections.findMany({ where: { expense_id: paid.id } });
+      expect(corrections).toHaveLength(1);
+    });
+
+    it("rejects a correction against a still-pending (not yet paid) expense", async () => {
+      const expense = await createExpenseAs(ownerToken);
+      const res = await request(app)
+        .post(`/expenses/${expense.id}/corrections`)
+        .set("Authorization", `Bearer ${ownerToken}`)
+        .set("Idempotency-Key", idemKey())
+        .send({ reason: "x", effectiveDate: isoDate(-1), newAmount: 100 });
+      expect(res.status).toBe(400);
+    });
+
+    it("rejects a correction with no field actually being corrected", async () => {
+      const paid = await createPaidExpenseAs(ownerToken);
+      const res = await request(app)
+        .post(`/expenses/${paid.id}/corrections`)
+        .set("Authorization", `Bearer ${ownerToken}`)
+        .set("Idempotency-Key", idemKey())
+        .send({ reason: "x", effectiveDate: isoDate(-1) });
+      expect(res.status).toBe(400);
+    });
+
+    const rbacCases: { role: UserRole; canCorrect: boolean }[] = [
+      { role: "owner", canCorrect: true },
+      { role: "manager", canCorrect: true },
+      { role: "accountant", canCorrect: false },
+    ];
+    it.each(rbacCases)("role=$role correction write=$canCorrect", async ({ role, canCorrect }) => {
+      const paid = await createPaidExpenseAs(ownerToken);
+      const user = await createTestUser(businessId, role);
+      const token = mintAccessToken(user);
+      const res = await request(app)
+        .post(`/expenses/${paid.id}/corrections`)
+        .set("Authorization", `Bearer ${token}`)
+        .set("Idempotency-Key", idemKey())
+        .send({ reason: "RBAC test", effectiveDate: isoDate(-1), newAmount: 100 });
+      expect(res.status).toBe(canCorrect ? 201 : 403);
+    });
+  });
+
   describe("Attachment deletion", () => {
     const validAttachment = (overrides: Record<string, unknown> = {}) => ({
       filename: "receipt.jpg",

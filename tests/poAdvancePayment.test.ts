@@ -160,17 +160,23 @@ describe("PO Advance Payments", () => {
   });
 
   describe("Overpayment rejection", () => {
-    it("rejects a single payment exceeding the invoice total", async () => {
+    // HNT2-PO-001 fix -- the cap check now runs INSIDE the transaction,
+    // under a row lock on the Proforma Invoice, so a rejected overpayment
+    // is a genuine state conflict (what's actually still available on the
+    // invoice, re-checked under lock) rather than a static request-shape
+    // validation error -- 409, not 400. Deliberate, audit-mandated change
+    // from this test's own original 400 expectation.
+    it("rejects a single payment exceeding the invoice total (409, a state conflict under lock)", async () => {
       const { po, proforma, instruction } = await createSentPoWithProforma(10, 10); // total = 100
       const res = await request(app)
         .post(`/purchase-orders/${po.id}/advance-payments`)
         .set("Authorization", `Bearer ${ownerToken}`)
         .set("Idempotency-Key", idemKey())
         .send({ proformaInvoiceId: proforma.id, supplierPaymentInstructionId: instruction.id, amount: 150, currency: "KES" });
-      expect(res.status).toBe(400);
+      expect(res.status).toBe(409);
     });
 
-    it("rejects an installment that would push the cumulative total over the invoice total", async () => {
+    it("rejects an installment that would push the cumulative total over the invoice total (409)", async () => {
       const { po, proforma, instruction } = await createSentPoWithProforma(10, 10); // total = 100
       await request(app)
         .post(`/purchase-orders/${po.id}/advance-payments`)
@@ -183,7 +189,41 @@ describe("PO Advance Payments", () => {
         .set("Authorization", `Bearer ${ownerToken}`)
         .set("Idempotency-Key", idemKey())
         .send({ proformaInvoiceId: proforma.id, supplierPaymentInstructionId: instruction.id, amount: 30, currency: "KES" });
-      expect(res.status).toBe(400);
+      expect(res.status).toBe(409);
+    });
+
+    // HNT2-PO-001's own required test: a genuine concurrent integration
+    // test against real Postgres/Neon concurrency, not mocked Prisma --
+    // two simultaneous requests whose COMBINED total exceeds the cap must
+    // result in exactly one success, never both landing (the pre-fix bug)
+    // and never the invoice's own true paid total exceeding its cap.
+    it("under genuine concurrency, two simultaneous payments whose combined total exceeds the cap -- exactly one succeeds", async () => {
+      const { po, proforma, instruction } = await createSentPoWithProforma(10, 10); // total = 100
+
+      const [first, second] = await Promise.all([
+        request(app)
+          .post(`/purchase-orders/${po.id}/advance-payments`)
+          .set("Authorization", `Bearer ${ownerToken}`)
+          .set("Idempotency-Key", idemKey())
+          .send({ proformaInvoiceId: proforma.id, supplierPaymentInstructionId: instruction.id, amount: 60, currency: "KES" }),
+        request(app)
+          .post(`/purchase-orders/${po.id}/advance-payments`)
+          .set("Authorization", `Bearer ${ownerToken}`)
+          .set("Idempotency-Key", idemKey())
+          .send({ proformaInvoiceId: proforma.id, supplierPaymentInstructionId: instruction.id, amount: 60, currency: "KES" }),
+      ]);
+
+      const statuses = [first.status, second.status].sort();
+      expect(statuses).toEqual([201, 409]);
+
+      // The real, authoritative proof: the invoice's own true recorded
+      // total, read fresh from the database, never exceeds its cap --
+      // not just that one HTTP response happened to say 409.
+      const payments = await prisma.po_advance_payments.findMany({ where: { proforma_invoice_id: proforma.id } });
+      expect(payments).toHaveLength(1);
+      const total = payments.reduce((sum, p) => sum + Number(p.amount), 0);
+      expect(total).toBeLessThanOrEqual(100);
+      expect(total).toBe(60);
     });
   });
 

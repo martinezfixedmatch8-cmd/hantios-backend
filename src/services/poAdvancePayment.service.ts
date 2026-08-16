@@ -2,7 +2,7 @@ import { Prisma } from "@prisma/client";
 import { prisma } from "../lib/prisma";
 import { generateId } from "../lib/ids";
 import { getOwned } from "../lib/ownership";
-import { badRequest, notFound } from "../lib/errors";
+import { badRequest, conflict, notFound } from "../lib/errors";
 import { writeAuditLog } from "../lib/auditLog";
 import { domainEvents } from "../lib/events";
 import { claimIdempotencyKey, completeIdempotencyKey } from "../lib/idempotency";
@@ -62,23 +62,43 @@ export async function recordAdvancePayment(poId: string, input: RecordAdvancePay
 
   const amount = new Prisma.Decimal(input.amount);
 
-  // Overpayment rejection -- sum of advance payments so far + this amount
-  // must not exceed the Proforma Invoice total. No default allowance for
-  // prepaying beyond 100%.
-  const existingPayments = await prisma.po_advance_payments.findMany({
-    where: { proforma_invoice_id: input.proformaInvoiceId },
-    select: { amount: true },
-  });
-  const paidSoFar = existingPayments.reduce((sum, p) => sum.plus(p.amount), new Prisma.Decimal(0));
-  const newTotal = paidSoFar.plus(amount);
-  if (newTotal.greaterThan(invoice.total)) {
-    throw badRequest(
-      `Advance payment of ${amount.toString()} would bring total advance payments to ${newTotal.toString()}, exceeding the proforma invoice total of ${invoice.total.toString()}`
-    );
-  }
-
   const result = await prisma.$transaction(async (tx) => {
     await claimIdempotencyKey(tx, actor.businessId, idempotencyKey, recordAdvancePaymentEndpoint(poId));
+
+    // HNT2-PO-001 fix -- the overpayment cap check used to read
+    // existingPayments and compare against invoice.total BEFORE this
+    // transaction began, so two concurrent requests could both read the
+    // same paidSoFar, both pass the cap check, and both commit, jointly
+    // exceeding the proforma invoice's own total. Fixed by locking the
+    // Proforma Invoice row for the duration of this transaction -- a
+    // standard Postgres row lock, the same technique already proven under
+    // real concurrency elsewhere in this repo (Sale Refund's own row lock
+    // on the original sale) -- so a second concurrent request against the
+    // SAME invoice blocks here until the first commits or rolls back, and
+    // then re-sums against the now-committed history, never a stale
+    // pre-transaction read. "Non-reversed" per the audit's own wording is
+    // not yet a real distinction -- po_advance_payments has no reversal
+    // concept yet (that's Batch 4 / HNT2-PO-002's own future work, which
+    // explicitly depends on this fix being merged first) -- so every
+    // existing row for this invoice is summed as-is; once a reversal
+    // column exists, this query is the one place that needs to also
+    // exclude reversed rows.
+    await tx.$queryRaw`SELECT id FROM po_proforma_invoices WHERE id = ${input.proformaInvoiceId} FOR UPDATE`;
+
+    const existingPayments = await tx.po_advance_payments.findMany({
+      where: { proforma_invoice_id: input.proformaInvoiceId },
+      select: { amount: true },
+    });
+    const paidSoFar = existingPayments.reduce((sum, p) => sum.plus(p.amount), new Prisma.Decimal(0));
+    const newTotal = paidSoFar.plus(amount);
+    if (newTotal.greaterThan(invoice.total)) {
+      // A deterministic 409, not 400 -- this is a genuine state conflict
+      // (what's actually still available on the invoice, re-checked under
+      // lock), not a static validation error about the request's own shape.
+      throw conflict(
+        `Advance payment of ${amount.toString()} would bring total advance payments to ${newTotal.toString()}, exceeding the proforma invoice total of ${invoice.total.toString()} -- ${paidSoFar.toString()} is already recorded`
+      );
+    }
 
     // Snapshot the instruction's details at time of payment -- instructions
     // can change later, this payment record must not.

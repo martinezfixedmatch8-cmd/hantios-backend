@@ -3,6 +3,7 @@ import { prisma } from "../lib/prisma";
 import { generateId } from "../lib/ids";
 import { getOwned } from "../lib/ownership";
 import { writeAuditLog } from "../lib/auditLog";
+import { normalizeSize } from "../lib/branchInventory";
 import { resolveListQuery, paginate } from "../lib/pagination";
 import { badRequest, conflict } from "../lib/errors";
 import { domainEvents } from "../lib/events";
@@ -214,7 +215,7 @@ export async function adjustProductStock(productId: string, input: AdjustStockIn
 
   const adjustment = await prisma.$transaction(async (tx) => {
     const existing = await tx.branch_inventory.findFirst({
-      where: { branch_id: input.branchId, product_id: productId, size: input.size ?? null, business_id: actor.businessId },
+      where: { branch_id: input.branchId, product_id: productId, size: normalizeSize(input.size), business_id: actor.businessId },
       orderBy: { id: "asc" },
     });
 
@@ -235,7 +236,7 @@ export async function adjustProductStock(productId: string, input: AdjustStockIn
             business_id: actor.businessId,
             branch_id: input.branchId,
             product_id: productId,
-            size: input.size ?? null,
+            size: normalizeSize(input.size),
             quantity: quantityAfter,
             // Matches the schema's own @default(0) rather than hardcoding a
             // different starting value -- the first subsequent update takes it to 1.

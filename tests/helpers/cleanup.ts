@@ -101,12 +101,15 @@ export async function cleanupTestBusiness(businessId: string): Promise<void> {
   await prisma.grn_counters.deleteMany({ where: { business_id: businessId } });
   await prisma.wsm_counters.deleteMany({ where: { business_id: businessId } });
 
-  // expense_attachments/expense_tags/expense_recurrence all FK to expenses --
-  // delete before it. expense_tags has no direct business_id column (a pure
-  // junction table), so it's scoped via the expenses relation instead.
+  // expense_attachments/expense_tags/expense_recurrence/expense_corrections
+  // all FK to expenses -- delete before it. expense_tags has no direct
+  // business_id column (a pure junction table), so it's scoped via the
+  // expenses relation instead. expense_corrections is HNT-FIN-001's own
+  // append-only correction ledger (RESTRICT), must go first too.
   await prisma.expense_attachments.deleteMany({ where: { business_id: businessId } });
   await prisma.expense_tags.deleteMany({ where: { expenses: { business_id: businessId } } });
   await prisma.expense_recurrence.deleteMany({ where: { business_id: businessId } });
+  await prisma.expense_corrections.deleteMany({ where: { business_id: businessId } });
   await prisma.expenses.deleteMany({ where: { business_id: businessId } });
   await prisma.expense_categories.deleteMany({ where: { business_id: businessId } });
   await prisma.expense_counters.deleteMany({ where: { business_id: businessId } });

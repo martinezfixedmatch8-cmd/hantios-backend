@@ -15,6 +15,7 @@ import {
   rejectExpense,
   markExpensePaid,
   updateRecurrence,
+  createExpenseCorrection,
 } from "../controllers/expense.controller";
 
 const router = Router();
@@ -47,5 +48,9 @@ router.post("/:id/reject", requireRole(...writeRoles), requireIdempotencyKey, re
 router.post("/:id/mark-paid", requireRole(...writeRoles), requireIdempotencyKey, markExpensePaid);
 // Recurrence schedule management -- architecture-only, no scheduler reads it.
 router.patch("/:id/recurrence", requireRole(...writeRoles), requireIdempotencyKey, updateRecurrence);
+// HNT-FIN-001 remediation -- the only way to correct a frozen financial
+// field on an already-paid expense. Same elevated bar as every other
+// financial-mutation action on this resource.
+router.post("/:id/corrections", requireRole(...writeRoles), requireIdempotencyKey, createExpenseCorrection);
 
 export default router;

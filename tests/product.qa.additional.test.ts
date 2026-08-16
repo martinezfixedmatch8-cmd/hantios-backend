@@ -599,72 +599,66 @@ describe("Products - QA deep-dive (Session 2)", () => {
   });
 
   // ---------------------------------------------------------------------
-  // 6. size=NULL dedupe limitation: confirm no DATA CORRUPTION when two
-  //    branch_inventory rows exist for the same (branch, product, size=null).
+  // 6. HNT-INV-001 remediation (2026-08-16): size=NULL no longer arises
+  //    through any application code path -- "no size" is now normalized to
+  //    "" everywhere branch_inventory.size is read or written (see
+  //    src/lib/branchInventory.ts), making the pre-existing
+  //    @@unique([branch_id, product_id, size]) a real, enforced guard going
+  //    forward. This test used to document that gap as an "accepted
+  //    limitation"; it now documents the corrected, intended behavior:
+  //    any LEGACY size=NULL rows left over from before this fix are inert
+  //    and safely ignored (never touched, never corrupted) by normalized
+  //    application code, which always targets the real "" row instead.
   // ---------------------------------------------------------------------
-  describe("size=NULL duplicate branch_inventory rows (accepted limitation) -- no data corruption", () => {
-    it("adjusts exactly one row, doesn't crash, doesn't silently double-adjust, when two null-size duplicate rows exist", async () => {
+  describe("size=NULL legacy rows (pre-HNT-INV-001 data) are inert and never corrupted by normalized writes", () => {
+    it("a stock adjustment with no size creates/uses the normalized \"\" row, never touching or double-counting pre-existing legacy size=NULL rows", async () => {
       const product = await createTestProduct(businessId);
       const branch = await createTestBranch(businessId);
 
-      // Manually create two rows with identical (branch_id, product_id, size=null)
-      // via direct Prisma calls, bypassing the app layer's find-then-branch
-      // workaround -- simulates how such duplicates could arise in this repo's
-      // documented, accepted gap (NULL doesn't dedupe in the unique index).
-      const rowA = await prisma.branch_inventory.create({
+      // Simulates leftover PRE-FIX data: two legacy rows with a real NULL
+      // size, created via a direct Prisma call bypassing the now-normalized
+      // application layer entirely (the only way a NULL row can exist at
+      // all going forward).
+      await prisma.branch_inventory.create({
         data: { id: generateId(), business_id: businessId, branch_id: branch.id, product_id: product.id, size: null, quantity: 10, version: 0 },
       });
-      const rowB = await prisma.branch_inventory.create({
+      await prisma.branch_inventory.create({
         data: { id: generateId(), business_id: businessId, branch_id: branch.id, product_id: product.id, size: null, quantity: 100, version: 0 },
       });
 
       const res = await request(app)
         .post(`/products/${product.id}/stock-adjustment`)
         .set("Authorization", `Bearer ${ownerToken}`)
-        .send({ branchId: branch.id, quantity: 4, direction: "increase", adjustmentType: "found", reason: "Duplicate-row sanity check" });
+        .send({ branchId: branch.id, quantity: 4, direction: "increase", adjustmentType: "found", reason: "Legacy-row sanity check" });
       expect(res.status).toBe(201);
 
-      const rows = await prisma.branch_inventory.findMany({
+      // The two legacy NULL rows are completely untouched -- the
+      // normalized query (size: "") can never match them. IDs are random
+      // UUIDs (generateId() = randomUUID()), not sequential, so "order by
+      // id asc" is NOT the same as "creation order" -- assert the SET of
+      // quantities, never a specific row's position.
+      const legacyRows = await prisma.branch_inventory.findMany({
         where: { branch_id: branch.id, product_id: product.id, size: null },
-        orderBy: { id: "asc" },
       });
-      expect(rows).toHaveLength(2); // still exactly the two rows, no new row created, none deleted
+      expect(legacyRows).toHaveLength(2);
+      expect(legacyRows.map((r) => Number(r.quantity)).sort((a, b) => a - b)).toEqual([10, 100]);
+      expect(legacyRows.every((r) => r.version === 0)).toBe(true); // neither was ever written to
 
-      const [first, second] = rows;
-      const totalQuantity = Number(first.quantity) + Number(second.quantity);
-      // Exactly one row absorbed the +4 -- total across both rows moved by
-      // exactly the adjustment amount, not 0 (silently lost) and not 8
-      // (double-applied to both).
-      expect(totalQuantity).toBe(114);
+      // A brand-new, genuinely normalized row was created instead, at the
+      // real "" sentinel, carrying the adjustment's own opening quantity.
+      const normalizedRow = await prisma.branch_inventory.findFirst({
+        where: { branch_id: branch.id, product_id: product.id, size: "" },
+      });
+      expect(normalizedRow).not.toBeNull();
+      expect(Number(normalizedRow!.quantity)).toBe(4);
 
-      // Confirm it's genuinely one row unchanged and one row changed by
-      // exactly 4, not some other corrupt split.
-      const untouchedCount = rows.filter((r) => Number(r.quantity) === 10 || Number(r.quantity) === 100).length;
-      const changedCount = rows.filter((r) => Number(r.quantity) === 14 || Number(r.quantity) === 104).length;
-      expect(untouchedCount).toBe(1);
-      expect(changedCount).toBe(1);
-
-      // Exactly one InventoryAdjustment row was written for this call (no
-      // double-write against both rows).
+      // Exactly one InventoryAdjustment row was written for this call --
+      // the legacy rows were never touched, so nothing was double-written
+      // against them.
       const adjustments = await prisma.inventory_adjustments.findMany({
-        where: { product_id: product.id, branch_id: branch.id, reason: "Duplicate-row sanity check" },
+        where: { product_id: product.id, branch_id: branch.id, reason: "Legacy-row sanity check" },
       });
       expect(adjustments).toHaveLength(1);
-
-      // IDs are random UUIDs (generateId() = randomUUID()), not sequential --
-      // "order by id asc" is therefore NOT the same as "creation order". The
-      // service picks whichever row sorts first lexicographically by id, which
-      // is exactly the already-accepted "arbitrary pick among duplicates"
-      // limitation (confirmed here empirically: a first run of this same test
-      // picked rowA, a later run picked rowB, purely depending on random UUID
-      // ordering) -- NOT a bug, just documented precisely rather than assumed.
-      const [expectedUpdated, expectedUntouched] = [rowA, rowB].sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
-      const updatedRow = await prisma.branch_inventory.findUnique({ where: { id: expectedUpdated.id } });
-      const untouchedRow = await prisma.branch_inventory.findUnique({ where: { id: expectedUntouched.id } });
-      expect(Number(updatedRow?.quantity)).toBe(Number(expectedUpdated.quantity) + 4);
-      expect(Number(untouchedRow?.quantity)).toBe(Number(expectedUntouched.quantity));
-      expect(updatedRow?.version).toBe(1);
-      expect(untouchedRow?.version).toBe(0);
     });
   });
 });

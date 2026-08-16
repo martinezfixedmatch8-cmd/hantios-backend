@@ -1,0 +1,19 @@
+-- HNT-INV-001 remediation -- branch_inventory.size normalized from NULL to
+-- "" for "no size," the same convention warehouse_stock already uses,
+-- making the pre-existing @@unique([branch_id, product_id, size]) a real,
+-- enforced guard (Postgres never matches NULL = NULL inside a unique
+-- index, so every no-size product previously bypassed this constraint
+-- entirely).
+--
+-- Verified live against the actual Neon DB before this migration was
+-- written: zero existing duplicate (branch_id, product_id) groups among
+-- size=NULL rows today, so this is a pure normalization, not a
+-- duplicate-repair migration -- every existing NULL row is already unique
+-- within its own (branch_id, product_id) group and can be updated in place
+-- with no constraint violation.
+--
+-- The column itself stays nullable at the schema/type level (String?),
+-- matching warehouse_stock's own identical precedent exactly -- what
+-- changes is that no application code path will ever write or query a
+-- real NULL again (see src/lib/branchInventory.ts).
+UPDATE "branch_inventory" SET "size" = '' WHERE "size" IS NULL;

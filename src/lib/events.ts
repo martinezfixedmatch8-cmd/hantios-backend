@@ -29,6 +29,8 @@ export interface DomainEventPayloads {
   ExpenseApproved: { expenseId: string; businessId: string; approvedBy: string };
   ExpenseRejected: { expenseId: string; businessId: string; rejectedBy: string; reason: string };
   ExpensePaid: { expenseId: string; businessId: string; paidBy: string };
+  // HNT-FIN-001 remediation -- a correction against an already-paid expense.
+  ExpenseCorrected: { businessId: string; expenseId: string; correctionId: string; reason: string };
   // Module 02 (Inventory) -- the first domain events in this repo with a
   // real production subscriber (src/lib/stockAlertSubscriber.ts); every
   // other event above still has zero subscribers, only ephemeral test

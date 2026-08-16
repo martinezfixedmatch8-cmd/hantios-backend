@@ -172,6 +172,16 @@ export async function supersedeCommercialInvoice(
       throw badRequest("Commercial invoice was modified concurrently -- please retry");
     }
 
+    // HNT-PO-001 fix -- a supersede used to never touch purchase_orders at
+    // all, so recordPurchaseOrderPayment's own PO-version guard could never
+    // detect that the invoice it read pre-transaction had since been
+    // superseded. Bumping the PO's own version here means any payment
+    // request racing against this supersede -- even one that hasn't yet
+    // adopted the "re-read everything inside the transaction" fix below --
+    // fails its version check instead of silently matching against a
+    // stale invoice total.
+    await tx.purchase_orders.updateMany({ where: { id: poId, business_id: actor.businessId }, data: { version: { increment: 1 } } });
+
     const invoiceNumber = await getNextCommercialInvoiceNumber(tx, actor.businessId);
 
     const created = await tx.po_commercial_invoices.create({

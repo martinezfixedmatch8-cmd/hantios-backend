@@ -335,8 +335,7 @@ export async function getPayrollRecord(id: string, businessId: string) {
     "Payroll record"
   );
 
-  const effectiveAmount = record.commission_adjustments
-    .reduce((sum, a) => sum.plus(a.delta_amount), record.payroll_reversals.reduce((sum, r) => sum.plus(r.delta_amount), record.amount));
+  const effectiveAmount = computeEffectiveAmount(record.amount, record.payroll_reversals, record.commission_adjustments);
 
   return { ...record, effectiveAmount: effectiveAmount.toString() };
 }
@@ -566,6 +565,22 @@ export interface CreatePayrollReversalInput {
   reason: string;
 }
 
+// HNT-PAY-003 remediation -- the SAME computation getPayrollRecord's own
+// effectiveAmount already uses (amount + every reversal's delta + every
+// commission adjustment's delta), extracted so the bound check below
+// reuses it exactly rather than duplicating the arithmetic.
+function computeEffectiveAmount(
+  amount: Prisma.Decimal,
+  reversals: { delta_amount: Prisma.Decimal }[],
+  commissionAdjustments: { delta_amount: Prisma.Decimal }[]
+): Prisma.Decimal {
+  return commissionAdjustments.reduce((sum, a) => sum.plus(a.delta_amount), reversals.reduce((sum, r) => sum.plus(r.delta_amount), amount));
+}
+
+// Confirmed business policy (HNT-PAY-003): effectiveAmount must stay >= 0.
+// No separate cap on the upside -- a positive correction (e.g. a bonus or
+// back-pay adjustment) can legitimately push effectiveAmount above the
+// original amount, that's not a bug.
 export async function createPayrollReversal(
   payrollRecordId: string,
   input: CreatePayrollReversalInput,
@@ -586,12 +601,33 @@ export async function createPayrollReversal(
   const reversal = await prisma.$transaction(async (tx) => {
     await claimIdempotencyKey(tx, actor.businessId, idempotencyKey, endpoint);
 
+    // HNT-PAY-003 fix -- lock the payroll record row so two concurrent
+    // reversals against the SAME record can never both read the same
+    // starting effectiveAmount and jointly push it out of bounds; re-read
+    // the reversal/adjustment history under that lock (never a stale
+    // pre-transaction read) before deciding whether this new delta is
+    // acceptable.
+    await tx.$queryRaw`SELECT id FROM payroll_records WHERE id = ${payrollRecordId} FOR UPDATE`;
+
+    const [existingReversals, existingCommissionAdjustments] = await Promise.all([
+      tx.payroll_reversals.findMany({ where: { payroll_record_id: payrollRecordId }, select: { delta_amount: true } }),
+      tx.commission_adjustments.findMany({ where: { payroll_record_id: payrollRecordId }, select: { delta_amount: true } }),
+    ]);
+    const deltaAmount = new Prisma.Decimal(input.deltaAmount);
+    const currentEffective = computeEffectiveAmount(record.amount, existingReversals, existingCommissionAdjustments);
+    const projectedEffective = currentEffective.plus(deltaAmount);
+    if (projectedEffective.lessThan(0)) {
+      throw badRequest(
+        `This reversal would bring the effective paid amount to ${projectedEffective.toString()}, which is negative -- the effective amount must stay >= 0 (currently ${currentEffective.toString()})`
+      );
+    }
+
     const created = await tx.payroll_reversals.create({
       data: {
         id: generateId(),
         business_id: actor.businessId,
         payroll_record_id: payrollRecordId,
-        delta_amount: new Prisma.Decimal(input.deltaAmount),
+        delta_amount: deltaAmount,
         reason: input.reason,
         created_by: actor.userId,
       },

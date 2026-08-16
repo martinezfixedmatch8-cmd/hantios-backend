@@ -12,6 +12,7 @@ import {
   rejectExpenseSchema,
   markPaidExpenseSchema,
   updateRecurrenceSchema,
+  createExpenseCorrectionSchema,
 } from "../validation/expense.schema";
 import { idParamSchema } from "../validation/common.schema";
 import * as expenseService from "../services/expense.service";
@@ -243,6 +244,27 @@ export async function updateRecurrence(req: Request, res: Response, next: NextFu
     const input = updateRecurrenceSchema.parse(req.body);
     const recurrence = await expenseService.updateRecurrence(id, input, actor, idempotencyKey);
     res.status(200).json({ data: recurrence });
+  } catch (err) {
+    next(err);
+  }
+}
+
+// HNT-FIN-001 remediation.
+export async function createExpenseCorrection(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const actor = getActor(req);
+    const { id } = idParamSchema.parse(req.params);
+    const idempotencyKey = getIdempotencyKey(req);
+
+    const replayed = await getReplayedResponse(actor.businessId, idempotencyKey, expenseService.createExpenseCorrectionEndpoint(id));
+    if (replayed) {
+      res.status(replayed.status).json(replayed.body);
+      return;
+    }
+
+    const input = createExpenseCorrectionSchema.parse(req.body);
+    const correction = await expenseService.createExpenseCorrection(id, input, actor, idempotencyKey);
+    res.status(201).json({ data: correction });
   } catch (err) {
     next(err);
   }

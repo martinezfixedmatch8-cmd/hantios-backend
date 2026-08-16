@@ -8,6 +8,7 @@ import { badRequest, conflict, forbidden } from "../lib/errors";
 import { claimIdempotencyKey, completeIdempotencyKey } from "../lib/idempotency";
 import { getNextReceiptNumber } from "../lib/receiptNumber";
 import { isSameBusinessDay } from "../lib/businessTime";
+import { normalizeSize } from "../lib/branchInventory";
 import { domainEvents } from "../lib/events";
 import {
   generateReceiptInTransaction,
@@ -215,7 +216,7 @@ export async function createSale(input: CreateSaleInput, actor: Actor, idempoten
     for (const line of input.items) {
       const product = productMap.get(line.productId)!;
       const row = await tx.branch_inventory.findFirst({
-        where: { business_id: actor.businessId, branch_id: input.branchId, product_id: product.id, size: line.size ?? null },
+        where: { business_id: actor.businessId, branch_id: input.branchId, product_id: product.id, size: normalizeSize(line.size) },
         orderBy: { id: "asc" },
       });
       if (!row) {
@@ -243,7 +244,7 @@ export async function createSale(input: CreateSaleInput, actor: Actor, idempoten
       const quantityAfter = committedRow.quantity;
       decrements.push({
         productId: product.id,
-        size: line.size ?? null,
+        size: normalizeSize(line.size),
         quantityBefore: quantityAfter.plus(line.quantity),
         quantityAfter,
       });
@@ -482,7 +483,7 @@ export async function voidSale(saleId: string, input: VoidSaleInput, actor: Acto
     for (const item of items) {
       const quantity = new Prisma.Decimal(item.quantity);
       const row = await tx.branch_inventory.findFirst({
-        where: { business_id: actor.businessId, branch_id: sale.branch_id, product_id: item.productId, size: item.size },
+        where: { business_id: actor.businessId, branch_id: sale.branch_id, product_id: item.productId, size: normalizeSize(item.size) },
         orderBy: { id: "asc" },
       });
       if (!row) {
@@ -808,7 +809,7 @@ export async function refundSale(saleId: string, input: RefundSaleInput, actor: 
       if (line.restockableQuantity.lessThanOrEqualTo(0)) continue;
 
       const row = await tx.branch_inventory.findFirst({
-        where: { business_id: actor.businessId, branch_id: sale.branch_id, product_id: line.original.productId, size: line.original.size },
+        where: { business_id: actor.businessId, branch_id: sale.branch_id, product_id: line.original.productId, size: normalizeSize(line.original.size) },
         orderBy: { id: "asc" },
       });
       if (!row) {

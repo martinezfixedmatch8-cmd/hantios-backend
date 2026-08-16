@@ -134,6 +134,40 @@ export const restoreExpenseSchema = z.object({
 });
 export type RestoreExpenseInput = z.infer<typeof restoreExpenseSchema>;
 
+// HNT-FIN-001 remediation -- a correction against an already-PAID expense.
+// Every field is the NEW value for that one financial attribute; at least
+// one must be present (a correction that changes nothing is meaningless).
+// Mirrors updateExpenseSchema's own scope/branchId cross-check, applied to
+// the projected post-correction state.
+export const createExpenseCorrectionSchema = z
+  .object({
+    reason: z.string().trim().min(1).max(500),
+    effectiveDate: z.coerce.date(),
+    newAmount: decimalField(z.coerce.number().positive()).optional(),
+    newTaxAmount: decimalField(z.coerce.number().nonnegative()).optional(),
+    newTaxRate: decimalField(z.coerce.number().min(0).max(100)).optional(),
+    newTaxIncluded: z.boolean().optional(),
+    newCategoryId: z.string().uuid().optional(),
+    newPaymentMethodId: z.string().uuid().optional(),
+    newExpenseDate: z.coerce.date().optional(),
+    newBranchId: z.string().uuid().optional(),
+    newScope: z.nativeEnum(ExpenseScope).optional(),
+  })
+  .refine(
+    (data) =>
+      data.newAmount !== undefined ||
+      data.newTaxAmount !== undefined ||
+      data.newTaxRate !== undefined ||
+      data.newTaxIncluded !== undefined ||
+      data.newCategoryId !== undefined ||
+      data.newPaymentMethodId !== undefined ||
+      data.newExpenseDate !== undefined ||
+      data.newBranchId !== undefined ||
+      data.newScope !== undefined,
+    { message: "At least one corrected field must be provided" }
+  );
+export type CreateExpenseCorrectionInput = z.infer<typeof createExpenseCorrectionSchema>;
+
 // No "reason" here -- approving is just "yes, this is fine," unlike reject.
 export const approveExpenseSchema = z.object({
   version: z.number().int().nonnegative(),

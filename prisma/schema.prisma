@@ -123,6 +123,7 @@ model businesses {
   expense_counters                    expense_counters?
   expense_attachments                 expense_attachments[]
   expense_recurrence                  expense_recurrence[]
+  expense_corrections                 expense_corrections[]
   tags                                tags[]
   goods_received_notes                goods_received_notes[]
   grn_counters                        grn_counters?
@@ -543,6 +544,7 @@ model expenses {
   users_expenses_paid_byTousers     users?                    @relation("expenses_paid_byTousers", fields: [paid_by], references: [id])
   expense_attachments               expense_attachments[]
   expense_recurrence                expense_recurrence?
+  expense_corrections               expense_corrections[]
   expense_tags                      expense_tags[]
   purchase_order_payments           purchase_order_payments[]
 
@@ -627,6 +629,42 @@ model expense_recurrence {
   expenses            expenses            @relation(fields: [template_expense_id], references: [id])
 
   @@index([business_id])
+}
+
+// HNT-FIN-001 remediation -- once an expense reaches workflow_status=paid,
+// its financial fields are frozen (enforced in updateExpense); a genuine
+// correction is recorded here instead of ever rewriting the paid row.
+// Typed nullable columns per correctable field (mirrors debt_transactions'
+// own "typed relational columns, only populated on relevant rows"
+// precedent) rather than a generic old/new string pair -- only the field(s)
+// actually being corrected in a given correction event are populated, the
+// rest stay null. At least one must be present (enforced at the Zod layer).
+// The ORIGINAL expenses row is never updated by this -- append-only,
+// same immutability rule as audit_logs/inventory_adjustments.
+model expense_corrections {
+  id                 String        @id
+  business_id        String
+  expense_id         String
+  reason             String
+  effective_date     DateTime      @db.Date
+  new_amount         Decimal?      @db.Decimal(14, 2)
+  new_tax_amount     Decimal?      @db.Decimal(14, 2)
+  new_tax_rate       Decimal?      @db.Decimal(5, 2)
+  new_tax_included   Boolean?
+  new_category_id    String?
+  new_category_name  String?
+  new_payment_method_id String?
+  new_expense_date   DateTime?     @db.Date
+  new_branch_id      String?
+  new_scope          ExpenseScope?
+  created_by         String
+  created_at         DateTime      @default(now())
+  businesses         businesses    @relation(fields: [business_id], references: [id])
+  expenses           expenses      @relation(fields: [expense_id], references: [id])
+  users              users         @relation(fields: [created_by], references: [id])
+
+  @@index([business_id])
+  @@index([expense_id])
 }
 
 // Session 5B. The first true many-to-many relation in this schema (checked:
@@ -2202,6 +2240,7 @@ model users {
   expenses_expenses_rejected_byTousers          expenses[]                           @relation("expenses_rejected_byTousers")
   expenses_expenses_paid_byTousers              expenses[]                           @relation("expenses_paid_byTousers")
   expense_attachments                           expense_attachments[]
+  expense_corrections                           expense_corrections[]
   inventory_adjustments                         inventory_adjustments[]
   login_events                                  login_events[]
   otp_challenges                                otp_challenges[]
@@ -3084,6 +3123,12 @@ model employees {
 // that exists yet. currency_code is snapshotted from Business.currency at
 // the moment this structure is created -- never re-derived later.
 /// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
+// HNT-PAY-002 remediation -- a hand-added partial unique index
+// (ux_employee_compensation_one_current, migration
+// 20260816020000_employee_compensation_no_overlap_hnt_pay_002) enforces at
+// most one currently-open (effective_to IS NULL) row per (business_id,
+// employee_id) -- Prisma's schema DSL has no native partial-unique syntax,
+// same gap as supplier_payment_instructions' own "one default" index.
 model employee_compensation {
   id                  String            @id
   business_id         String

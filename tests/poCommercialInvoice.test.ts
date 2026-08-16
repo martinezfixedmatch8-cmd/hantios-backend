@@ -357,12 +357,17 @@ describe("PO Commercial Invoice + Full Payment Status", () => {
         .set("Idempotency-Key", idemKey())
         .send({ totalAmount: 100, reason: "Re-issued with the same total for a formatting fix" });
 
+      // HNT-PO-001 fix -- the supersede above now advances the PO's own
+      // version (it never did before), so the GRN call must use the
+      // CURRENT version, not the one captured before the supersede.
+      const poAfterSupersede = await request(app).get(`/purchase-orders/${po.id}`).set("Authorization", `Bearer ${ownerToken}`);
       const poItemId = po.purchase_order_items[0].id;
-      await request(app)
+      const grnRes = await request(app)
         .post(`/purchase-orders/${po.id}/goods-received-notes`)
         .set("Authorization", `Bearer ${ownerToken}`)
         .set("Idempotency-Key", idemKey())
-        .send({ version: po.version, items: [{ poItemId, quantityReceived: 10, unitCostActual: 10 }] });
+        .send({ version: poAfterSupersede.body.data.version, items: [{ poItemId, quantityReceived: 10, unitCostActual: 10 }] });
+      expect(grnRes.status).toBe(201);
       const afterGrn = await request(app).get(`/purchase-orders/${po.id}`).set("Authorization", `Bearer ${ownerToken}`);
 
       const paymentRes = await request(app)

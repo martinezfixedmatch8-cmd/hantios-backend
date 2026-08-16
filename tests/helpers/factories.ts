@@ -263,13 +263,18 @@ export async function createTestBranchInventory(
   productId: string,
   overrides: Partial<{ size: string; quantity: number }> = {}
 ) {
+  // HNT-INV-001 -- "no size" is normalized to "" (never a real NULL), same
+  // convention as every application code path touching branch_inventory.size.
+  // An omitted override used to leave this column NULL by default (Prisma
+  // treats `undefined` as "skip the field"), which would create a row every
+  // normalized application query could no longer find.
   return prisma.branch_inventory.create({
     data: {
       id: generateId(),
       business_id: businessId,
       branch_id: branchId,
       product_id: productId,
-      size: overrides.size,
+      size: overrides.size ?? "",
       quantity: overrides.quantity ?? 0,
     },
   });

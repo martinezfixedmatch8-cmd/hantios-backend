@@ -1,0 +1,11 @@
+-- HNT-PAY-002 remediation -- a real DB-level guarantee that at most one
+-- currently-open (effective_to IS NULL) compensation row can ever exist
+-- per employee. Prisma's schema DSL has no native partial-unique syntax,
+-- so this is a hand-added raw-SQL index, same recipe as every other
+-- hand-added constraint in this repo (e.g. supplier_payment_instructions'
+-- own "one default" partial unique index).
+--
+-- Verified live against the actual Neon DB before this migration was
+-- written: zero employees currently have more than one open compensation
+-- row, so no data-repair step is needed before adding this index.
+CREATE UNIQUE INDEX "ux_employee_compensation_one_current" ON "employee_compensation" ("business_id", "employee_id") WHERE "effective_to" IS NULL;

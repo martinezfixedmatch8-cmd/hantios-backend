@@ -5,7 +5,7 @@ import { getOwned } from "../lib/ownership";
 import { badRequest, conflict, notFound } from "../lib/errors";
 import { writeAuditLog } from "../lib/auditLog";
 import { domainEvents } from "../lib/events";
-import { claimIdempotencyKey, completeIdempotencyKey } from "../lib/idempotency";
+import { claimIdempotencyKey, completeIdempotencyKey, getReplayedResponse } from "../lib/idempotency";
 import { paginate, resolveListQuery } from "../lib/pagination";
 import { getNextExpenseNumber } from "../lib/expenseNumber";
 import { getCurrency } from "../lib/currencyReference";
@@ -21,6 +21,7 @@ import {
   RejectExpenseInput,
   MarkPaidExpenseInput,
   UpdateRecurrenceInput,
+  CreateExpenseCorrectionInput,
   MAX_ATTACHMENTS,
 } from "../validation/expense.schema";
 
@@ -44,6 +45,7 @@ const EXPENSE_INCLUDE = {
   expense_attachments: true,
   expense_tags: { include: { tags: true } },
   expense_recurrence: true,
+  expense_corrections: { orderBy: { created_at: "asc" } },
 } as const;
 
 export const CREATE_EXPENSE_ENDPOINT = "POST /expenses";
@@ -73,6 +75,9 @@ export function markPaidExpenseEndpoint(id: string): string {
 }
 export function updateRecurrenceEndpoint(id: string): string {
   return `PATCH /expenses/${id}/recurrence`;
+}
+export function createExpenseCorrectionEndpoint(id: string): string {
+  return `POST /expenses/${id}/corrections`;
 }
 
 async function validateTagIds(tagIds: string[] | undefined, businessId: string): Promise<void> {
@@ -336,13 +341,40 @@ export async function listExpenses(query: ListExpensesQuery, businessId: string)
   return paginate(rows, total, query.page, query.pageSize);
 }
 
+// effectiveAmount reflects the LATEST correction's own new_amount when one
+// exists, else the original amount -- the same "computed fresh on every
+// read, never stored" pattern payroll_records' own effectiveAmount already
+// established. "Report totals must include the correction exactly once" is
+// satisfied by construction: this is the ONE number reporting should ever
+// read, never the original amount summed alongside a separate correction row.
 export async function getExpense(id: string, businessId: string) {
-  return getOwned(prisma.expenses.findUnique({ where: { id }, include: EXPENSE_INCLUDE }), businessId, "Expense");
+  const expense = await getOwned(prisma.expenses.findUnique({ where: { id }, include: EXPENSE_INCLUDE }), businessId, "Expense");
+  const latestAmountCorrection = [...expense.expense_corrections].reverse().find((c) => c.new_amount !== null);
+  const effectiveAmount = (latestAmountCorrection?.new_amount ?? expense.amount).toString();
+  return { ...expense, effectiveAmount };
 }
+
+// HNT-FIN-001 remediation -- the fields that represent the actual financial
+// record of a posted expense (what was spent, on what, when, how it was
+// paid). Once workflow_status="paid", none of these may be changed through
+// a normal PATCH -- a genuine correction goes through createExpenseCorrection
+// instead, which never rewrites the paid row. vendorId/vendorName/
+// referenceNumber/description/notes/tagIds are deliberately NOT frozen --
+// non-financial annotations remain freely editable even once paid.
+const FROZEN_FIELDS_ONCE_PAID = ["branchId", "scope", "categoryId", "amount", "taxAmount", "taxRate", "taxIncluded", "paymentMethodId", "expenseDate"] as const;
 
 export async function updateExpense(id: string, input: UpdateExpenseInput, actor: Actor, idempotencyKey: string) {
   const expense = await getOwned(prisma.expenses.findUnique({ where: { id } }), actor.businessId, "Expense");
   if (expense.status === "archived") throw badRequest("Cannot update an archived expense");
+
+  if (expense.workflow_status === "paid") {
+    const touchedFrozenField = FROZEN_FIELDS_ONCE_PAID.find((field) => input[field] !== undefined);
+    if (touchedFrozenField) {
+      throw conflict(
+        `Cannot change "${touchedFrozenField}" on a paid expense -- its financial fields are frozen once paid. Use POST /expenses/${id}/corrections to record a correction instead.`
+      );
+    }
+  }
 
   // The Zod schema only validates internal consistency of what's PROVIDED --
   // cross-checking against the row's actual current scope/branch_id (for
@@ -713,6 +745,94 @@ export async function markExpensePaid(id: string, input: MarkPaidExpenseInput, a
   domainEvents.publish("ExpensePaid", { expenseId: id, businessId: actor.businessId, paidBy: actor.userId });
 
   return result;
+}
+
+// HNT-FIN-001 remediation -- the ONLY way to change a frozen financial
+// field on an already-paid expense. Never mutates the original expenses
+// row (append-only, same immutability rule as audit_logs/inventory_
+// adjustments/debt_transactions) -- records what the corrected value
+// should be, alongside who/why/when, and getExpense's own effectiveAmount
+// computation is what makes the correction actually count for reporting.
+export async function createExpenseCorrection(id: string, input: CreateExpenseCorrectionInput, actor: Actor, idempotencyKey: string) {
+  const expense = await getOwned(prisma.expenses.findUnique({ where: { id } }), actor.businessId, "Expense");
+  if (expense.workflow_status !== "paid") {
+    throw badRequest("Corrections can only be recorded against a paid expense -- edit a still-open expense directly instead");
+  }
+
+  const nextScope = input.newScope ?? expense.scope;
+  const nextBranchId = input.newBranchId !== undefined ? input.newBranchId : expense.branch_id;
+  if (nextScope === "business" && nextBranchId) throw badRequest("newBranchId must not be set when the resulting scope is business");
+  if (nextScope === "branch" && !nextBranchId) throw badRequest("newBranchId is required when the resulting scope is branch");
+
+  if (input.newBranchId) {
+    const branch = await getOwned(prisma.branches.findUnique({ where: { id: input.newBranchId } }), actor.businessId, "Branch");
+    if (branch.status !== "active") throw badRequest("Branch is archived");
+  }
+  let newCategoryName: string | undefined;
+  if (input.newCategoryId) {
+    const category = await getOwned(prisma.expense_categories.findUnique({ where: { id: input.newCategoryId } }), actor.businessId, "Expense category");
+    if (!category.active) throw badRequest("Expense category is inactive");
+    newCategoryName = category.name;
+  }
+  if (input.newPaymentMethodId) {
+    const pm = await getOwned(prisma.payment_methods.findUnique({ where: { id: input.newPaymentMethodId } }), actor.businessId, "Payment method");
+    if (pm.status !== "active") throw badRequest("Payment method is archived");
+  }
+
+  const endpoint = createExpenseCorrectionEndpoint(id);
+  const replayed = await getReplayedResponse(actor.businessId, idempotencyKey, endpoint);
+  if (replayed) {
+    return (replayed.body as { data: Awaited<ReturnType<typeof prisma.expense_corrections.create>> }).data;
+  }
+
+  const correction = await prisma.$transaction(async (tx) => {
+    await claimIdempotencyKey(tx, actor.businessId, idempotencyKey, endpoint);
+
+    const created = await tx.expense_corrections.create({
+      data: {
+        id: generateId(),
+        business_id: actor.businessId,
+        expense_id: id,
+        reason: input.reason,
+        effective_date: input.effectiveDate,
+        new_amount: input.newAmount !== undefined ? new Prisma.Decimal(input.newAmount) : null,
+        new_tax_amount: input.newTaxAmount !== undefined ? new Prisma.Decimal(input.newTaxAmount) : null,
+        new_tax_rate: input.newTaxRate !== undefined ? new Prisma.Decimal(input.newTaxRate) : null,
+        new_tax_included: input.newTaxIncluded ?? null,
+        new_category_id: input.newCategoryId ?? null,
+        new_category_name: newCategoryName ?? null,
+        new_payment_method_id: input.newPaymentMethodId ?? null,
+        new_expense_date: input.newExpenseDate ?? null,
+        new_branch_id: input.newBranchId ?? null,
+        new_scope: input.newScope ?? null,
+        created_by: actor.userId,
+      },
+    });
+
+    await writeAuditLog(tx, {
+      businessId: actor.businessId,
+      userId: actor.userId,
+      userName: actor.userName,
+      userRole: actor.userRole,
+      action: "expense.corrected",
+      entityType: "expense",
+      entityId: id,
+      reason: input.reason,
+    });
+
+    const responseBody = JSON.parse(JSON.stringify({ data: created })) as unknown;
+    await completeIdempotencyKey(tx, actor.businessId, idempotencyKey, endpoint, 201, responseBody);
+    return created;
+  });
+
+  domainEvents.publish("ExpenseCorrected", {
+    businessId: actor.businessId,
+    expenseId: id,
+    correctionId: correction.id,
+    reason: input.reason,
+  });
+
+  return correction;
 }
 
 // --- Recurrence schedule management (Session 5B, architecture-only) ---

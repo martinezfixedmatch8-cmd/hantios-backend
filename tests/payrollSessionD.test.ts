@@ -343,6 +343,78 @@ describe("Module 12 Session D -- Final Completion", () => {
       expect(getRes.body.data.effectiveAmount).toBe("470"); // 500 - 50 + 20
     });
 
+    // HNT-PAY-003 remediation -- the cumulative bound.
+    it("accepts a reversal landing exactly at the bound (effectiveAmount = 0)", async () => {
+      const period = monthsAgo(15);
+      const { record } = await createPaidRecord(200, period);
+      const res = await request(app)
+        .post(`/payroll/${record.id}/reversals`)
+        .set("Authorization", `Bearer ${ownerToken}`)
+        .set("Idempotency-Key", idemKey())
+        .send({ deltaAmount: -200, reason: "Full reversal, lands exactly at zero" });
+      expect(res.status).toBe(201);
+
+      const getRes = await request(app).get(`/payroll/${record.id}`).set("Authorization", `Bearer ${ownerToken}`);
+      expect(getRes.body.data.effectiveAmount).toBe("0");
+    });
+
+    it("rejects a reversal that would land one cent past the bound (effectiveAmount < 0)", async () => {
+      const period = monthsAgo(16);
+      const { record } = await createPaidRecord(200, period);
+      const res = await request(app)
+        .post(`/payroll/${record.id}/reversals`)
+        .set("Authorization", `Bearer ${ownerToken}`)
+        .set("Idempotency-Key", idemKey())
+        .send({ deltaAmount: -200.01, reason: "Would push effectiveAmount to -0.01" });
+      expect(res.status).toBe(400);
+
+      const getRes = await request(app).get(`/payroll/${record.id}`).set("Authorization", `Bearer ${ownerToken}`);
+      expect(getRes.body.data.effectiveAmount).toBe("200"); // unchanged, the rejected attempt created nothing
+    });
+
+    it("no separate cap on the upside -- a positive correction can legitimately exceed the original amount", async () => {
+      const period = monthsAgo(17);
+      const { record } = await createPaidRecord(200, period);
+      const res = await request(app)
+        .post(`/payroll/${record.id}/reversals`)
+        .set("Authorization", `Bearer ${ownerToken}`)
+        .set("Idempotency-Key", idemKey())
+        .send({ deltaAmount: 500, reason: "Back-pay correction, legitimately exceeds the original amount" });
+      expect(res.status).toBe(201);
+
+      const getRes = await request(app).get(`/payroll/${record.id}`).set("Authorization", `Bearer ${ownerToken}`);
+      expect(getRes.body.data.effectiveAmount).toBe("700"); // 200 + 500, no ceiling
+    });
+
+    it("under genuine concurrency, two simultaneous reversals whose combined delta would cross the bound -- exactly one succeeds, effectiveAmount never goes negative", async () => {
+      const period = monthsAgo(18);
+      const { record } = await createPaidRecord(100, period);
+
+      const [first, second] = await Promise.all([
+        request(app)
+          .post(`/payroll/${record.id}/reversals`)
+          .set("Authorization", `Bearer ${ownerToken}`)
+          .set("Idempotency-Key", idemKey())
+          .send({ deltaAmount: -60, reason: "Concurrent reversal A" }),
+        request(app)
+          .post(`/payroll/${record.id}/reversals`)
+          .set("Authorization", `Bearer ${ownerToken}`)
+          .set("Idempotency-Key", idemKey())
+          .send({ deltaAmount: -60, reason: "Concurrent reversal B" }),
+      ]);
+
+      const statuses = [first.status, second.status].sort();
+      expect(statuses).toEqual([201, 400]);
+
+      const reversals = await prisma.payroll_reversals.findMany({ where: { payroll_record_id: record.id } });
+      expect(reversals).toHaveLength(1);
+
+      const getRes = await request(app).get(`/payroll/${record.id}`).set("Authorization", `Bearer ${ownerToken}`);
+      const effectiveAmount = Number(getRes.body.data.effectiveAmount);
+      expect(effectiveAmount).toBeGreaterThanOrEqual(0); // the real, authoritative proof
+      expect(effectiveAmount).toBe(40); // 100 - 60
+    });
+
     it("rejects a reversal against a still-PENDING record -- corrections to pending records go through commission_adjustments/normal correction, not this ledger", async () => {
       const employee = await createEmployee();
       const period = monthsAgo(12);
