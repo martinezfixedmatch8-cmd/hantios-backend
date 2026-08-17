@@ -1,15 +1,17 @@
 import { Prisma, type users } from "@prisma/client";
 import { prisma } from "../lib/prisma";
 import { generateId } from "../lib/ids";
-import { hashPassword, verifyPassword, recordPasswordHistory } from "../lib/password";
+import { hashPassword, verifyPassword, recordPasswordHistory, isPasswordReused } from "../lib/password";
 import { writeAuditLog } from "../lib/auditLog";
-import { badRequest, conflict, locked, notFound, unauthorized } from "../lib/errors";
-import { CURRENT_TERMS_VERSION, CURRENT_PRIVACY_VERSION } from "../lib/config";
+import { badRequest, conflict, forbidden, locked, notFound, unauthorized } from "../lib/errors";
+import { CURRENT_TERMS_VERSION, CURRENT_PRIVACY_VERSION, env } from "../lib/config";
 import { getNotificationProvider } from "../notifications/registry";
+import { renderEmailTemplate } from "../notifications/EmailTemplateRenderer";
 import { getGoogleAuthProvider, type GoogleIdentity } from "../lib/googleAuth";
 import { getCountryDefaults, findCountry, isValidTimezoneForCountry, isValidPhonePrefixForCountry } from "../lib/countryReference";
 import { createOtpChallenge, verifyOtpChallenge } from "../lib/otp";
-import { issueSession, rotateSession, revokeSession } from "../lib/session";
+import { issueSession, rotateSession, revokeSession, invalidateUserSessions } from "../lib/session";
+import { generateSecureToken, hashToken } from "../lib/tokens";
 import { requiresOtpForNewDevices } from "../lib/businessSettings";
 import { signAccessToken } from "../lib/jwt";
 import { createEmailVerificationToken, sendEmailVerificationNotification } from "./emailVerification.service";
@@ -20,7 +22,11 @@ import type {
   GoogleIdentifyInput,
   VerifyDeviceOtpInput,
   VerifySignupPhoneOtpInput,
+  ForgotPasswordInput,
+  ResetPasswordInput,
 } from "../validation/auth.schema";
+
+const PASSWORD_RESET_EXPIRY_MINUTES = 60;
 
 interface RequestMeta {
   deviceId: string;
@@ -45,7 +51,13 @@ const FAILED_LOGIN_LOCK_THRESHOLD = 5;
 const FAILED_LOGIN_LOCK_MINUTES = 15;
 
 function toAccessToken(user: users): string {
-  return signAccessToken({ sub: user.id, businessId: user.business_id, role: user.role, name: user.name });
+  return signAccessToken({
+    sub: user.id,
+    businessId: user.business_id,
+    role: user.role,
+    name: user.name,
+    sessionVersion: user.session_version,
+  });
 }
 
 // A client can override currency/timezone/phonePrefix explicitly (see
@@ -212,7 +224,7 @@ export async function signup(input: SignupInput, meta: RequestMeta): Promise<Aut
 }
 
 export async function verifySignupPhoneOtp(input: VerifySignupPhoneOtpInput): Promise<void> {
-  const { userId } = await verifyOtpChallenge(prisma, input.challengeId, input.code);
+  const { userId } = await verifyOtpChallenge(prisma, input.challengeId, input.code, "signup");
   await prisma.users.update({ where: { id: userId }, data: { phone_verified_at: new Date() } });
 }
 
@@ -248,6 +260,16 @@ async function completeLogin(
   meta: RequestMeta,
   rememberMe: boolean
 ): Promise<AuthResult> {
+  // Batch 2 remediation -- closes the other half of HNT2-AUTH-001: without
+  // this, a deactivated account could still complete a brand-new login
+  // (password, Google, or device-OTP) and mint a fresh token whose
+  // session_version naturally matches the current DB value, sailing
+  // straight past authenticate.ts's own revocation check. A non-active
+  // account must never reach a session at all, not just lose existing ones.
+  if (user.status !== "active") {
+    throw forbidden("This account is not active");
+  }
+
   const business = await prisma.businesses.findUniqueOrThrow({ where: { id: user.business_id } });
 
   await prisma.users.update({
@@ -378,7 +400,7 @@ export async function googleLogin(input: GoogleLoginInput, meta: RequestMeta): P
 }
 
 export async function verifyDeviceOtp(input: VerifyDeviceOtpInput, meta: RequestMeta): Promise<AuthResult> {
-  const { userId } = await verifyOtpChallenge(prisma, input.challengeId, input.code);
+  const { userId } = await verifyOtpChallenge(prisma, input.challengeId, input.code, "new_device_login");
   const user = await prisma.users.findUniqueOrThrow({ where: { id: userId } });
   return completeLogin(user, "password", meta, input.rememberMe);
 }
@@ -389,6 +411,16 @@ export async function refresh(
 ): Promise<{ accessToken: string; rawRefreshToken: string; rememberMe: boolean }> {
   const rotated = await rotateSession(prisma, rawRefreshToken, meta);
   const user = await prisma.users.findUniqueOrThrow({ where: { id: rotated.userId } });
+  // Batch 2 remediation -- refresh() already re-fetches the user fresh from
+  // the DB on every call (unlike the access token, which only carries a
+  // point-in-time snapshot), so this check was nearly free to add: a
+  // deactivated account can no longer mint a new access token via refresh
+  // either, even if its refresh-token cookie is technically still valid and
+  // unexpired.
+  if (user.status !== "active") {
+    await revokeSession(prisma, rotated.rawRefreshToken);
+    throw unauthorized("This account is not active");
+  }
   return {
     accessToken: toAccessToken(user),
     rawRefreshToken: rotated.rawRefreshToken,
@@ -398,4 +430,110 @@ export async function refresh(
 
 export async function logout(rawRefreshToken: string): Promise<void> {
   await revokeSession(prisma, rawRefreshToken);
+}
+
+// Batch 2 remediation (HNT2-AUTH-001) -- explicit "log out everywhere,"
+// named directly in the finding's own session_version-bump trigger list.
+// Authenticated (the caller must already hold a valid access token for the
+// account being logged out) -- this is "kill my own other sessions," not an
+// admin action against someone else.
+export async function logoutAll(userId: string): Promise<void> {
+  await invalidateUserSessions(prisma, userId);
+}
+
+// Batch 2 remediation (HNT-AUTH-003) -- always a generic response
+// regardless of whether the email exists, so this can never be used to
+// enumerate real accounts. Rate-limited at the route layer
+// (passwordResetRequestLimiter), not here.
+export async function requestPasswordReset(input: ForgotPasswordInput): Promise<void> {
+  const user = await prisma.users.findUnique({ where: { email: input.email } });
+  // No password_hash means a Google-only account -- there is no password to
+  // reset. Silently no-op, same "never reveal account existence/shape"
+  // reasoning as the not-found case.
+  if (!user || !user.password_hash) {
+    return;
+  }
+
+  const token = generateSecureToken();
+  const expiresAt = new Date(Date.now() + PASSWORD_RESET_EXPIRY_MINUTES * 60 * 1000);
+  await prisma.password_reset_tokens.create({
+    data: {
+      id: generateId(),
+      business_id: user.business_id,
+      user_id: user.id,
+      token_hash: hashToken(token),
+      expires_at: expiresAt,
+    },
+  });
+
+  const resetUrl = `${env.APP_BASE_URL}/reset-password/${token}`;
+  const { subject, body } = renderEmailTemplate("password_reset_requested", { name: user.name, resetUrl });
+  await getNotificationProvider().send({
+    category: "SECURITY",
+    channel: "email",
+    to: user.email,
+    businessId: user.business_id,
+    senderProfile: "SECURITY",
+    subject,
+    body,
+  });
+}
+
+export async function resetPassword(input: ResetPasswordInput): Promise<void> {
+  const tokenHash = hashToken(input.token);
+  const record = await prisma.password_reset_tokens.findUnique({ where: { token_hash: tokenHash } });
+  if (!record || record.consumed_at || record.expires_at < new Date()) {
+    throw badRequest("Invalid or expired reset link");
+  }
+
+  const user = await prisma.users.findUniqueOrThrow({ where: { id: record.user_id } });
+  if (await isPasswordReused(prisma, user.id, input.newPassword)) {
+    throw badRequest("This password was used recently -- choose a different one");
+  }
+  const passwordHash = await hashPassword(input.newPassword);
+
+  await prisma.$transaction(async (tx) => {
+    // Atomic conditional claim -- same shape as otp.ts's own fix: a
+    // concurrent second use of the identical link (double-submit, a
+    // replayed request) is rejected here even if it passed the read-based
+    // checks above, since count===0 means someone else already consumed it
+    // since that read.
+    const claim = await tx.password_reset_tokens.updateMany({
+      where: { id: record.id, consumed_at: null, expires_at: { gt: new Date() } },
+      data: { consumed_at: new Date() },
+    });
+    if (claim.count === 0) {
+      throw badRequest("Invalid or expired reset link");
+    }
+
+    await tx.users.update({ where: { id: user.id }, data: { password_hash: passwordHash } });
+    await recordPasswordHistory(tx, user.id, passwordHash);
+    // HNT-AUTH-003's own explicit requirement: revoke every session and
+    // invalidate every already-issued access token, not just the one used
+    // to request this reset (there may be none -- password reset works
+    // while logged out).
+    await invalidateUserSessions(tx, user.id);
+
+    await writeAuditLog(tx, {
+      businessId: user.business_id,
+      userId: user.id,
+      userName: user.name,
+      userRole: user.role,
+      action: "auth.password_reset",
+      entityType: "user",
+      entityId: user.id,
+      reason: "Password reset via emailed link",
+    });
+  });
+
+  const { subject, body } = renderEmailTemplate("password_reset_completed", { name: user.name });
+  await getNotificationProvider().send({
+    category: "SECURITY",
+    channel: "email",
+    to: user.email,
+    businessId: user.business_id,
+    senderProfile: "SECURITY",
+    subject,
+    body,
+  });
 }

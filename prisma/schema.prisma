@@ -131,6 +131,7 @@ model businesses {
   inventory_adjustments               inventory_adjustments[]
   login_events                        login_events[]
   otp_challenges                      otp_challenges[]
+  password_reset_tokens               password_reset_tokens[]
   payment_methods                     payment_methods[]
   price_history                       price_history[]
   products                            products[]
@@ -772,6 +773,32 @@ model otp_challenges {
   purpose      OtpPurpose
   businesses   businesses @relation(fields: [business_id], references: [id])
   users        users      @relation(fields: [user_id], references: [id])
+
+  @@index([business_id])
+  @@index([user_id])
+}
+
+// Batch 2 remediation (HNT-AUTH-003) -- link-based password reset, a new
+// dedicated table rather than reusing otp_challenges (this is a bearer
+// token embedded in a URL, not a user-typed 6-digit code -- hashToken()/
+// generateSecureToken() is the correct primitive here, the same reasoning
+// tokens.ts's own comment already gives for refresh tokens vs. passwords).
+// token_hash is the only thing ever persisted; the raw token is emailed
+// once and never stored. Single-use via the same atomic conditional-UPDATE
+// claim pattern otp_challenges.verifyOtpChallenge now uses (see otp.ts) --
+// no attempts/max_attempts column, since a 256-bit token isn't guessable
+// the way a 6-digit code is; brute force is a non-issue here, only replay/
+// expiry matter.
+model password_reset_tokens {
+  id          String     @id
+  business_id String
+  user_id     String
+  token_hash  String     @unique
+  expires_at  DateTime
+  consumed_at DateTime?
+  created_at  DateTime   @default(now())
+  businesses  businesses @relation(fields: [business_id], references: [id])
+  users       users      @relation(fields: [user_id], references: [id])
 
   @@index([business_id])
   @@index([user_id])
@@ -2185,7 +2212,14 @@ model staff_invites {
   full_name                             String
   phone                                 String
   role                                  UserRole
-  token                                 String     @unique
+  // Batch 2 remediation (HNT-AUTH-005) -- was plaintext (a real, if
+  // deliberate-at-the-time, departure from sessions.refresh_token_hash's
+  // own hashed-bearer-token precedent). Renamed via a live column rename,
+  // not add+drop: confirmed 0 live pending invites at migration time (only
+  // 1 invite ever created, already accepted), so this is a pure rename with
+  // no data to backfill/hash in place, unlike email_verification_token_hash
+  // above.
+  token_hash                            String     @unique
   user_id                               String?
   invited_by                            String
   expires_at                            DateTime
@@ -2215,6 +2249,14 @@ model users {
   updated_at                                    DateTime                             @updatedAt
   failed_login_attempts                         Int                                  @default(0)
   locked_until                                  DateTime?
+  // Batch 2 remediation (HNT2-AUTH-001) -- bumped on any credential/access-
+  // revoking event (password reset, explicit logout-all; role change and
+  // deactivation bump it too, once a real endpoint exists for either -- see
+  // CLAUDE.md's own "Batch 2" writeup). authenticate.ts compares this
+  // against the value embedded in the access token on every request, so a
+  // token minted before the bump is denied immediately, not just once it
+  // naturally expires.
+  session_version                               Int                                  @default(0)
   email                                         String                               @unique
   oauth_provider                                AuthProvider?
   oauth_provider_id                             String?
@@ -2228,7 +2270,16 @@ model users {
   deactivated_by                                String?
   restore_reason                                String?
   email_verification_expires_at                 DateTime?
-  email_verification_token                      String?
+  // Batch 2 remediation (HNT-AUTH-005, extended scope) -- was plaintext
+  // (email_verification_token), the same bug class as staff_invites.token
+  // below. Now stores hashToken()'s SHA-256 hex digest; the raw token is
+  // still emailed once and never persisted anywhere. Renamed via a live
+  // column rename (not add+drop) since 17 users had a real pending
+  // verification at migration time -- their existing tokens were hashed in
+  // place by a one-off backfill script so already-sent links keep working,
+  // see prisma/migrations/20260817000000_batch2_auth_revocation's own
+  // comment for the exact recipe.
+  email_verification_token_hash                 String?                              @unique
   email_verified_at                             DateTime?
   audit_logs                                    audit_logs[]
   branches_branches_manager_idTousers           branches[]                           @relation("branches_manager_idTousers")
@@ -2245,6 +2296,7 @@ model users {
   login_events                                  login_events[]
   otp_challenges                                otp_challenges[]
   password_history                              password_history[]
+  password_reset_tokens                         password_reset_tokens[]
   price_history                                 price_history[]
   purchase_orders                               purchase_orders[]
   goods_received_notes                          goods_received_notes[]

@@ -49,6 +49,19 @@ const templates = {
     subject: `${v.businessName} sent you Purchase Order ${v.poNumber} for review`,
     body: `${v.businessName} has sent you a secure link to review and negotiate Purchase Order ${v.poNumber}. Access it here: ${v.secureLinkUrl}. This link expires in 30 days.`,
   }),
+  // Batch 2 remediation (HNT-AUTH-003) -- Password Reset was explicitly out
+  // of scope during the Auth Redesign; this is the first real content for
+  // it. Deliberately generic wording ("If you did not request this...") --
+  // never confirms or denies whether the recipient's account exists,
+  // matching requestPasswordReset's own always-generic-response guarantee.
+  password_reset_requested: (v: TemplateVariables) => ({
+    subject: "Reset your HantiOS password",
+    body: `Hi ${v.name}, we received a request to reset your password. Reset it here: ${v.resetUrl}. This link expires in 1 hour. If you did not request this, you can safely ignore this email.`,
+  }),
+  password_reset_completed: (v: TemplateVariables) => ({
+    subject: "Your HantiOS password was changed",
+    body: `Hi ${v.name}, your password was just changed. You have been logged out of all devices. If this wasn't you, contact support immediately.`,
+  }),
 } satisfies Record<string, TemplateRenderer>;
 
 export type EmailTemplateKey = keyof typeof templates;

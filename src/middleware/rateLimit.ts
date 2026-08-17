@@ -61,6 +61,18 @@ export const verifyOtpLimiter = rateLimit({
   legacyHeaders: false,
 });
 
+// Batch 2 remediation (HNT-AUTH-003) -- tight ceiling: this endpoint's own
+// generic-response-regardless-of-existence design is the primary defense
+// against enumeration, but a flood of requests is still real, unwanted
+// work (a DB write + an email send per call) with no legitimate reason to
+// happen often for one IP.
+export const passwordResetRequestLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: isTestEnv ? 10_000 : 5,
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
 // PO Negotiation supplier portal -- public, token-authenticated, no JWT.
 // "30 requests/min per IP per link" per the locked spec, literally: a 1-
 // minute window, not inviteTokenLimiter's 15-minute one (that limiter's

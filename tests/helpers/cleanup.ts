@@ -17,6 +17,9 @@ export async function cleanupTestBusiness(businessId: string): Promise<void> {
   await prisma.unmatched_inbound_emails.deleteMany({ where: { business_id: businessId } });
   await prisma.password_history.deleteMany({ where: { users: { business_id: businessId } } });
   await prisma.staff_invites.deleteMany({ where: { business_id: businessId } });
+  // Batch 2 remediation -- password_reset_tokens FKs to users (RESTRICT),
+  // must go before users.deleteMany below.
+  await prisma.password_reset_tokens.deleteMany({ where: { business_id: businessId } });
   await prisma.sessions.deleteMany({ where: { business_id: businessId } });
   await prisma.login_events.deleteMany({ where: { business_id: businessId } });
   await prisma.otp_challenges.deleteMany({ where: { business_id: businessId } });

@@ -1,7 +1,7 @@
 import type { staff_invites } from "@prisma/client";
 import { prisma } from "../lib/prisma";
 import { generateId } from "../lib/ids";
-import { generateSecureToken } from "../lib/tokens";
+import { generateSecureToken, hashToken } from "../lib/tokens";
 import { hashPassword, recordPasswordHistory } from "../lib/password";
 import { writeAuditLog } from "../lib/auditLog";
 import { conflict, gone, notFound } from "../lib/errors";
@@ -36,6 +36,10 @@ export async function createStaffInvite(input: CreateInviteInput, actor: Actor) 
 
   const inviter = await prisma.users.findUniqueOrThrow({ where: { id: actor.userId } });
 
+  // Batch 2 remediation (HNT-AUTH-005) -- token is still generated and
+  // emailed exactly as before; only the persisted form changed. The raw
+  // token is never stored anywhere -- only its hash -- matching
+  // sessions.refresh_token_hash's own precedent.
   const token = generateSecureToken();
   const expiresAt = new Date(Date.now() + env.STAFF_INVITE_EXPIRY_HOURS * 60 * 60 * 1000);
 
@@ -47,7 +51,7 @@ export async function createStaffInvite(input: CreateInviteInput, actor: Actor) 
       full_name: input.fullName,
       phone: input.phone,
       role: input.role,
-      token,
+      token_hash: hashToken(token),
       invited_by: actor.userId,
       expires_at: expiresAt,
     },
@@ -98,7 +102,7 @@ function toInviteDto(invite: staff_invites) {
 
 async function findInviteByTokenOrThrow(token: string) {
   const invite = await prisma.staff_invites.findUnique({
-    where: { token },
+    where: { token_hash: hashToken(token) },
     include: { businesses: true },
   });
   if (!invite) {

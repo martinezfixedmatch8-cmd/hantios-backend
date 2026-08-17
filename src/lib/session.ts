@@ -15,6 +15,14 @@ const SESSION_TTL_MS = 7 * 24 * 60 * 60 * 1000; // always 7 days, regardless of 
 const REMEMBER_ME_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
 const DEFAULT_MAX_AGE_MS = 12 * 60 * 60 * 1000; // 12 hours
 
+// Batch 2 remediation (HNT-AUTH-004) -- idle timeout, checked at the
+// refresh/session level only (confirmed design choice, not the access-token
+// layer): last_active_at is only ever written here, at refresh time, which
+// is naturally infrequent (roughly once per access-token lifetime, ~15min,
+// or whenever a client proactively refreshes) -- so this needs no separate
+// per-request throttling mechanism the way a per-request write would.
+const IDLE_TIMEOUT_MS = 30 * 60 * 1000; // 30 minutes
+
 interface SessionMeta {
   deviceId: string;
   ipAddress?: string;
@@ -52,6 +60,16 @@ export async function rotateSession(
   });
   if (!session || session.revoked_at || session.expires_at < new Date()) {
     throw unauthorized("Session expired or invalid, please log in again");
+  }
+
+  // HNT-AUTH-004: a session idle for more than 30 minutes (no refresh call
+  // in that window) is revoked outright, not just left to expire on its own
+  // 7-day slide. Checked BEFORE last_active_at is updated to now() below --
+  // otherwise this check could never fire, since the write always happens
+  // first in any other ordering.
+  if (Date.now() - session.last_active_at.getTime() > IDLE_TIMEOUT_MS) {
+    await db.sessions.update({ where: { id: session.id }, data: { revoked_at: new Date() } });
+    throw unauthorized("Session expired due to inactivity, please log in again");
   }
 
   const newRawRefreshToken = generateSecureToken();
@@ -102,4 +120,26 @@ export function setAuthCookies(res: Response, input: { rawRefreshToken: string; 
 export function clearAuthCookies(res: Response): void {
   res.clearCookie(REFRESH_COOKIE_NAME, { path: COOKIE_PATH });
   res.clearCookie(CSRF_COOKIE_NAME, { path: COOKIE_PATH });
+}
+
+// Batch 2 remediation -- the one shared revocation primitive, used by every
+// credential/access-revoking action this batch builds a real trigger for:
+// password reset (HNT-AUTH-003's own explicit "revoke all sessions"
+// requirement) and the new explicit POST /auth/logout-all endpoint. Bumps
+// session_version (so every already-issued access token is denied on its
+// very next use, per HNT2-AUTH-001) AND revokes every active refresh
+// session (so no refresh can mint a fresh token either) -- the strongest,
+// simplest "kill everything now" semantic, done atomically in one
+// transaction so a caller can never observe one half applied without the
+// other.
+//
+// A future deactivate/role-change endpoint (still unbuilt in this repo,
+// per CLAUDE.md's own long-standing "Staff module is incomplete" note)
+// would call this same primitive once it exists -- this fix doesn't build
+// those endpoints (deliberately out of scope for this batch, a separate,
+// already-tracked piece of work), only guarantees the revocation mechanism
+// itself is real and correct for whichever caller eventually triggers it.
+export async function invalidateUserSessions(db: Db, userId: string): Promise<void> {
+  await db.users.update({ where: { id: userId }, data: { session_version: { increment: 1 } } });
+  await db.sessions.updateMany({ where: { user_id: userId, revoked_at: null }, data: { revoked_at: new Date() } });
 }

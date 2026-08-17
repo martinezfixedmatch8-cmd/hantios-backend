@@ -79,3 +79,15 @@ export type VerifySignupPhoneOtpInput = z.infer<typeof verifySignupPhoneOtpSchem
 export const emailVerifyParamSchema = z.object({
   token: z.string().min(1),
 });
+
+// Batch 2 remediation (HNT-AUTH-003).
+export const forgotPasswordSchema = z.object({
+  email: z.string().trim().toLowerCase().email(),
+});
+export type ForgotPasswordInput = z.infer<typeof forgotPasswordSchema>;
+
+export const resetPasswordSchema = z.object({
+  token: z.string().min(1),
+  newPassword: passwordSchema,
+});
+export type ResetPasswordInput = z.infer<typeof resetPasswordSchema>;

@@ -9,6 +9,8 @@ import {
   verifyDeviceOtpSchema,
   verifySignupPhoneOtpSchema,
   emailVerifyParamSchema,
+  forgotPasswordSchema,
+  resetPasswordSchema,
 } from "../validation/auth.schema";
 import * as authService from "../services/auth.service";
 import { verifyEmail } from "../services/emailVerification.service";
@@ -135,6 +137,45 @@ export async function logout(req: Request, res: Response, next: NextFunction): P
     await authService.logout(rawRefreshToken);
     clearAuthCookies(res);
     res.status(200).json({ data: { loggedOut: true } });
+  } catch (err) {
+    next(err);
+  }
+}
+
+// Batch 2 remediation (HNT2-AUTH-001) -- authenticated: req.auth is set by
+// the same `authenticate` middleware every other protected route uses.
+export async function logoutAll(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    if (!req.auth) {
+      throw unauthorized();
+    }
+    await authService.logoutAll(req.auth.userId);
+    clearAuthCookies(res);
+    res.status(200).json({ data: { loggedOut: true } });
+  } catch (err) {
+    next(err);
+  }
+}
+
+// Batch 2 remediation (HNT-AUTH-003).
+export async function forgotPassword(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const input = forgotPasswordSchema.parse(req.body);
+    await authService.requestPasswordReset(input);
+    // Always 200 with the same generic body, regardless of whether the
+    // email exists or belongs to a Google-only account -- enumeration
+    // resistance is the point of this response shape.
+    res.status(200).json({ data: { message: "If an account exists for this email, a reset link has been sent." } });
+  } catch (err) {
+    next(err);
+  }
+}
+
+export async function resetPassword(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const input = resetPasswordSchema.parse(req.body);
+    await authService.resetPassword(input);
+    res.status(200).json({ data: { reset: true } });
   } catch (err) {
     next(err);
   }

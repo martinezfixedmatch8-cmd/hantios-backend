@@ -5,7 +5,7 @@ import { createTestUser, mintAccessToken, signupTestOwner, loginTestOwner } from
 import { cleanupTestBusiness } from "./helpers/cleanup";
 import { SpyNotificationProvider } from "./helpers/notificationSpy";
 import { setNotificationProvider } from "../src/notifications/registry";
-import { generateSecureToken } from "../src/lib/tokens";
+import { generateSecureToken, hashToken } from "../src/lib/tokens";
 
 describe("POST /staff/invite", () => {
   let businessId: string;
@@ -101,11 +101,18 @@ describe("POST /staff/invite", () => {
     const dbInvite = await prisma.staff_invites.findUnique({ where: { id: res.body.data.id } });
     expect(dbInvite).not.toBeNull();
     expect(dbInvite?.user_id).toBeNull();
-    expect(dbInvite?.token).toHaveLength(64);
+    // Batch 2 remediation (HNT-AUTH-005) -- only the hash is ever persisted
+    // now (matching sessions.refresh_token_hash's own precedent). Extract
+    // the raw token actually emailed and confirm ITS hash is what's stored
+    // -- proving the real, callable token was never itself written to the
+    // DB in recoverable form.
+    expect(dbInvite?.token_hash).toHaveLength(64);
 
     expect(spy.sent).toHaveLength(1);
     expect(spy.sent[0]).toMatchObject({ category: "TRANSACTIONAL", channel: "email", to: payload.email });
-    expect(spy.sent[0].body).toContain(dbInvite?.token);
+    const emailedToken = spy.sent[0].body.match(/\/invite\/([a-f0-9]{64})/)?.[1];
+    expect(emailedToken).toBeTruthy();
+    expect(hashToken(emailedToken as string)).toBe(dbInvite?.token_hash);
   });
 
   it("returns 409 for a duplicate pending invite", async () => {

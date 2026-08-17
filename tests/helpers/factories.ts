@@ -4,6 +4,7 @@ import type { UserRole } from "@prisma/client";
 import { prisma } from "../../src/lib/prisma";
 import { generateId } from "../../src/lib/ids";
 import { signAccessToken } from "../../src/lib/jwt";
+import { hashToken } from "../../src/lib/tokens";
 import { app } from "../../src/app";
 
 export const TEST_PASSWORD = "Str0ng!Passw0rd";
@@ -69,8 +70,16 @@ export async function createTestUser(businessId: string, role: UserRole) {
   });
 }
 
-export function mintAccessToken(user: { id: string; business_id: string; role: UserRole; name: string }): string {
-  return signAccessToken({ sub: user.id, businessId: user.business_id, role: user.role, name: user.name });
+export function mintAccessToken(
+  user: { id: string; business_id: string; role: UserRole; name: string; session_version: number }
+): string {
+  return signAccessToken({
+    sub: user.id,
+    businessId: user.business_id,
+    role: user.role,
+    name: user.name,
+    sessionVersion: user.session_version,
+  });
 }
 
 // Goes through the real POST /auth/signup endpoint rather than inserting rows directly,
@@ -145,7 +154,13 @@ export async function createTestInvite(
     acceptedAt: Date | null;
   }> = {}
 ) {
-  return prisma.staff_invites.create({
+  // Batch 2 remediation (HNT-AUTH-005) -- staff_invites now only persists
+  // token_hash. This factory still hands callers back a `.token` (the RAW
+  // value, matching every pre-existing call site's own expectation), it
+  // just no longer comes straight off the DB row -- generated here, hashed
+  // for storage, and merged back onto the returned object.
+  const rawToken = overrides.token ?? generateId().replace(/-/g, "");
+  const invite = await prisma.staff_invites.create({
     data: {
       id: generateId(),
       business_id: businessId,
@@ -153,13 +168,14 @@ export async function createTestInvite(
       full_name: "Test Invitee",
       phone: `+2547${Math.floor(10000000 + Math.random() * 89999999)}`,
       role: overrides.role ?? "cashier",
-      token: overrides.token ?? generateId().replace(/-/g, ""),
+      token_hash: hashToken(rawToken),
       invited_by: invitedBy,
       expires_at: overrides.expiresAt ?? new Date(Date.now() + 72 * 60 * 60 * 1000),
       revoked_at: overrides.revokedAt ?? null,
       accepted_at: overrides.acceptedAt ?? null,
     },
   });
+  return { ...invite, token: rawToken };
 }
 
 export async function createTestBranch(
