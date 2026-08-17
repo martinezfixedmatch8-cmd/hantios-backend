@@ -78,6 +78,70 @@ export function isSameBusinessDay(timezone: string, dayStartTime: Date, a: Date,
   return getBusinessDay(timezone, dayStartTime, a) === getBusinessDay(timezone, dayStartTime, b);
 }
 
+// Batch 3 remediation (HNT2-COM-001 + HNT-PAY-001) -- the genuine missing
+// piece: everything else in this file converts a known UTC instant INTO its
+// business-local calendar representation (instant -> local). This is the
+// opposite direction -- given a business-local calendar date, resolve the
+// real UTC instant it represents (local -> instant) -- which nothing in
+// this file did before now (getBusinessDay's own Date.UTC usage just labels
+// already-resolved local Y/M/D parts as a bucket string, it never converts
+// a local wall-clock time to a UTC instant).
+//
+// Standard offset-correction technique (the same one production timezone
+// libraries use internally, e.g. date-fns-tz's zonedTimeToUtc): guess the
+// UTC instant naively (as if the local wall-clock numbers were already
+// UTC), render that guess back through Intl.DateTimeFormat for the target
+// timezone to see what local wall-clock time it actually represents there,
+// then correct the guess by exactly the delta between the intended local
+// time and what the guess rendered as. This resolves the REAL, current
+// IANA-database offset for that exact instant (via Intl.DateTimeFormat),
+// so it's correct across a DST transition, not just a fixed offset --
+// deliberately a single-pass correction (not iterative), matching the same
+// precedent: a second DST shift landing exactly inside one correction pass
+// would need the transition to fall exactly at local midnight, which does
+// not happen at real-world month boundaries.
+function localMidnightToUtcInstant(timezone: string, year: number, month: number, day: number): Date {
+  const guess = new Date(Date.UTC(year, month - 1, day, 0, 0, 0, 0));
+  const rendered = getLocalDateTimeParts(timezone, guess);
+  const renderedAsUtcMs = Date.UTC(rendered.year, rendered.month - 1, rendered.day, rendered.hour, rendered.minute, rendered.second);
+  const intendedAsUtcMs = Date.UTC(year, month - 1, day, 0, 0, 0, 0);
+  return new Date(guess.getTime() + (intendedAsUtcMs - renderedAsUtcMs));
+}
+
+// The single canonical period-boundary calculation for filtering a real
+// instant DateTime column (e.g. sales.timestamp) by "business's own local
+// calendar month N" -- start is local midnight on day 1 of the requested
+// month, end is local midnight on day 1 of the following month (exclusive),
+// both converted to their real UTC instants. Query as
+// `timestamp >= start AND timestamp < end`.
+//
+// Deliberately NOT used for comparisons against a plain @db.Date column
+// (employee_compensation.effective_from/effective_to,
+// attendance_records.work_date) -- those columns carry no time-of-day or
+// timezone meaning at all (Postgres DATE, not TIMESTAMPTZ), and this
+// repo's own established convention for them (dateOnlyString above,
+// debts.date_due's own precedent) is to read/write them as bare calendar
+// dates via UTC-midnight-labeled values, never as timezone-shifted
+// instants. Feeding this function's own business-timezone-shifted instant
+// into one of those comparisons would introduce a NEW bug, not fix one --
+// confirmed and locked during Batch 3's own Phase 0 review, see
+// payroll.service.ts's and attendance.service.ts's own comments at their
+// respective (deliberately unchanged) Date.UTC call sites.
+//
+// December -> January year rollover needs no special-casing: Date.UTC
+// (and this function's own month-1 indexing) already normalizes an
+// out-of-range month index (13) into January of the following year on its
+// own, standard JS Date behavior.
+export function getBusinessMonthBounds(
+  timezone: string,
+  year: number,
+  month: number // 1-12
+): { start: Date; end: Date } {
+  const start = localMidnightToUtcInstant(timezone, year, month, 1);
+  const end = localMidnightToUtcInstant(timezone, year, month + 1, 1);
+  return { start, end };
+}
+
 // `debts.date_due` is a plain @db.Date -- a calendar date the business meant
 // literally (no time-of-day, no further timezone conversion needed), unlike
 // `timestamp`/`created_at` columns getBusinessDay handles above. Prisma

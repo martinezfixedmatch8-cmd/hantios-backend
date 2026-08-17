@@ -323,6 +323,19 @@ export async function getApprovedHoursForPeriod(
   periodYear: number,
   periodMonth: number
 ): Promise<Prisma.Decimal> {
+  // Batch 3 remediation -- deliberately LEFT AS Date.UTC, not migrated to
+  // getBusinessMonthBounds. attendance_records.work_date is a plain
+  // @db.Date column (no time-of-day/timezone meaning at all -- it's
+  // client-supplied as a bare calendar date, validated only as "not later
+  // than the business's own current business day"). periodYear/periodMonth
+  // arrive here already resolved in the business's own local calendar (see
+  // payroll.service.ts's own callers), so Date.UTC(year, month-1, 1) is the
+  // correct bare-calendar-date boundary for a calendar-to-calendar
+  // comparison. Feeding getBusinessMonthBounds' own business-timezone-
+  // SHIFTED instant into this comparison would introduce a new bug, not
+  // fix one -- confirmed and locked during Batch 3's own Phase 0 review;
+  // see businessTime.ts's getBusinessMonthBounds comment and
+  // payroll.service.ts's matching comment on its own identical case.
   const periodStart = new Date(Date.UTC(periodYear, periodMonth - 1, 1));
   const periodEnd = new Date(Date.UTC(periodYear, periodMonth, 1)); // exclusive, next month's 1st
 
@@ -357,6 +370,10 @@ export async function getApprovedHoursByDayForPeriod(
   periodYear: number,
   periodMonth: number
 ): Promise<DayHours[]> {
+  // Batch 3 remediation -- deliberately LEFT AS Date.UTC, same reasoning as
+  // getApprovedHoursForPeriod's own identical comment above: work_date is
+  // a plain @db.Date column, and periodYear/periodMonth already arrive
+  // business-local-correct.
   const periodStart = new Date(Date.UTC(periodYear, periodMonth - 1, 1));
   const periodEnd = new Date(Date.UTC(periodYear, periodMonth, 1)); // exclusive, next month's 1st
 

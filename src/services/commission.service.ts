@@ -6,6 +6,7 @@ import { badRequest } from "../lib/errors";
 import { writeAuditLog } from "../lib/auditLog";
 import { domainEvents } from "../lib/events";
 import { getReplayedResponse, claimIdempotencyKey, completeIdempotencyKey } from "../lib/idempotency";
+import { getBusinessMonthBounds } from "../lib/businessTime";
 import type { CreateCommissionAdjustmentInput } from "../validation/commission.schema";
 
 interface Actor {
@@ -34,10 +35,16 @@ export async function getEligibleSalesForPeriod(
   businessId: string,
   employeeId: string,
   periodYear: number,
-  periodMonth: number
+  periodMonth: number,
+  businessTimezone: string
 ): Promise<Prisma.Decimal> {
-  const periodStart = new Date(Date.UTC(periodYear, periodMonth - 1, 1));
-  const periodEnd = new Date(Date.UTC(periodYear, periodMonth, 1)); // exclusive, next month's 1st
+  // Batch 3 remediation (HNT2-COM-001) -- sales.timestamp is a real instant
+  // DateTime column, so a plain Date.UTC(year, month-1, 1) boundary could
+  // put a sale on the wrong side of the business's own local calendar
+  // month near month-end for any non-UTC business (e.g. a 2026-08-31
+  // 23:30 Africa/Nairobi sale is already 2026-09-01 02:30 UTC). Fixed to
+  // the real business-local month boundary.
+  const { start: periodStart, end: periodEnd } = getBusinessMonthBounds(businessTimezone, periodYear, periodMonth);
 
   // Sale Refund, Partial Refund & Inventory Restoration -- an original sale
   // now transitions to `partially_refunded` (not directly to the terminal

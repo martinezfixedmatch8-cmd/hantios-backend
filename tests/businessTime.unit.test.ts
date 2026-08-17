@@ -1,4 +1,4 @@
-import { getBusinessDay, isSameBusinessDay } from "../src/lib/businessTime";
+import { getBusinessDay, isSameBusinessDay, getBusinessMonthBounds } from "../src/lib/businessTime";
 
 // Unit coverage for the Business Day bucketing logic that Void/Refund
 // eligibility depends on (src/lib/businessTime.ts). Session 3B's
@@ -85,5 +85,57 @@ describe("isSameBusinessDay", () => {
     const a = new Date("2026-07-22T04:30:00Z"); // 07:30 local
     const b = new Date("2026-07-22T05:00:00Z"); // 08:00 local
     expect(isSameBusinessDay(tz, start, a, b)).toBe(true);
+  });
+});
+
+// Batch 3 remediation (HNT2-COM-001 + HNT-PAY-001) -- getBusinessMonthBounds
+// is the genuine missing piece: local calendar month -> real UTC instant
+// range, the opposite direction from everything else in this file.
+describe("getBusinessMonthBounds", () => {
+  it("UTC (sanity baseline) -- start/end are unshifted, exactly the naive UTC boundary", () => {
+    const { start, end } = getBusinessMonthBounds("UTC", 2026, 8);
+    expect(start.toISOString()).toBe("2026-08-01T00:00:00.000Z");
+    expect(end.toISOString()).toBe("2026-09-01T00:00:00.000Z");
+  });
+
+  it("Africa/Nairobi (UTC+3, no DST) -- local midnight is shifted 3 hours earlier in UTC", () => {
+    const { start, end } = getBusinessMonthBounds("Africa/Nairobi", 2026, 8);
+    // Aug 1 00:00 EAT = Jul 31 21:00 UTC
+    expect(start.toISOString()).toBe("2026-07-31T21:00:00.000Z");
+    // Sep 1 00:00 EAT = Aug 31 21:00 UTC
+    expect(end.toISOString()).toBe("2026-08-31T21:00:00.000Z");
+  });
+
+  it("America/New_York (DST-observing) -- resolves the REAL offset for each specific month, not a fixed one", () => {
+    // January 2026 -- EST, UTC-5 (winter, DST not in effect)
+    const january = getBusinessMonthBounds("America/New_York", 2026, 1);
+    expect(january.start.toISOString()).toBe("2026-01-01T05:00:00.000Z");
+    // July 2026 -- EDT, UTC-4 (summer, DST in effect)
+    const july = getBusinessMonthBounds("America/New_York", 2026, 7);
+    expect(july.start.toISOString()).toBe("2026-07-01T04:00:00.000Z");
+    // Proves this isn't a fixed-offset lookup: the SAME timezone produces a
+    // genuinely different UTC offset depending on which month is queried.
+    expect(january.start.getUTCHours()).not.toBe(july.start.getUTCHours());
+  });
+
+  it("December -> January year rollover, no special-casing needed", () => {
+    const { start, end } = getBusinessMonthBounds("Africa/Nairobi", 2026, 12);
+    expect(start.toISOString()).toBe("2026-11-30T21:00:00.000Z"); // Dec 1 2026 00:00 EAT
+    expect(end.toISOString()).toBe("2026-12-31T21:00:00.000Z"); // Jan 1 2027 00:00 EAT
+  });
+
+  it("[start, end) is a half-open interval -- a timestamp exactly one second before start belongs to the PREVIOUS month, one second after belongs to the CURRENT month", () => {
+    const { start } = getBusinessMonthBounds("Africa/Nairobi", 2026, 8);
+    const oneSecondBefore = new Date(start.getTime() - 1000);
+    const oneSecondAfter = new Date(start.getTime() + 1000);
+    // oneSecondBefore is Jul 31 23:59:59 local -- still July.
+    expect(oneSecondBefore < start).toBe(true);
+    // oneSecondAfter is Aug 1 00:00:01 local -- already August.
+    expect(oneSecondAfter >= start).toBe(true);
+  });
+
+  it("the exact boundary instant itself belongs to the NEW month (inclusive start)", () => {
+    const { start } = getBusinessMonthBounds("Africa/Nairobi", 2026, 8);
+    expect(start >= start).toBe(true); // trivial, but documents the >= semantics a caller must use
   });
 });

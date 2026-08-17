@@ -253,7 +253,7 @@ describe("Module 12 Session C -- Sales Attribution & Commission Engine", () => {
       const period = monthsAgo(2);
       await createBackdatedSale(1, midMonth(period), { salespersonEmployeeId: employee.id }); // total = 100
 
-      const total = await getEligibleSalesForPeriod(businessId, employee.id, period.year, period.month);
+      const total = await getEligibleSalesForPeriod(businessId, employee.id, period.year, period.month, "Africa/Nairobi");
       expect(total.toString()).toBe("100");
     });
 
@@ -274,7 +274,7 @@ describe("Module 12 Session C -- Sales Attribution & Commission Engine", () => {
       // Put the (now-voided) sale's timestamp back into the target period.
       await prisma.sales.update({ where: { id: sale.id }, data: { timestamp: midMonth(period) } });
 
-      const total = await getEligibleSalesForPeriod(businessId, employee.id, period.year, period.month);
+      const total = await getEligibleSalesForPeriod(businessId, employee.id, period.year, period.month, "Africa/Nairobi");
       expect(total.toString()).toBe("0");
     });
 
@@ -295,7 +295,7 @@ describe("Module 12 Session C -- Sales Attribution & Commission Engine", () => {
       await prisma.sales.update({ where: { id: sale.id }, data: { timestamp: midMonth(period, 10) } });
       await prisma.sales.update({ where: { id: refundRes.body.data.id }, data: { timestamp: midMonth(period, 12) } });
 
-      const total = await getEligibleSalesForPeriod(businessId, employee.id, period.year, period.month);
+      const total = await getEligibleSalesForPeriod(businessId, employee.id, period.year, period.month, "Africa/Nairobi");
       expect(total.toString()).toBe("0");
     });
 
@@ -316,10 +316,10 @@ describe("Module 12 Session C -- Sales Attribution & Commission Engine", () => {
       await prisma.sales.update({ where: { id: sale.id }, data: { timestamp: midMonth(originalPeriod) } });
       await prisma.sales.update({ where: { id: refundRes.body.data.id }, data: { timestamp: midMonth(refundPeriod) } });
 
-      const originalTotal = await getEligibleSalesForPeriod(businessId, employee.id, originalPeriod.year, originalPeriod.month);
+      const originalTotal = await getEligibleSalesForPeriod(businessId, employee.id, originalPeriod.year, originalPeriod.month, "Africa/Nairobi");
       expect(originalTotal.toString()).toBe("100"); // untouched
 
-      const refundPeriodTotal = await getEligibleSalesForPeriod(businessId, employee.id, refundPeriod.year, refundPeriod.month);
+      const refundPeriodTotal = await getEligibleSalesForPeriod(businessId, employee.id, refundPeriod.year, refundPeriod.month, "Africa/Nairobi");
       expect(refundPeriodTotal.toString()).toBe("-100");
     });
   });

@@ -55,7 +55,26 @@ export interface GeneratePayrollResult {
 }
 
 export async function generatePayrollForBusiness(businessId: string, periodYear: number, periodMonth: number): Promise<GeneratePayrollResult> {
+  // Batch 3 remediation -- deliberately LEFT AS Date.UTC, not migrated to
+  // getBusinessMonthBounds. This value is used exclusively below to query
+  // findEffectiveCompensation, which compares it against
+  // employee_compensation.effective_from/effective_to -- both plain
+  // @db.Date columns with no time-of-day or timezone meaning at all
+  // (Postgres DATE, not TIMESTAMPTZ). periodYear/periodMonth are already
+  // resolved in the business's own local calendar by every real caller
+  // (generatePayrollForAllBusinesses/generatePayrollHandler both use
+  // getBusinessLocalYear/getBusinessLocalMonth), so Date.UTC(year,
+  // month-1, 1) here is the CORRECT bare-calendar-date representation of
+  // "day 1 of that period" -- feeding getBusinessMonthBounds' own
+  // business-timezone-SHIFTED instant into this comparison instead would
+  // introduce a new bug (comparing a shifted instant against a naive
+  // calendar-date column), not fix one. Confirmed and locked during Batch
+  // 3's own Phase 0 review; see businessTime.ts's own getBusinessMonthBounds
+  // comment for the fuller reasoning, and attendance.service.ts's matching
+  // comment on its own two structurally-identical, deliberately-unchanged
+  // call sites.
   const periodStart = new Date(Date.UTC(periodYear, periodMonth - 1, 1));
+  const business = await prisma.businesses.findUniqueOrThrow({ where: { id: businessId }, select: { timezone: true } });
   const employees = await prisma.employees.findMany({ where: { business_id: businessId, status: "active" } });
 
   const result: GeneratePayrollResult = { generated: [], skipped: [], alreadyExisted: [] };
@@ -92,7 +111,7 @@ export async function generatePayrollForBusiness(businessId: string, periodYear:
       // already correctly nets refunds via getEligibleSalesForPeriod's own
       // status+timestamp filtering -- no extra netting logic needed here.
       const config = compensation.compensation_config as unknown as { commissionRate: number };
-      const eligibleSales = await getEligibleSalesForPeriod(businessId, employee.id, periodYear, periodMonth);
+      const eligibleSales = await getEligibleSalesForPeriod(businessId, employee.id, periodYear, periodMonth, business.timezone);
       const rate = new Prisma.Decimal(config.commissionRate);
       amount = eligibleSales.mul(rate).dividedBy(100).toDecimalPlaces(2, Prisma.Decimal.ROUND_HALF_UP);
       calculationBreakdown = {
@@ -104,7 +123,7 @@ export async function generatePayrollForBusiness(businessId: string, periodYear:
       // Confirmed zero-ambiguity extension -- purely additive, base +
       // commission, no threshold/overtime-style question.
       const config = compensation.compensation_config as unknown as { fixedBase: number; commissionRate: number };
-      const eligibleSales = await getEligibleSalesForPeriod(businessId, employee.id, periodYear, periodMonth);
+      const eligibleSales = await getEligibleSalesForPeriod(businessId, employee.id, periodYear, periodMonth, business.timezone);
       const rate = new Prisma.Decimal(config.commissionRate);
       const fixedBase = new Prisma.Decimal(config.fixedBase);
       const commission = eligibleSales.mul(rate).dividedBy(100).toDecimalPlaces(2, Prisma.Decimal.ROUND_HALF_UP);
@@ -209,7 +228,7 @@ export async function generatePayrollForBusiness(businessId: string, periodYear:
         });
       }
       if (config.percentageComponent) {
-        const eligibleSales = await getEligibleSalesForPeriod(businessId, employee.id, periodYear, periodMonth);
+        const eligibleSales = await getEligibleSalesForPeriod(businessId, employee.id, periodYear, periodMonth, business.timezone);
         const rate = new Prisma.Decimal(config.percentageComponent.commissionRate);
         const componentAmount = eligibleSales.mul(rate).dividedBy(100).toDecimalPlaces(2, Prisma.Decimal.ROUND_HALF_UP);
         total = total.plus(componentAmount);

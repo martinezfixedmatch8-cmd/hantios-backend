@@ -7,7 +7,7 @@ import { resolveListQuery, paginate } from "../lib/pagination";
 import { badRequest, conflict, forbidden } from "../lib/errors";
 import { claimIdempotencyKey, completeIdempotencyKey } from "../lib/idempotency";
 import { getNextReceiptNumber } from "../lib/receiptNumber";
-import { isSameBusinessDay } from "../lib/businessTime";
+import { isSameBusinessDay, getBusinessLocalYear, getBusinessLocalMonth } from "../lib/businessTime";
 import { normalizeSize } from "../lib/branchInventory";
 import { domainEvents } from "../lib/events";
 import {
@@ -985,14 +985,19 @@ export async function setSaleAttribution(saleId: string, input: SetSaleAttributi
   const endpoint = setSaleAttributionEndpoint(saleId);
   const previousEmployeeId = sale.salesperson_employee_id;
 
-  // The exact same UTC-month bucketing getEligibleSalesForPeriod itself
-  // uses to decide which period a sale belongs to -- deliberately NOT
-  // business-timezone-aware (getBusinessDay is for "today," not "which
-  // period does this specific past sale's own timestamp fall into," and
-  // using a different rule here than the eligibility query itself uses
-  // would risk targeting a period the sale isn't actually counted in).
-  const periodYear = sale.timestamp.getUTCFullYear();
-  const periodMonth = sale.timestamp.getUTCMonth() + 1;
+  // Batch 3 remediation (finding #5) -- previously mirrored
+  // getEligibleSalesForPeriod's own (buggy) UTC-month bucketing on purpose,
+  // to stay consistent with "which period does this sale count toward for
+  // commission eligibility." Now that getEligibleSalesForPeriod itself is
+  // fixed to use the business's real local calendar month
+  // (getBusinessMonthBounds, commission.service.ts), this must be fixed the
+  // same way to keep matching it -- using getBusinessLocalYear/
+  // getBusinessLocalMonth (the existing instant -> local-period direction,
+  // not getBusinessMonthBounds, which is the opposite direction:
+  // period -> instant range).
+  const business = await prisma.businesses.findUniqueOrThrow({ where: { id: actor.businessId }, select: { timezone: true } });
+  const periodYear = getBusinessLocalYear(business.timezone, sale.timestamp);
+  const periodMonth = getBusinessLocalMonth(business.timezone, sale.timestamp);
 
   const { updated, reallocation } = await prisma.$transaction(async (tx) => {
     await claimIdempotencyKey(tx, actor.businessId, idempotencyKey, endpoint);
