@@ -234,8 +234,14 @@ describe("PO Advance Payments", () => {
       .set("Authorization", `Bearer ${ownerToken}`)
       .set("Idempotency-Key", idemKey())
       .send({ proformaInvoiceId: proforma.id, supplierPaymentInstructionId: instruction.id, amount: 10, currency: "KES" });
+    // Batch 4 remediation -- the response itself is masked now (the reveal
+    // endpoint is the only permitted full-value path, even for the
+    // creator's own response). beneficiary_name is never masked (not one
+    // of the 4 sensitive fields); account_number_snapshot is masked to
+    // last-4 here, the real, unmasked value is verified via a direct DB
+    // read below instead, which is the actual point of this test.
     expect(recordRes.body.data.beneficiary_name_snapshot).toBe("Acme Supplies Ltd");
-    expect(recordRes.body.data.account_number_snapshot).toBe("0123456789");
+    expect(recordRes.body.data.account_number_snapshot).toBe("****6789");
 
     // Directly mutate the live instruction (simulating a later bank-details
     // change) -- the already-recorded advance payment's own snapshot fields

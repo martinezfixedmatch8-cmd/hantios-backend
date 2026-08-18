@@ -9,6 +9,7 @@ import { claimIdempotencyKey, completeIdempotencyKey } from "../lib/idempotency"
 import { paginate, resolveListQuery } from "../lib/pagination";
 import { getNextProformaInvoiceNumber } from "../lib/proformaInvoiceNumber";
 import { computeProformaPaymentStatus } from "../lib/invoicePaymentStatus";
+import { getEffectiveAdvancePaidSum } from "./poAdvancePayment.service";
 import type { IssueProformaInvoiceInput, ListProformaInvoicesQuery } from "../validation/poProformaInvoice.schema";
 
 interface Actor {
@@ -142,8 +143,9 @@ export async function getProformaInvoice(poId: string, invoiceId: string, busine
     throw notFound("Proforma invoice not found");
   }
 
-  const advancePayments = await prisma.po_advance_payments.findMany({ where: { proforma_invoice_id: invoiceId } });
-  const advancePaidSum = advancePayments.reduce((sum, p) => sum.plus(p.amount), new Prisma.Decimal(0));
+  // Batch 4 remediation -- now uses the one authoritative function, which
+  // correctly excludes reversed amounts.
+  const advancePaidSum = await getEffectiveAdvancePaidSum(prisma, invoiceId);
   const paymentStatus = computeProformaPaymentStatus(invoice.total, advancePaidSum);
 
   return { ...invoice, paymentStatus, amountPaid: advancePaidSum.toString(), amountRemaining: invoice.total.minus(advancePaidSum).toString() };
