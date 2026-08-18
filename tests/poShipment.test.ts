@@ -18,6 +18,7 @@ import { domainEvents } from "../src/lib/events";
 describe("PO Shipments, Tracking, Delivery Milestones, ETA", () => {
   const businessIds: string[] = [];
   let businessId: string;
+  let ownerId: string;
   let ownerToken: string;
   let branchId: string;
 
@@ -26,11 +27,26 @@ describe("PO Shipments, Tracking, Delivery Milestones, ETA", () => {
   beforeAll(async () => {
     const owner = await signupTestOwner();
     businessId = owner.businessId;
+    ownerId = owner.ownerId;
     businessIds.push(businessId);
     const login = await loginTestOwner(owner.email, owner.password, owner.deviceId);
     ownerToken = login.accessToken;
     const branch = await createTestBranch(businessId);
     branchId = branch.id;
+  });
+
+  // signAccessToken's own default expiry is 15 minutes -- this file's own
+  // cumulative runtime can exceed that on a slower database branch
+  // (observed: 943.9s on an isolated test branch), which would otherwise
+  // make createSentPo()'s own POST /purchase-orders call start returning a
+  // real 401 partway through the file once ownerToken silently expired.
+  // Re-minting fresh before every single test -- via the same
+  // no-HTTP-round-trip mintAccessToken synthesis this file's own RBAC
+  // block already uses for every other role -- keeps ownerToken always
+  // valid regardless of how long the file has already been running.
+  beforeEach(async () => {
+    const owner = await prisma.users.findUniqueOrThrow({ where: { id: ownerId } });
+    ownerToken = mintAccessToken(owner);
   });
 
   afterAll(async () => {

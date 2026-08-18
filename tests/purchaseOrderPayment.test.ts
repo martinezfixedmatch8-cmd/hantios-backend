@@ -448,7 +448,7 @@ describe("Purchase Order Payments", () => {
         .send({ version: poBFresh.body.data.version, amount: 50, paymentDate: "2026-08-01", matchOverride: { reason: "test override" } });
       expect(res.status).toBe(201);
       expect(res.body.data.payment.invoice_amount).toBe(invoiceB.total_amount);
-    });
+    }, 90000); // two full createShippedPo() + issueCommercialInvoice() sequences plus a supersede -- same long-sequential-round-trip precedent as poCommercialInvoice.test.ts/poNegotiationProposal.test.ts's own 90000ms overrides, not a global testTimeout change
 
     it("no duplicate Expense/payment is created on an Idempotency-Key replay, even with the rewritten in-transaction match logic", async () => {
       const { po } = await createFullyReceivedPo();
