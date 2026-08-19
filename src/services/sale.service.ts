@@ -20,7 +20,15 @@ import {
 import { applyStockAlertTransition } from "../lib/stockAlerts";
 import type { PendingStockAlertEvent } from "../lib/stockAlerts";
 import { findOrCreateCustomer } from "./customer.service";
-import type { CreateSaleInput, ListSalesQuery, VoidSaleInput, RefundSaleInput, RefundSaleLineInput, SetSaleAttributionInput } from "../validation/sale.schema";
+import type {
+  CreateSaleInput,
+  ListSalesQuery,
+  VoidSaleInput,
+  RefundSaleInput,
+  RefundSaleLineInput,
+  SetSaleAttributionInput,
+  ListSaleRefundsQuery,
+} from "../validation/sale.schema";
 
 interface Actor {
   userId: string;
@@ -1176,9 +1184,120 @@ export async function listSales(query: ListSalesQuery, businessId: string) {
 // same "bundle related records on the parent's read endpoint" pattern as
 // Expenses/PO GRN/Attendance's own adjustments.
 export async function getSale(id: string, businessId: string) {
-  return getOwned(
+  const sale = await getOwned(
     prisma.sales.findUnique({ where: { id }, include: { sale_attribution_events: { orderBy: { changed_at: "asc" } } } }),
     businessId,
     "Sale"
   );
+
+  // Batch 5 (HNT2-SALE-001), requirement #5 -- the sale's effective (net-of-
+  // refunds) total, additive-only per the confirmed Decision 1 (the refund
+  // HISTORY itself lives solely at GET /sales/:id/refunds, never embedded
+  // here). Reuses exactly the definition the refund write path and
+  // commission.service.ts's own getEligibleSalesForPeriod already rely on:
+  // sale.total + Σ(every reversal sales row's own already-negated total) --
+  // never a second, parallel calculation. Zero-refund-safe by construction
+  // (sums to the original total when no reversal rows exist).
+  const reversals = await prisma.sales.findMany({
+    where: { business_id: businessId, refund_of_sale_id: id },
+    select: { total: true },
+  });
+  const effectiveTotal = reversals.reduce((sum, r) => sum.plus(r.total), sale.total);
+
+  return { ...sale, effectiveTotal: effectiveTotal.toString() };
+}
+
+// Batch 5 (HNT2-SALE-001) -- the dedicated, paginated refund-history
+// subresource (Phase 0 Decision 1, confirmed: this is the SOLE read shape
+// for refund history -- GET /sales/:id never embeds it). Header
+// (sale_refunds) + child (sale_refund_items) shape, read back exactly as
+// refundSale() wrote it. Line-level productName/size are sourced from the
+// ORIGINAL sale's own immutable items[] snapshot at that lineIndex -- never
+// a live product lookup -- the same point-in-time-accuracy principle
+// costPriceAtSale already established (a later product rename must never
+// retroactively change a historical refund line's own display name).
+export async function listSaleRefunds(saleId: string, query: ListSaleRefundsQuery, businessId: string) {
+  const sale = await getOwned(prisma.sales.findUnique({ where: { id: saleId } }), businessId, "Sale");
+  const originalItems = sale.items as unknown as SaleLineSnapshot[];
+
+  const resolved = resolveListQuery(query, {
+    sortableFields: ["created_at"] as const,
+    defaultSort: "created_at" as const,
+  });
+
+  // Batch 5 review round 2 -- resolveListQuery's own orderBy is single-key
+  // only (created_at alone); under offset pagination, two refund events
+  // sharing an identical created_at (a real possibility, not just a debt-
+  // history-side concern) could otherwise return in a non-repeatable order
+  // across pages, risking a duplicate or skipped event at the page
+  // boundary. `id` (a generateId() value, globally unique) is a stable,
+  // deterministic secondary key, applied in the SAME direction as the
+  // primary sort so the overall order stays intuitive.
+  const orderBy = [resolved.orderBy, { id: query.order }];
+
+  const where = { business_id: businessId, sale_id: saleId };
+  const [rows, total] = await Promise.all([
+    prisma.sale_refunds.findMany({
+      where,
+      include: {
+        sale_refund_items: { orderBy: { line_index: "asc" } },
+        sales_reversal: true,
+        users: true,
+      },
+      orderBy,
+      skip: resolved.skip,
+      take: resolved.take,
+    }),
+    prisma.sale_refunds.count({ where }),
+  ]);
+
+  // Refund-receipt reference, if one exists for each event's own reversal
+  // sale -- batch-fetched in one query (N+1 avoidance), the same pattern
+  // createSale's own product batch-fetch already established.
+  const reversalSaleIds = rows.map((r) => r.reversal_sale_id);
+  const refundReceipts = reversalSaleIds.length
+    ? await prisma.receipts.findMany({
+        where: { business_id: businessId, sale_id: { in: reversalSaleIds }, receipt_type: "refund" },
+      })
+    : [];
+  const receiptByReversalSaleId = new Map(refundReceipts.map((r) => [r.sale_id as string, r]));
+
+  const data = rows.map((row) => ({
+    id: row.id,
+    reason: row.reason,
+    // Reflects the CURRENT user record (name), never an immutable
+    // historical snapshot at the time of the refund -- sale_refunds has no
+    // name-snapshot column, flagged explicitly per Phase 0.
+    actor: { userId: row.users.id, userName: row.users.name },
+    timestamp: row.created_at,
+    // Two explicit fields, per the confirmed API clarification: refundTotal
+    // is a clear POSITIVE amount for API consumers; signedReversalTotal is
+    // the raw, still-negated reversal-sale total every other reader of a
+    // reversal row already relies on (e.g. commission.service.ts's own
+    // netting via getEligibleSalesForPeriod). Internal math (getSale's own
+    // effectiveTotal above) always sums the real signed value -- this pair
+    // is a response-shape naming/clarity fix only, never a change to any
+    // internal calculation.
+    refundTotal: row.sales_reversal.total.negated().toString(),
+    signedReversalTotal: row.sales_reversal.total.toString(),
+    receiptReference: (() => {
+      const receipt = receiptByReversalSaleId.get(row.reversal_sale_id);
+      return receipt ? { id: receipt.id, receiptNumber: receipt.receipt_number } : null;
+    })(),
+    lines: row.sale_refund_items.map((item) => {
+      const original = originalItems[item.line_index] as SaleLineSnapshot | undefined;
+      return {
+        lineIndex: item.line_index,
+        productId: item.product_id,
+        productName: original?.productName ?? null,
+        size: original?.size ?? null,
+        returnedQuantity: item.returned_quantity.toString(),
+        restockableQuantity: item.restockable_quantity.toString(),
+        writeOffQuantity: item.write_off_quantity.toString(),
+        unitCostSnapshot: item.unit_cost_snapshot.toString(),
+      };
+    }),
+  }));
+
+  return paginate(data, total, resolved.page, resolved.pageSize);
 }

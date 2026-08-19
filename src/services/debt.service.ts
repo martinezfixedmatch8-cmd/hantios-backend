@@ -20,6 +20,7 @@ import type {
   ReversePaymentInput,
   DebtStatusActionInput,
   ApplyInterestInput,
+  DebtHistoryQuery,
 } from "../validation/debt.schema";
 
 interface Actor {
@@ -268,6 +269,225 @@ export async function getDebt(id: string, businessId: string) {
   const debt = await getOwned(prisma.debts.findUnique({ where: { id } }), businessId, "Debt");
   const business = await prisma.businesses.findUniqueOrThrow({ where: { id: businessId } });
   return decorateDebt(debt, business);
+}
+
+// Batch 5 (HNT2-DEBT-001) -- cursor pagination, mirroring
+// getCustomerTimeline's own encode/decode shape. A real, not hypothetical,
+// stability risk was found and fixed here (review round 2): Postgres's
+// now() is stable for an entire transaction, so any single transaction
+// that ever writes to more than one of debt_payments/debt_transactions/
+// debt_reminders would produce IDENTICAL created_at values across source
+// tables -- a bare (created_at, entity_id) tiebreak, while collision-safe
+// in practice (entity_id is a generateId() value, globally unique across
+// every table in this schema), doesn't make that safety explicit or
+// auditable, and a raw id gives API consumers nothing to key off directly.
+// Fixed with a source-tagged, explicitly-unique eventKey
+// (payment:<id> / interest:<id> / reminder:<id> -- payment_reversal rows
+// keep the payment: prefix, since they share debt_payments' own id-space
+// and can never collide with a genuine payment row's id either way) used
+// identically in the SQL SELECT/WHERE/ORDER BY, the encoded cursor, AND
+// the response contract (exposed as `eventKey` on every event) -- the
+// same tuple everywhere, per the confirmed requirement.
+interface DebtHistoryCursor {
+  createdAt: string;
+  eventKey: string;
+}
+
+function encodeDebtHistoryCursor(c: DebtHistoryCursor): string {
+  return Buffer.from(JSON.stringify(c), "utf8").toString("base64url");
+}
+
+function decodeDebtHistoryCursor(raw: string): DebtHistoryCursor {
+  try {
+    const parsed = JSON.parse(Buffer.from(raw, "base64url").toString("utf8")) as Partial<DebtHistoryCursor>;
+    if (typeof parsed.createdAt !== "string" || typeof parsed.eventKey !== "string") {
+      throw new Error("shape");
+    }
+    return parsed as DebtHistoryCursor;
+  } catch {
+    throw badRequest("Invalid or corrupted cursor");
+  }
+}
+
+interface DebtHistoryRow {
+  type: string;
+  entity_id: string;
+  event_key: string;
+  amount: Prisma.Decimal | null;
+  occurred_at: Date;
+  created_at: Date;
+  actor_user_id: string | null;
+  actor_user_name: string | null;
+  receipt_id: string | null;
+  receipt_number: string | null;
+  balance_after: Prisma.Decimal | null;
+  reminder_status: string | null;
+  reminder_channel: string | null;
+  reminder_type: string | null;
+  sent_at: Date | null;
+  next_retry: Date | null;
+  business_date: Date | null;
+  has_error: boolean | null;
+}
+
+// Batch 5 (HNT2-DEBT-001) -- one unified, deterministically-ordered
+// chronological event stream merging debt_payments (payment AND its own
+// reversal, distinguished by reversal_of_payment_id -- CLAUDE.md confirms a
+// reversal generates its own separate Debt Payment Receipt too, so the
+// LEFT JOIN on receipts.debt_payment_id=dp.id covers both uniformly),
+// debt_transactions (interest_applied -- the only type ever written
+// today), and debt_reminders. Mirrors getCustomerTimeline's own raw-SQL
+// UNION ALL + cursor-pagination shape exactly (Phase 0's confirmed
+// precedent). Every NULL placeholder is explicitly cast (::text/::numeric/
+// etc.) so the UNION ALL's column types stay unambiguous across all three
+// branches, and every enum column is cast to ::text -- the Neon adapter
+// cannot deserialize a raw Postgres enum/name-typed column otherwise.
+//
+// occurredAt/recordedAt in the RESPONSE are display fields only (payment/
+// payment_reversal rows show payment_date as occurredAt; every other type
+// uses created_at for both) -- the cursor/ordering key is ALWAYS
+// (created_at, eventKey) across every event type uniformly, never
+// payment_date, so cross-type chronological ordering can never become
+// ambiguous, and two events sharing an identical created_at (same
+// transaction, different source tables) still resolve to one, stable,
+// repeatable order.
+export async function getDebtHistory(debtId: string, businessId: string, query: DebtHistoryQuery) {
+  const debt = await getOwned(prisma.debts.findUnique({ where: { id: debtId } }), businessId, "Debt");
+
+  const cursor = query.cursor ? decodeDebtHistoryCursor(query.cursor) : null;
+  const cursorClause = cursor
+    ? Prisma.sql`AND (created_at, event_key) < (${new Date(cursor.createdAt)}, ${cursor.eventKey})`
+    : Prisma.empty;
+
+  const rows = await prisma.$queryRaw<DebtHistoryRow[]>(Prisma.sql`
+    WITH history AS (
+      SELECT
+        CASE WHEN dp.reversal_of_payment_id IS NOT NULL THEN 'payment_reversal' ELSE 'payment' END::text AS type,
+        dp.id AS entity_id,
+        ('payment:' || dp.id)::text AS event_key,
+        dp.amount AS amount,
+        dp.payment_date::timestamp AS occurred_at,
+        dp.created_at AS created_at,
+        dp.created_by AS actor_user_id,
+        u1.name AS actor_user_name,
+        r1.id AS receipt_id,
+        r1.receipt_number AS receipt_number,
+        NULL::numeric AS balance_after,
+        NULL::text AS reminder_status,
+        NULL::text AS reminder_channel,
+        NULL::text AS reminder_type,
+        NULL::timestamp AS sent_at,
+        NULL::timestamp AS next_retry,
+        NULL::date AS business_date,
+        NULL::boolean AS has_error
+      FROM debt_payments dp
+      JOIN users u1 ON u1.id = dp.created_by
+      LEFT JOIN receipts r1 ON r1.debt_payment_id = dp.id
+      WHERE dp.business_id = ${businessId} AND dp.debt_id = ${debtId}
+
+      UNION ALL
+
+      SELECT
+        'interest_applied'::text AS type,
+        dt.id AS entity_id,
+        ('interest:' || dt.id)::text AS event_key,
+        dt.amount AS amount,
+        dt.created_at AS occurred_at,
+        dt.created_at AS created_at,
+        dt.created_by AS actor_user_id,
+        u2.name AS actor_user_name,
+        NULL::text AS receipt_id,
+        NULL::text AS receipt_number,
+        dt.balance_after AS balance_after,
+        NULL::text AS reminder_status,
+        NULL::text AS reminder_channel,
+        NULL::text AS reminder_type,
+        NULL::timestamp AS sent_at,
+        NULL::timestamp AS next_retry,
+        NULL::date AS business_date,
+        NULL::boolean AS has_error
+      FROM debt_transactions dt
+      JOIN users u2 ON u2.id = dt.created_by
+      WHERE dt.business_id = ${businessId} AND dt.debt_id = ${debtId}
+
+      UNION ALL
+
+      SELECT
+        'reminder'::text AS type,
+        dr.id AS entity_id,
+        ('reminder:' || dr.id)::text AS event_key,
+        NULL::numeric AS amount,
+        dr.created_at AS occurred_at,
+        dr.created_at AS created_at,
+        NULL::text AS actor_user_id,
+        NULL::text AS actor_user_name,
+        NULL::text AS receipt_id,
+        NULL::text AS receipt_number,
+        NULL::numeric AS balance_after,
+        dr.status::text AS reminder_status,
+        dr.provider AS reminder_channel,
+        dr.reminder_type::text AS reminder_type,
+        dr.sent_at AS sent_at,
+        dr.next_retry AS next_retry,
+        dr.business_date AS business_date,
+        (dr.error IS NOT NULL) AS has_error
+      FROM debt_reminders dr
+      WHERE dr.business_id = ${businessId} AND dr.debt_id = ${debtId}
+    )
+    SELECT * FROM history
+    WHERE true ${cursorClause}
+    ORDER BY created_at DESC, event_key DESC
+    LIMIT ${query.limit + 1}
+  `);
+
+  const hasMore = rows.length > query.limit;
+  const page = rows.slice(0, query.limit);
+  const last = page[page.length - 1];
+  const nextCursor =
+    hasMore && last ? encodeDebtHistoryCursor({ createdAt: last.created_at.toISOString(), eventKey: last.event_key }) : null;
+
+  const data = page.map((row) => ({
+    type: row.type as "payment" | "payment_reversal" | "interest_applied" | "reminder",
+    // Stable, source-tagged, globally-unique per event -- the SAME tuple
+    // member used for cursor/ordering above, also usable directly by API
+    // consumers as a client-side dedup/pagination key.
+    eventKey: row.event_key,
+    amount: row.amount?.toString() ?? null,
+    // Display-only date pair (Batch 5 API clarification #4) -- occurredAt
+    // is payment_date for payment/payment_reversal rows, created_at for
+    // every other type; recordedAt is always created_at. Never used for
+    // the cursor above -- (created_at, eventKey) is the sole ordering key
+    // for every event type, uniformly.
+    occurredAt: row.occurred_at,
+    recordedAt: row.created_at,
+    // Reflects the CURRENT user record (name), never an immutable
+    // historical snapshot at the time of the action -- neither
+    // debt_payments nor debt_transactions has a name-snapshot column.
+    // null for reminder rows (system/scheduler-triggered, no human actor).
+    actor: row.actor_user_id ? { userId: row.actor_user_id, userName: row.actor_user_name } : null,
+    reference: { entityId: row.entity_id, receiptNumber: row.receipt_number ?? undefined },
+    ...(row.balance_after !== null ? { balanceAfter: row.balance_after.toString() } : {}),
+    ...(row.type === "reminder"
+      ? {
+          status: row.reminder_status,
+          channel: row.reminder_channel,
+          reminderType: row.reminder_type,
+          sentAt: row.sent_at,
+          nextRetry: row.next_retry,
+          businessDate: row.business_date,
+          // Never the raw provider error text -- Phase 0 Decision 2,
+          // confirmed: debt_reminders.error is genuine unfiltered
+          // Error.message text from NotificationProvider.send()'s own
+          // internals, never exposed through this API by default.
+          hasError: row.has_error,
+        }
+      : {}),
+  }));
+
+  // Batch 5 requirement -- effective balance from the SAME authoritative
+  // source decorateDebt already reads (debts.amount_remaining), never a
+  // second independent calculation.
+  return { data, nextCursor, effectiveBalance: debt.amount_remaining.toString() };
 }
 
 export async function recordPayment(debtId: string, input: RecordPaymentInput, actor: Actor, idempotencyKey: string) {

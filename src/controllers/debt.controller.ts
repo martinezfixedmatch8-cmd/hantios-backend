@@ -8,6 +8,7 @@ import {
   reversePaymentSchema,
   debtStatusActionSchema,
   applyInterestSchema,
+  debtHistoryQuerySchema,
 } from "../validation/debt.schema";
 import { idParamSchema } from "../validation/common.schema";
 import * as debtService from "../services/debt.service";
@@ -60,6 +61,20 @@ export async function getDebt(req: Request, res: Response, next: NextFunction): 
     const { id } = idParamSchema.parse(req.params);
     const debt = await debtService.getDebt(id, req.auth.businessId);
     res.status(200).json({ data: debt });
+  } catch (err) {
+    next(err);
+  }
+}
+
+// Batch 5 (HNT2-DEBT-001) -- the unified, cursor-paginated financial/
+// reminder history subresource.
+export async function getDebtHistory(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    if (!req.auth) throw unauthorized();
+    const { id } = idParamSchema.parse(req.params);
+    const query = debtHistoryQuerySchema.parse(req.query);
+    const result = await debtService.getDebtHistory(id, req.auth.businessId, query);
+    res.status(200).json(result);
   } catch (err) {
     next(err);
   }
