@@ -123,6 +123,12 @@ export interface DomainEventPayloads {
   SupplierPaymentInstructionDefaultChanged: { businessId: string; supplierId: string; instructionId: string };
   PurchaseOrderProformaInvoiceIssued: { businessId: string; purchaseOrderId: string; proformaInvoiceId: string; total: string };
   PurchaseOrderAdvancePaymentRecorded: { businessId: string; purchaseOrderId: string; proformaInvoiceId: string; advancePaymentId: string; amount: string };
+  // Batch 4 remediation (HNT2-PO-002 + HNT2-PO-003). Publish-only, no
+  // dispatch, same standing rule as every event above.
+  PurchaseOrderAdvancePaymentReversed: { businessId: string; purchaseOrderId: string; advancePaymentId: string; reversalId: string; amount: string };
+  SupplierPaymentInstructionArchived: { businessId: string; supplierId: string; instructionId: string };
+  SupplierPaymentInstructionRestored: { businessId: string; supplierId: string; instructionId: string };
+  SupplierPaymentInstructionRevoked: { businessId: string; supplierId: string; instructionId: string };
   // Session 2B -- confirmed via Phase 0 that these did NOT already exist
   // despite the spec assuming they did (only a match_status field inside
   // PurchaseOrderPaymentRecorded's own payload existed before this

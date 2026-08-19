@@ -1,6 +1,7 @@
 import { Router } from "express";
 import { authenticate } from "../middleware/authenticate";
 import { requireRole } from "../middleware/requireRole";
+import { requirePermission } from "../lib/permissions";
 import { requireIdempotencyKey } from "../middleware/idempotencyKey";
 import {
   createPurchaseOrder,
@@ -14,7 +15,7 @@ import {
 import { createGoodsReceivedNote } from "../controllers/goodsReceivedNote.controller";
 import { recordPurchaseOrderPayment } from "../controllers/purchaseOrderPayment.controller";
 import { issueProformaInvoice, listProformaInvoices, getProformaInvoice } from "../controllers/poProformaInvoice.controller";
-import { recordAdvancePayment, listAdvancePayments } from "../controllers/poAdvancePayment.controller";
+import { recordAdvancePayment, listAdvancePayments, reverseAdvancePayment, revealAdvancePayment } from "../controllers/poAdvancePayment.controller";
 import {
   issueCommercialInvoice,
   supersedeCommercialInvoice,
@@ -66,6 +67,19 @@ router.get("/:id/proforma-invoices/:invoiceId", requireRole(...financialViewRole
 
 router.post("/:id/advance-payments", requireRole(...advancePaymentWriteRoles), requireIdempotencyKey, recordAdvancePayment);
 router.get("/:id/advance-payments", requireRole(...financialViewRoles), listAdvancePayments);
+// Batch 4 remediation (HNT2-PO-002) -- stricter than recording itself
+// (owner/manager only, per confirmed policy -- accountant can RECORD a
+// payment but not REVERSE one, a real financial-correction action).
+const advancePaymentReversalRoles = ["owner", "manager"] as const;
+router.post(
+  "/:id/advance-payments/:paymentId/reversals",
+  requireRole(...advancePaymentReversalRoles),
+  requireIdempotencyKey,
+  reverseAdvancePayment
+);
+// Explicit permission, not a hard-coded role check -- the only code path
+// that ever returns an unmasked advance-payment snapshot.
+router.post("/:id/advance-payments/:paymentId/reveal", requirePermission("reveal_payment_instruction"), revealAdvancePayment);
 
 // Session 2B -- locked RBAC table: Issue/supersede Commercial Invoice =
 // Owner/Manager; View Commercial Invoice/Payment Status = Owner/Manager/

@@ -39,9 +39,35 @@ export const createSupplierPaymentInstructionSchema = z
       .trim()
       .toUpperCase()
       .refine((code) => getCurrency(code) !== undefined, { message: "defaultCurrency must be a valid ISO 4217 currency code" }),
+    // Batch 4 remediation (HNT2-PO-003) -- optional; no expiry means never
+    // expires. Business-local, inclusive-through semantics -- see
+    // poAdvancePayment.service.ts's own expiry check for the exact
+    // date-comparison technique reused from isOverdue.
+    expiryDate: z.coerce.date().optional(),
   })
   .superRefine(validateInstructionTarget);
 export type CreateSupplierPaymentInstructionInput = z.infer<typeof createSupplierPaymentInstructionSchema>;
 
 export const setDefaultSupplierPaymentInstructionSchema = z.object({});
 export type SetDefaultSupplierPaymentInstructionInput = z.infer<typeof setDefaultSupplierPaymentInstructionSchema>;
+
+// Batch 4 remediation (HNT2-PO-003) -- matches Suppliers' own archive/
+// restore precedent exactly: archive requires a reason, restore doesn't.
+// Revoke requires one too (a stricter, permanent action deserves at least
+// the same bar as archive).
+export const archiveSupplierPaymentInstructionSchema = z.object({
+  version: z.number().int().nonnegative(),
+  reason: z.string().trim().min(1).max(500),
+});
+export type ArchiveSupplierPaymentInstructionInput = z.infer<typeof archiveSupplierPaymentInstructionSchema>;
+
+export const restoreSupplierPaymentInstructionSchema = z.object({
+  version: z.number().int().nonnegative(),
+});
+export type RestoreSupplierPaymentInstructionInput = z.infer<typeof restoreSupplierPaymentInstructionSchema>;
+
+export const revokeSupplierPaymentInstructionSchema = z.object({
+  version: z.number().int().nonnegative(),
+  reason: z.string().trim().min(1).max(500),
+});
+export type RevokeSupplierPaymentInstructionInput = z.infer<typeof revokeSupplierPaymentInstructionSchema>;

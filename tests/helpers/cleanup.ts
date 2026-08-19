@@ -137,6 +137,9 @@ export async function cleanupTestBusiness(businessId: string): Promise<void> {
   // both; po_proforma_invoices FKs to purchase_orders (RESTRICT) and
   // po_negotiation_agreement_snapshots (SET NULL, order-independent), so it
   // must go before purchase_orders regardless.
+  // Batch 4 -- po_advance_payment_reversals FKs to po_advance_payments
+  // (RESTRICT), must go first.
+  await prisma.po_advance_payment_reversals.deleteMany({ where: { business_id: businessId } });
   await prisma.po_advance_payments.deleteMany({ where: { business_id: businessId } });
   await prisma.po_proforma_invoices.deleteMany({ where: { business_id: businessId } });
   await prisma.proforma_invoice_counters.deleteMany({ where: { business_id: businessId } });

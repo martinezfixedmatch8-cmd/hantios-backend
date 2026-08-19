@@ -1,12 +1,17 @@
 import { Router } from "express";
 import { authenticate } from "../middleware/authenticate";
 import { requireRole } from "../middleware/requireRole";
+import { requirePermission } from "../lib/permissions";
 import { requireIdempotencyKey } from "../middleware/idempotencyKey";
 import { createSupplier, listSuppliers, getSupplier, updateSupplier, archiveSupplier, restoreSupplier } from "../controllers/supplier.controller";
 import {
   createSupplierPaymentInstruction,
   listSupplierPaymentInstructions,
   setDefaultSupplierPaymentInstruction,
+  archiveSupplierPaymentInstruction,
+  restoreSupplierPaymentInstruction,
+  revokeSupplierPaymentInstruction,
+  revealSupplierPaymentInstruction,
 } from "../controllers/supplierPaymentInstruction.controller";
 
 const router = Router();
@@ -47,6 +52,33 @@ router.post(
   requireRole(...paymentInstructionWriteRoles),
   requireIdempotencyKey,
   setDefaultSupplierPaymentInstruction
+);
+// Batch 4 remediation (HNT2-PO-003).
+router.post(
+  "/:supplierId/payment-instructions/:id/archive",
+  requireRole(...paymentInstructionWriteRoles),
+  requireIdempotencyKey,
+  archiveSupplierPaymentInstruction
+);
+router.post(
+  "/:supplierId/payment-instructions/:id/restore",
+  requireRole(...paymentInstructionWriteRoles),
+  requireIdempotencyKey,
+  restoreSupplierPaymentInstruction
+);
+router.post(
+  "/:supplierId/payment-instructions/:id/revoke",
+  requireRole(...paymentInstructionWriteRoles),
+  requireIdempotencyKey,
+  revokeSupplierPaymentInstruction
+);
+// Explicit permission, not a hard-coded role check -- the only code path
+// that ever returns an unmasked payment instruction. No Idempotency-Key
+// (see the controller's own comment).
+router.post(
+  "/:supplierId/payment-instructions/:id/reveal",
+  requirePermission("reveal_payment_instruction"),
+  revealSupplierPaymentInstruction
 );
 
 export default router;

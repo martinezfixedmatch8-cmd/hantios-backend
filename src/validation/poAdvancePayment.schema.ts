@@ -31,3 +31,14 @@ export type RecordAdvancePaymentInput = z.infer<typeof recordAdvancePaymentSchem
 
 export const listAdvancePaymentsQuerySchema = paginationQuerySchema;
 export type ListAdvancePaymentsQuery = z.infer<typeof listAdvancePaymentsQuerySchema>;
+
+// Batch 4 remediation (HNT2-PO-002) -- amount is the positive "how much to
+// reverse" the client requests; the service negates it before storing as
+// delta_amount. version is required (optimistic-lock guard on the ORIGINAL
+// payment, per the confirmed policy).
+export const reverseAdvancePaymentSchema = z.object({
+  amount: decimalField(z.coerce.number().positive()),
+  reason: z.string().trim().min(1).max(500),
+  version: z.number().int().nonnegative(),
+});
+export type ReverseAdvancePaymentInput = z.infer<typeof reverseAdvancePaymentSchema>;

@@ -150,6 +150,7 @@ model businesses {
   proforma_invoice_counters           proforma_invoice_counters?
   po_proforma_invoices                po_proforma_invoices[]
   po_advance_payments                 po_advance_payments[]
+  po_advance_payment_reversals        po_advance_payment_reversals[]
   commercial_invoice_counters         commercial_invoice_counters?
   po_commercial_invoices              po_commercial_invoices[]
   shipment_counters                   shipment_counters[]
@@ -959,6 +960,16 @@ enum WalletNetwork {
   erc20
 }
 
+// Batch 4 remediation (HNT2-PO-003). active/archived is a real, restorable
+// round-trip; revoked is a deliberately separate, one-way terminal state
+// (confirmed policy) -- see supplier_payment_instructions.status's own
+// comment for the full reasoning.
+enum SupplierPaymentInstructionStatus {
+  active
+  archived
+  revoked
+}
+
 // Session 2A -- an invoice's own LIFECYCLE state only (issued vs
 // superseded-by-a-reissue). Deliberately does NOT include a "fully
 // advanced"/"fully prepaid" value the way an early draft of this session's
@@ -1246,9 +1257,35 @@ model supplier_payment_instructions {
   is_default          Boolean               @default(false)
   created_at          DateTime              @default(now())
   created_by          String
+  // Batch 4 remediation (HNT2-PO-003) -- lifecycle. active/archived is a
+  // real, restorable round-trip (this repo's own dominant Branches/
+  // PaymentMethods/Suppliers precedent); revoked is a deliberately
+  // separate, ONE-WAY terminal state (confirmed policy: "revoked is
+  // permanent... never restored or automatically reactivated") -- a
+  // revoked instruction represents a known-unsafe destination, not merely
+  // "not in use," so restoring it would reopen exactly the safety hole
+  // this fix exists to close. No stored "expired" status value --
+  // "expired" is derived at the point of selection from expiry_date
+  // (below) + the business's own local calendar day, never a fourth
+  // stored state needing a scheduler to transition it (matches this
+  // repo's dominant "derive, don't store" principle -- Debt overdue,
+  // Negotiation Status, Invoice Payment Status all do the same).
+  status              SupplierPaymentInstructionStatus @default(active)
+  version             Int                   @default(0)
+  expiry_date         DateTime?             @db.Date
+  archived_at         DateTime?
+  archived_by         String?
+  revoked_at          DateTime?
+  revoked_by          String?
   businesses          businesses            @relation(fields: [business_id], references: [id])
   suppliers           suppliers             @relation(fields: [supplier_id], references: [id])
-  users               users                 @relation(fields: [created_by], references: [id])
+  // Three distinct FKs to users now -- each needs an explicit relation
+  // name (Prisma requires this once a model has more than one relation to
+  // the same target), matching Expenses' own 4-relation precedent and PO
+  // Negotiation's po_secure_links_created_by/revoked_by precedent exactly.
+  users_created_by    users                 @relation("supplier_payment_instructions_created_byTousers", fields: [created_by], references: [id])
+  users_archived_by   users?                @relation("supplier_payment_instructions_archived_byTousers", fields: [archived_by], references: [id])
+  users_revoked_by    users?                @relation("supplier_payment_instructions_revoked_byTousers", fields: [revoked_by], references: [id])
   po_advance_payments po_advance_payments[]
 
   @@index([business_id])
@@ -1345,15 +1382,57 @@ model po_advance_payments {
   paid_at                         DateTime                      @default(now())
   recorded_by                     String
   created_at                      DateTime                      @default(now())
+  // Batch 4 remediation (HNT2-PO-002) -- a pure metadata change-counter,
+  // incremented only by a reversal against this payment. Never touches
+  // amount/currency_code/any snapshot field -- "never mutate the original
+  // payment snapshot" holds literally; this is the optimistic-lock guard
+  // a reversal request supplies as its own expected version.
+  version                         Int                           @default(0)
   businesses                      businesses                    @relation(fields: [business_id], references: [id])
   purchase_orders                 purchase_orders               @relation(fields: [purchase_order_id], references: [id])
   po_proforma_invoices            po_proforma_invoices          @relation(fields: [proforma_invoice_id], references: [id])
   supplier_payment_instructions   supplier_payment_instructions @relation(fields: [supplier_payment_instruction_id], references: [id])
   payment_methods                 payment_methods?              @relation(fields: [payment_method_id], references: [id])
   users                           users                         @relation(fields: [recorded_by], references: [id])
+  po_advance_payment_reversals    po_advance_payment_reversals[]
 
   @@index([purchase_order_id])
   @@index([proforma_invoice_id])
+  // Supporting composite unique for po_advance_payment_reversals' own
+  // composite FK below -- adds no new restriction (id is already globally
+  // unique via the primary key), purely the syntactic requirement Postgres
+  // needs to let a composite FK reference (business_id, id) together.
+  @@unique([business_id, id])
+}
+
+// Batch 4 remediation (HNT2-PO-002) -- append-only reversal ledger,
+// mirroring commission_adjustments/payroll_reversals' own field shape
+// (signed delta_amount, reason, created_by, created_at), but stricter:
+// delta_amount is constrained strictly negative (chk_..._delta_amount_
+// negative) since a reversal only ever reduces the balance, never
+// increases it, unlike those two general-correction tables. Multiple
+// rows per original payment are expected and normal (partial reversals
+// are allowed, confirmed policy) -- no uniqueness constraint on
+// original_payment_id assumes one reversal per payment.
+model po_advance_payment_reversals {
+  id                   String              @id
+  business_id          String
+  original_payment_id  String
+  delta_amount         Decimal             @db.Decimal(14, 2)
+  reason               String
+  created_by           String
+  created_at           DateTime            @default(now())
+  businesses           businesses          @relation(fields: [business_id], references: [id])
+  // Composite FK -- the real, database-enforced guarantee this reversal's
+  // business_id can never differ from the original payment's own
+  // business_id. A mismatched pair is structurally unrepresentable;
+  // Postgres rejects the INSERT before application code ever runs. The
+  // service-level getOwned tenant check on the original payment stays as
+  // defense in depth, this is not a replacement for it.
+  po_advance_payments  po_advance_payments @relation(fields: [business_id, original_payment_id], references: [business_id, id])
+  users                users               @relation(fields: [created_by], references: [id])
+
+  @@index([business_id, original_payment_id, created_at])
 }
 
 // ============================================================================
@@ -2320,9 +2399,12 @@ model users {
   po_secure_links_revoked_byTousers             po_secure_links[]                    @relation("po_secure_links_revoked_byTousers")
   po_negotiation_internal_notes                 po_negotiation_internal_notes[]
   po_negotiation_agreement_snapshots            po_negotiation_agreement_snapshots[]
-  supplier_payment_instructions                 supplier_payment_instructions[]
+  supplier_payment_instructions_created_byTousers  supplier_payment_instructions[] @relation("supplier_payment_instructions_created_byTousers")
+  supplier_payment_instructions_archived_byTousers supplier_payment_instructions[] @relation("supplier_payment_instructions_archived_byTousers")
+  supplier_payment_instructions_revoked_byTousers  supplier_payment_instructions[] @relation("supplier_payment_instructions_revoked_byTousers")
   po_proforma_invoices                          po_proforma_invoices[]
   po_advance_payments                           po_advance_payments[]
+  po_advance_payment_reversals                  po_advance_payment_reversals[]
   po_commercial_invoices                        po_commercial_invoices[]
   sales_sales_cashier_idTousers                 sales[]                              @relation("sales_cashier_idTousers")
   sales_sales_confirmed_byTousers               sales[]                              @relation("sales_confirmed_byTousers")
