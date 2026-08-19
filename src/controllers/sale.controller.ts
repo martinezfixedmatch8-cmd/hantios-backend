@@ -1,6 +1,13 @@
 import type { Request, Response, NextFunction } from "express";
 import { unauthorized } from "../lib/errors";
-import { createSaleSchema, listSalesQuerySchema, voidSaleSchema, refundSaleSchema, setSaleAttributionSchema } from "../validation/sale.schema";
+import {
+  createSaleSchema,
+  listSalesQuerySchema,
+  voidSaleSchema,
+  refundSaleSchema,
+  setSaleAttributionSchema,
+  listSaleRefundsQuerySchema,
+} from "../validation/sale.schema";
 import { idParamSchema } from "../validation/common.schema";
 import * as saleService from "../services/sale.service";
 import { getReplayedResponse } from "../lib/idempotency";
@@ -106,6 +113,20 @@ export async function getSale(req: Request, res: Response, next: NextFunction): 
     const { id } = idParamSchema.parse(req.params);
     const sale = await saleService.getSale(id, req.auth.businessId);
     res.status(200).json({ data: sale });
+  } catch (err) {
+    next(err);
+  }
+}
+
+// Batch 5 (HNT2-SALE-001) -- the dedicated paginated refund-history
+// subresource.
+export async function listSaleRefunds(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    if (!req.auth) throw unauthorized();
+    const { id } = idParamSchema.parse(req.params);
+    const query = listSaleRefundsQuerySchema.parse(req.query);
+    const result = await saleService.listSaleRefunds(id, query, req.auth.businessId);
+    res.status(200).json(result);
   } catch (err) {
     next(err);
   }

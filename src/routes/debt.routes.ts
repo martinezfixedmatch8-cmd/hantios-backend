@@ -13,6 +13,7 @@ import {
   writeOffDebt,
   sendReminder,
   applyInterest,
+  getDebtHistory,
 } from "../controllers/debt.controller";
 
 const router = Router();
@@ -31,6 +32,9 @@ const elevatedRoles = ["owner", "manager"] as const;
 router.post("/", requireRole(...writeRoles), requireIdempotencyKey, createDebt);
 router.get("/", requireRole(...readRoles), listDebts);
 router.get("/:id", requireRole(...readRoles), getDebt);
+// Batch 5 (HNT2-DEBT-001) -- unified, cursor-paginated financial/reminder
+// history subresource, same read bar as the parent debt.
+router.get("/:id/history", requireRole(...readRoles), getDebtHistory);
 router.post("/:id/payments", requireRole(...writeRoles), requireIdempotencyKey, recordPayment);
 router.post("/:id/payments/:paymentId/reverse", requireRole(...elevatedRoles), requireIdempotencyKey, reversePayment);
 router.post("/:id/dispute", requireRole(...elevatedRoles), requireIdempotencyKey, disputeDebt);

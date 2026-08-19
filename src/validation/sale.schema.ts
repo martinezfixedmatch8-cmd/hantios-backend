@@ -118,3 +118,13 @@ export const refundSaleSchema = z.object({
   items: z.array(refundSaleLineSchema).min(1),
 });
 export type RefundSaleInput = z.infer<typeof refundSaleSchema>;
+
+// Batch 5 (HNT2-SALE-001) -- the refund-history read surface. Chronological
+// only (created_at is the sole meaningful sort for a refund-event ledger),
+// standard offset pagination via resolveListQuery/paginate -- the dedicated-
+// subresource shape confirmed in Phase 0, matching
+// GET /purchase-orders/:id/negotiation/messages' own precedent, not the
+// unbounded receipt-delivery-attempts shape (a separate, already-tracked,
+// out-of-scope gap -- HNT2-RECEIPT-001).
+export const listSaleRefundsQuerySchema = paginationQuerySchema;
+export type ListSaleRefundsQuery = z.infer<typeof listSaleRefundsQuerySchema>;

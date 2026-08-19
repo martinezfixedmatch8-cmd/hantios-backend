@@ -2,7 +2,7 @@ import { Router } from "express";
 import { authenticate } from "../middleware/authenticate";
 import { requireRole } from "../middleware/requireRole";
 import { requireIdempotencyKey } from "../middleware/idempotencyKey";
-import { createSale, listSales, getSale, voidSale, refundSale, setSaleAttribution } from "../controllers/sale.controller";
+import { createSale, listSales, getSale, voidSale, refundSale, setSaleAttribution, listSaleRefunds } from "../controllers/sale.controller";
 
 const router = Router();
 
@@ -17,6 +17,9 @@ const readRoles = ["owner", "manager", "cashier", "accountant"] as const;
 router.post("/", requireRole("owner", "manager", "cashier"), requireIdempotencyKey, createSale);
 router.get("/", requireRole(...readRoles), listSales);
 router.get("/:id", requireRole(...readRoles), getSale);
+// Batch 5 (HNT2-SALE-001) -- dedicated paginated refund-history subresource,
+// same read bar as the parent sale.
+router.get("/:id/refunds", requireRole(...readRoles), listSaleRefunds);
 
 // Void: same-day self-service correction. Manager deliberately excluded --
 // confirmed decision, does not bypass the way it does everywhere else in this

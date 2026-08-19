@@ -37,6 +37,16 @@ export const listDebtsQuerySchema = paginationQuerySchema.extend({
 });
 export type ListDebtsQuery = z.infer<typeof listDebtsQuerySchema>;
 
+// Batch 5 (HNT2-DEBT-001) -- mirrors customer.schema.ts's own
+// customerTimelineQuerySchema exactly (the confirmed precedent: a raw-SQL
+// UNION ALL across heterogeneous append-only tables uses cursor/keyset
+// pagination, not offset pagination -- see getCustomerTimeline).
+export const debtHistoryQuerySchema = z.object({
+  cursor: z.string().trim().min(1).optional(),
+  limit: z.coerce.number().int().min(1).max(100).optional().default(20),
+});
+export type DebtHistoryQuery = z.infer<typeof debtHistoryQuerySchema>;
+
 export const recordPaymentSchema = z.object({
   amount: decimalField(z.coerce.number().positive()),
   paymentMethodId: z.string().uuid().optional(),
