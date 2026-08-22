@@ -6,6 +6,7 @@ import {
   listExpenseCategories,
   updateExpenseCategory,
   deactivateExpenseCategory,
+  restoreExpenseCategory,
 } from "../controllers/expenseCategory.controller";
 
 const router = Router();
@@ -22,5 +23,8 @@ router.post("/", requireRole("owner"), createExpenseCategory);
 router.get("/", requireRole("owner", "manager", "accountant"), listExpenseCategories);
 router.patch("/:id", requireRole("owner"), updateExpenseCategory);
 router.post("/:id/deactivate", requireRole("owner"), deactivateExpenseCategory);
+// Batch 6 (HNT2-EXP-001) -- owner-only, matching the existing bar; no
+// Idempotency-Key (Option A not expanded to this entity).
+router.post("/:id/restore", requireRole("owner"), restoreExpenseCategory);
 
 export default router;

@@ -133,6 +133,140 @@ describe("Expense Categories", () => {
     expect(res.body.data.length).toBeLessThanOrEqual(1);
   });
 
+  // Batch 6 (HNT2-EXP-001) -- restore path.
+  describe("restore (HNT2-EXP-001)", () => {
+    it("deactivates then restores a CUSTOM category (full round-trip)", async () => {
+      const created = await request(app)
+        .post("/expense-categories")
+        .set("Authorization", `Bearer ${ownerToken}`)
+        .send({ name: `Restorable ${randomUUID()}` });
+      const id = created.body.data.id;
+
+      const deactivated = await request(app).post(`/expense-categories/${id}/deactivate`).set("Authorization", `Bearer ${ownerToken}`);
+      expect(deactivated.status).toBe(200);
+      expect(deactivated.body.data.active).toBe(false);
+
+      const restored = await request(app).post(`/expense-categories/${id}/restore`).set("Authorization", `Bearer ${ownerToken}`);
+      expect(restored.status).toBe(200);
+      expect(restored.body.data.active).toBe(true);
+
+      const auditRows = await prisma.audit_logs.findMany({ where: { entity_id: id, action: "expense_category.restored" } });
+      expect(auditRows).toHaveLength(1);
+    });
+
+    it("rejects restoring a SYSTEM category", async () => {
+      const list = await request(app).get("/expense-categories?pageSize=50").set("Authorization", `Bearer ${ownerToken}`);
+      const systemCategory = list.body.data.find((c: { type: string }) => c.type === "system");
+      const res = await request(app).post(`/expense-categories/${systemCategory.id}/restore`).set("Authorization", `Bearer ${ownerToken}`);
+      expect(res.status).toBe(400);
+    });
+
+    it("is an idempotent no-op (200, not a 400/409) when restoring an already-active CUSTOM category", async () => {
+      const created = await request(app)
+        .post("/expense-categories")
+        .set("Authorization", `Bearer ${ownerToken}`)
+        .send({ name: `AlreadyActive ${randomUUID()}` });
+      const id = created.body.data.id;
+
+      const res = await request(app).post(`/expense-categories/${id}/restore`).set("Authorization", `Bearer ${ownerToken}`);
+      expect(res.status).toBe(200);
+      expect(res.body.data.active).toBe(true);
+
+      // No new audit row -- this is a pure no-op, not a state transition.
+      const auditRows = await prisma.audit_logs.findMany({ where: { entity_id: id, action: "expense_category.restored" } });
+      expect(auditRows).toHaveLength(0);
+    });
+
+    it("allows creating a new category reusing a name held only by a deactivated category", async () => {
+      const name = `ReuseAfterDeactivate ${randomUUID()}`;
+      const first = await request(app).post("/expense-categories").set("Authorization", `Bearer ${ownerToken}`).send({ name });
+      expect(first.status).toBe(201);
+      await request(app).post(`/expense-categories/${first.body.data.id}/deactivate`).set("Authorization", `Bearer ${ownerToken}`);
+
+      const second = await request(app).post("/expense-categories").set("Authorization", `Bearer ${ownerToken}`).send({ name });
+      expect(second.status).toBe(201);
+      expect(second.body.data.id).not.toBe(first.body.data.id);
+    });
+
+    it("returns 409 restoring a category whose name a different active category has since claimed", async () => {
+      const name = `ClaimedWhileInactive ${randomUUID()}`;
+      const original = await request(app).post("/expense-categories").set("Authorization", `Bearer ${ownerToken}`).send({ name });
+      await request(app).post(`/expense-categories/${original.body.data.id}/deactivate`).set("Authorization", `Bearer ${ownerToken}`);
+
+      const replacement = await request(app).post("/expense-categories").set("Authorization", `Bearer ${ownerToken}`).send({ name });
+      expect(replacement.status).toBe(201);
+
+      const restoreRes = await request(app).post(`/expense-categories/${original.body.data.id}/restore`).set("Authorization", `Bearer ${ownerToken}`);
+      expect(restoreRes.status).toBe(409);
+    });
+
+    it("returns 409 (not a raw 500) when a rename collides with a different active category's name", async () => {
+      const nameA = `RenameTargetA ${randomUUID()}`;
+      const nameB = `RenameTargetB ${randomUUID()}`;
+      await request(app).post("/expense-categories").set("Authorization", `Bearer ${ownerToken}`).send({ name: nameA });
+      const b = await request(app).post("/expense-categories").set("Authorization", `Bearer ${ownerToken}`).send({ name: nameB });
+
+      const res = await request(app)
+        .patch(`/expense-categories/${b.body.data.id}`)
+        .set("Authorization", `Bearer ${ownerToken}`)
+        .send({ name: nameA });
+      expect(res.status).toBe(409);
+    });
+
+    it("returns 404 restoring a category belonging to a different business", async () => {
+      const otherOwner = await signupTestOwner();
+      businessIds.push(otherOwner.businessId);
+      const otherLogin = await loginTestOwner(otherOwner.email, otherOwner.password, otherOwner.deviceId);
+      const otherCreated = await request(app)
+        .post("/expense-categories")
+        .set("Authorization", `Bearer ${otherLogin.accessToken}`)
+        .send({ name: `Other Business Restore ${randomUUID()}` });
+
+      const res = await request(app)
+        .post(`/expense-categories/${otherCreated.body.data.id}/restore`)
+        .set("Authorization", `Bearer ${ownerToken}`);
+      expect(res.status).toBe(404);
+    });
+
+    it("only owner may restore (manager/accountant denied)", async () => {
+      const created = await request(app)
+        .post("/expense-categories")
+        .set("Authorization", `Bearer ${ownerToken}`)
+        .send({ name: `RestoreRbac ${randomUUID()}` });
+      await request(app).post(`/expense-categories/${created.body.data.id}/deactivate`).set("Authorization", `Bearer ${ownerToken}`);
+
+      for (const role of ["manager", "accountant"] as UserRole[]) {
+        const user = await createTestUser(businessId, role);
+        const token = mintAccessToken(user);
+        const res = await request(app).post(`/expense-categories/${created.body.data.id}/restore`).set("Authorization", `Bearer ${token}`);
+        expect(res.status).toBe(403);
+      }
+    });
+
+    it("keeps a historical expense's own category reference readable after the category is deactivated", async () => {
+      const created = await request(app)
+        .post("/expense-categories")
+        .set("Authorization", `Bearer ${ownerToken}`)
+        .send({ name: `HistoricalRef ${randomUUID()}` });
+      const categoryId = created.body.data.id;
+
+      const isoDate = (offsetDays: number) => new Date(Date.now() + offsetDays * 86_400_000).toISOString().slice(0, 10);
+      const expenseRes = await request(app)
+        .post("/expenses")
+        .set("Authorization", `Bearer ${ownerToken}`)
+        .set("Idempotency-Key", `test-${randomUUID()}`)
+        .send({ scope: "business", categoryId, amount: 250, expenseDate: isoDate(-1) });
+      expect(expenseRes.status).toBe(201);
+
+      await request(app).post(`/expense-categories/${categoryId}/deactivate`).set("Authorization", `Bearer ${ownerToken}`);
+
+      const getRes = await request(app).get(`/expenses/${expenseRes.body.data.id}`).set("Authorization", `Bearer ${ownerToken}`);
+      expect(getRes.status).toBe(200);
+      expect(getRes.body.data.category_id).toBe(categoryId);
+      expect(getRes.body.data.category_name).toBe(created.body.data.name);
+    });
+  });
+
   describe("full permission matrix", () => {
     const deniedCreate: UserRole[] = ["manager", "accountant", "cashier", "storekeeper", "shareholder", "custom"];
     const deniedRead: UserRole[] = ["cashier", "storekeeper", "shareholder", "custom"];

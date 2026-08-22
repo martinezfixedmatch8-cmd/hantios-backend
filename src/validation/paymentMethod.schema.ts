@@ -9,8 +9,21 @@ export const createPaymentMethodSchema = z.object({
 });
 export type CreatePaymentMethodInput = z.infer<typeof createPaymentMethodSchema>;
 
-export const updatePaymentMethodSchema = createPaymentMethodSchema.partial();
+// Batch 6 (HNT2-MD-001) -- version is now required on every mutation.
+export const updatePaymentMethodSchema = createPaymentMethodSchema.partial().extend({
+  version: z.number().int().nonnegative(),
+});
 export type UpdatePaymentMethodInput = z.infer<typeof updatePaymentMethodSchema>;
+
+export const archivePaymentMethodSchema = z.object({
+  version: z.number().int().nonnegative(),
+});
+export type ArchivePaymentMethodInput = z.infer<typeof archivePaymentMethodSchema>;
+
+export const restorePaymentMethodSchema = z.object({
+  version: z.number().int().nonnegative(),
+});
+export type RestorePaymentMethodInput = z.infer<typeof restorePaymentMethodSchema>;
 
 export const listPaymentMethodsQuerySchema = paginationQuerySchema.extend({
   status: z.enum(["active", "archived"]).optional(),

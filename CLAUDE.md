@@ -1526,6 +1526,12 @@ A second review round raised three real issues, all fixed in place (not deferred
 
 `HNT2-RECEIPT-001` (the receipt-delivery-attempts unbounded/unpaginated gap this batch's own Phase 0 found — confirmed out of scope, already tracked separately in a later batch, not fixed here). Any schema or migration change (confirmed unnecessary for either finding). Any write-path change to Sale or Debt (both findings are purely additive reads). Anything from Batch 6 (staff/master-data lifecycle) or later.
 
+## Staff and Master-Data Lifecycle — Batch 6 (rollback note, pre-commit)
+
+Batch 6 narrows `departments`/`positions` to active-only normalized name uniqueness and `tags`/`expense_categories` to active-only exact-match uniqueness (replacing each table's prior global `@@unique`), alongside adding optimistic locking + Idempotency-Key to Branches/Payment Methods/Tags/Departments/Positions. Full session write-up lands with the commit; this note captures the one piece explicitly required before that: schema-rollback conditionality.
+
+The application commit can be reverted, but schema rollback for the active-only uniqueness decision is conditional. Before a global uniqueness constraint can be restored, a read-only conflict inventory must confirm that no active/archived same-name pairs exist, or an approved data-resolution plan must rename/archive one row in each pair. No automatic destructive rollback is permitted.
+
 ## Notification routing (locked)
 
 - `SECURITY` → Email (new login, password changed/reset, suspicious login, email/phone changed), falls back to WhatsApp only if email is unverified — never suppress a security alert silently. **Carve-out:** the New-Device-Login OTP challenge is `SECURITY` but always WhatsApp regardless of email-verified status — the code has to reach the device being verified, so "email-first" doesn't apply to the challenge itself. A passive "you just logged in from a new device" *informational* email (distinct from the blocking OTP challenge) is named in this table but not built — only the challenge itself exists.

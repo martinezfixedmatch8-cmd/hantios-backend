@@ -10,5 +10,24 @@ export const createDepartmentSchema = z.object({
 });
 export type CreateDepartmentInput = z.infer<typeof createDepartmentSchema>;
 
-export const listDepartmentsQuerySchema = paginationQuerySchema;
+export const listDepartmentsQuerySchema = paginationQuerySchema.extend({
+  status: z.enum(["active", "archived"]).optional(),
+});
 export type ListDepartmentsQuery = z.infer<typeof listDepartmentsQuerySchema>;
+
+// Batch 6 (HNT2-HR-001) -- full lifecycle.
+export const updateDepartmentSchema = z.object({
+  version: z.number().int().nonnegative(),
+  name: z.string().trim().min(1).max(200),
+});
+export type UpdateDepartmentInput = z.infer<typeof updateDepartmentSchema>;
+
+export const archiveDepartmentSchema = z.object({
+  version: z.number().int().nonnegative(),
+});
+export type ArchiveDepartmentInput = z.infer<typeof archiveDepartmentSchema>;
+
+export const restoreDepartmentSchema = z.object({
+  version: z.number().int().nonnegative(),
+});
+export type RestoreDepartmentInput = z.infer<typeof restoreDepartmentSchema>;

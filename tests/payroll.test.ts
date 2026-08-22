@@ -53,12 +53,14 @@ describe("Module 12 Session A -- Payroll Core", () => {
       const deptRes = await request(app)
         .post("/departments")
         .set("Authorization", `Bearer ${ownerToken}`)
+        .set("Idempotency-Key", idemKey())
         .send({ name: "Sales" });
       expect(deptRes.status).toBe(201);
 
       const posRes = await request(app)
         .post("/positions")
         .set("Authorization", `Bearer ${ownerToken}`)
+        .set("Idempotency-Key", idemKey())
         .send({ title: "Salesperson", departmentId: deptRes.body.data.id });
       expect(posRes.status).toBe(201);
       expect(posRes.body.data.department_id).toBe(deptRes.body.data.id);
@@ -66,6 +68,133 @@ describe("Module 12 Session A -- Payroll Core", () => {
       const listRes = await request(app).get("/departments").set("Authorization", `Bearer ${ownerToken}`);
       expect(listRes.status).toBe(200);
       expect(listRes.body.data.some((d: { name: string }) => d.name === "Sales")).toBe(true);
+    });
+  });
+
+  // Batch 6 (HNT2-HR-001), Amended Phase 2 item 5 -- an archived department/
+  // position may still be read historically, but a NEW or REASSIGNED
+  // employee link must never attach to one.
+  describe("Employee assignment vs archived department/position", () => {
+    async function createArchivedDepartment() {
+      const deptRes = await request(app)
+        .post("/departments")
+        .set("Authorization", `Bearer ${ownerToken}`)
+        .set("Idempotency-Key", idemKey())
+        .send({ name: `Archived Dept ${randomUUID()}` });
+      await request(app)
+        .post(`/departments/${deptRes.body.data.id}/archive`)
+        .set("Authorization", `Bearer ${ownerToken}`)
+        .set("Idempotency-Key", idemKey())
+        .send({ version: 0 });
+      return deptRes.body.data;
+    }
+
+    async function createArchivedPosition() {
+      const posRes = await request(app)
+        .post("/positions")
+        .set("Authorization", `Bearer ${ownerToken}`)
+        .set("Idempotency-Key", idemKey())
+        .send({ title: `Archived Position ${randomUUID()}` });
+      await request(app)
+        .post(`/positions/${posRes.body.data.id}/archive`)
+        .set("Authorization", `Bearer ${ownerToken}`)
+        .set("Idempotency-Key", idemKey())
+        .send({ version: 0 });
+      return posRes.body.data;
+    }
+
+    it("rejects creating an employee with an archived departmentId", async () => {
+      const archivedDept = await createArchivedDepartment();
+      const res = await request(app)
+        .post("/employees")
+        .set("Authorization", `Bearer ${ownerToken}`)
+        .set("Idempotency-Key", idemKey())
+        .send({ name: `Blocked ${randomUUID()}`, phone: `+2547${Math.floor(10000000 + Math.random() * 89999999)}`, departmentId: archivedDept.id });
+      expect(res.status).toBe(400);
+    });
+
+    it("rejects creating an employee with an archived positionId", async () => {
+      const archivedPos = await createArchivedPosition();
+      const res = await request(app)
+        .post("/employees")
+        .set("Authorization", `Bearer ${ownerToken}`)
+        .set("Idempotency-Key", idemKey())
+        .send({ name: `Blocked ${randomUUID()}`, phone: `+2547${Math.floor(10000000 + Math.random() * 89999999)}`, positionId: archivedPos.id });
+      expect(res.status).toBe(400);
+    });
+
+    it("rejects reassigning an existing employee onto an archived department/position via PATCH", async () => {
+      const empRes = await request(app)
+        .post("/employees")
+        .set("Authorization", `Bearer ${ownerToken}`)
+        .set("Idempotency-Key", idemKey())
+        .send({ name: `Reassign ${randomUUID()}`, phone: `+2547${Math.floor(10000000 + Math.random() * 89999999)}` });
+      const employee = empRes.body.data;
+
+      const archivedDept = await createArchivedDepartment();
+      const deptRes = await request(app)
+        .patch(`/employees/${employee.id}`)
+        .set("Authorization", `Bearer ${ownerToken}`)
+        .send({ version: employee.version, departmentId: archivedDept.id });
+      expect(deptRes.status).toBe(400);
+
+      const archivedPos = await createArchivedPosition();
+      const posRes = await request(app)
+        .patch(`/employees/${employee.id}`)
+        .set("Authorization", `Bearer ${ownerToken}`)
+        .send({ version: employee.version, positionId: archivedPos.id });
+      expect(posRes.status).toBe(400);
+    });
+
+    it("keeps an existing employee's link to a now-archived department/position fully readable and untouched", async () => {
+      const deptRes = await request(app)
+        .post("/departments")
+        .set("Authorization", `Bearer ${ownerToken}`)
+        .set("Idempotency-Key", idemKey())
+        .send({ name: `StaysLinked Dept ${randomUUID()}` });
+      const posRes = await request(app)
+        .post("/positions")
+        .set("Authorization", `Bearer ${ownerToken}`)
+        .set("Idempotency-Key", idemKey())
+        .send({ title: `StaysLinked Position ${randomUUID()}`, departmentId: deptRes.body.data.id });
+
+      const empRes = await request(app)
+        .post("/employees")
+        .set("Authorization", `Bearer ${ownerToken}`)
+        .set("Idempotency-Key", idemKey())
+        .send({
+          name: `StaysLinked ${randomUUID()}`,
+          phone: `+2547${Math.floor(10000000 + Math.random() * 89999999)}`,
+          departmentId: deptRes.body.data.id,
+          positionId: posRes.body.data.id,
+        });
+      const employee = empRes.body.data;
+
+      await request(app)
+        .post(`/departments/${deptRes.body.data.id}/archive`)
+        .set("Authorization", `Bearer ${ownerToken}`)
+        .set("Idempotency-Key", idemKey())
+        .send({ version: 0 });
+      await request(app)
+        .post(`/positions/${posRes.body.data.id}/archive`)
+        .set("Authorization", `Bearer ${ownerToken}`)
+        .set("Idempotency-Key", idemKey())
+        .send({ version: 0 });
+
+      const getRes = await request(app).get(`/employees/${employee.id}`).set("Authorization", `Bearer ${ownerToken}`);
+      expect(getRes.status).toBe(200);
+      expect(getRes.body.data.department_id).toBe(deptRes.body.data.id);
+      expect(getRes.body.data.position_id).toBe(posRes.body.data.id);
+
+      // Renaming the employee (not touching department/position) must not
+      // be blocked by the now-archived references it historically links to.
+      const renameRes = await request(app)
+        .patch(`/employees/${employee.id}`)
+        .set("Authorization", `Bearer ${ownerToken}`)
+        .send({ version: employee.version, name: `StillWorks ${randomUUID()}` });
+      expect(renameRes.status).toBe(200);
+      expect(renameRes.body.data.department_id).toBe(deptRes.body.data.id);
+      expect(renameRes.body.data.position_id).toBe(posRes.body.data.id);
     });
   });
 

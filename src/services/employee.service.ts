@@ -36,10 +36,14 @@ export async function createEmployee(input: CreateEmployeeInput, actor: Actor, i
     await getOwned(prisma.branches.findUnique({ where: { id: input.branchId } }), actor.businessId, "Branch");
   }
   if (input.departmentId) {
-    await getOwned(prisma.departments.findUnique({ where: { id: input.departmentId } }), actor.businessId, "Department");
+    // Batch 6 (HNT2-HR-001) -- an archived department may still be read
+    // historically, but a NEW employee link must never attach to one.
+    const department = await getOwned(prisma.departments.findUnique({ where: { id: input.departmentId } }), actor.businessId, "Department");
+    if (department.status !== "active") throw badRequest("Department is archived");
   }
   if (input.positionId) {
-    await getOwned(prisma.positions.findUnique({ where: { id: input.positionId } }), actor.businessId, "Position");
+    const position = await getOwned(prisma.positions.findUnique({ where: { id: input.positionId } }), actor.businessId, "Position");
+    if (position.status !== "active") throw badRequest("Position is archived");
   }
   if (input.userId) {
     await getOwned(prisma.users.findUnique({ where: { id: input.userId } }), actor.businessId, "User");
@@ -131,10 +135,15 @@ export async function updateEmployee(id: string, input: UpdateEmployeeInput, act
     await getOwned(prisma.branches.findUnique({ where: { id: input.branchId } }), actor.businessId, "Branch");
   }
   if (input.departmentId) {
-    await getOwned(prisma.departments.findUnique({ where: { id: input.departmentId } }), actor.businessId, "Department");
+    // Batch 6 (HNT2-HR-001) -- only checked when departmentId is actually
+    // being reassigned; an existing historical link is never rewritten or
+    // blocked by this guard.
+    const department = await getOwned(prisma.departments.findUnique({ where: { id: input.departmentId } }), actor.businessId, "Department");
+    if (department.status !== "active") throw badRequest("Department is archived");
   }
   if (input.positionId) {
-    await getOwned(prisma.positions.findUnique({ where: { id: input.positionId } }), actor.businessId, "Position");
+    const position = await getOwned(prisma.positions.findUnique({ where: { id: input.positionId } }), actor.businessId, "Position");
+    if (position.status !== "active") throw badRequest("Position is archived");
   }
   if (input.userId) {
     await getOwned(prisma.users.findUnique({ where: { id: input.userId } }), actor.businessId, "User");
