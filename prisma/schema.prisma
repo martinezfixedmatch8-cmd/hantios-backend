@@ -64,6 +64,9 @@ model branches {
   location                         String?
   manager_id                       String?
   status                           RecordStatus                @default(active)
+  // Batch 6 (HNT2-MD-001) -- additive optimistic-locking column; no
+  // lifecycle-status change, `status` above already existed.
+  version                          Int                         @default(0)
   created_at                       DateTime                    @default(now())
   branch_inventory                 branch_inventory[]
   businesses                       businesses                  @relation(fields: [business_id], references: [id])
@@ -570,7 +573,11 @@ model expense_categories {
   businesses  businesses          @relation(fields: [business_id], references: [id])
   expenses    expenses[]
 
-  @@unique([business_id, name])
+  // Batch 6 (HNT2-EXP-001) -- the original global (business_id, name)
+  // unique constraint is narrowed to active-only via a hand-added partial
+  // unique index in the Batch 6 migration (Prisma's DSL can't express a
+  // partial index, so it's intentionally not declared here). `active`
+  // itself remains the sole lifecycle source of truth -- no new column.
   @@index([business_id])
 }
 
@@ -678,11 +685,17 @@ model tags {
   id           String         @id
   business_id  String
   name         String
+  // Batch 6 (HNT2-MASTER-001) -- full lifecycle. Uniqueness is narrowed
+  // from the original global (business_id, name) constraint to active-only
+  // (see the Batch 6 migration's own hand-added partial unique index) --
+  // exact-match semantics preserved, no new normalization added here
+  // (deliberately different from departments/positions).
+  status       RecordStatus   @default(active)
+  version      Int            @default(0)
   created_at   DateTime       @default(now())
   businesses   businesses     @relation(fields: [business_id], references: [id])
   expense_tags expense_tags[]
 
-  @@unique([business_id, name])
   @@index([business_id])
 }
 
@@ -823,6 +836,8 @@ model payment_methods {
   account_number      String?
   description         String?
   status              RecordStatus          @default(active)
+  // Batch 6 (HNT2-MD-001) -- additive optimistic-locking column.
+  version             Int                   @default(0)
   created_at          DateTime              @default(now())
   businesses          businesses            @relation(fields: [business_id], references: [id])
   sales               sales[]
@@ -3163,11 +3178,17 @@ enum PayrollRecordStatus {
 // update/archive -- "no department-management UI workflow" per the
 // addendum's own explicit scope boundary.
 model departments {
-  id          String      @id
+  id          String       @id
   business_id String
   name        String
-  created_at  DateTime    @default(now())
-  businesses  businesses  @relation(fields: [business_id], references: [id])
+  // Batch 6 (HNT2-HR-001) -- full lifecycle. Uniqueness is active-only,
+  // normalized (case/whitespace-insensitive) -- see the hand-added partial
+  // functional unique index in the Batch 6 migration; Prisma's own DSL
+  // cannot express a functional index, so it isn't declared here.
+  status      RecordStatus @default(active)
+  version     Int          @default(0)
+  created_at  DateTime     @default(now())
+  businesses  businesses   @relation(fields: [business_id], references: [id])
   positions   positions[]
   employees   employees[]
 
@@ -3184,6 +3205,9 @@ model positions {
   business_id   String
   department_id String?
   title         String
+  // Batch 6 (HNT2-HR-001) -- same lifecycle shape as departments.
+  status        RecordStatus @default(active)
+  version       Int          @default(0)
   created_at    DateTime     @default(now())
   businesses    businesses   @relation(fields: [business_id], references: [id])
   departments   departments? @relation(fields: [department_id], references: [id])

@@ -270,7 +270,14 @@ describe("Purchase Orders", () => {
     it("rejects an archived branch on create and on PATCH", async () => {
       const { supplier, product } = await setup();
       const archivedBranch = await createTestBranch(businessId);
-      const archiveRes = await request(app).delete(`/branches/${archivedBranch.id}`).set("Authorization", `Bearer ${ownerToken}`);
+      // Batch 6 (HNT2-MD-001) -- branch archive now requires a version
+      // guard + Idempotency-Key; this call is incidental test setup (an
+      // archived-branch fixture), not the subject under test here.
+      const archiveRes = await request(app)
+        .delete(`/branches/${archivedBranch.id}`)
+        .set("Authorization", `Bearer ${ownerToken}`)
+        .set("Idempotency-Key", idemKey())
+        .send({ version: archivedBranch.version });
       expect(archiveRes.status).toBe(200);
 
       const createRes = await request(app)

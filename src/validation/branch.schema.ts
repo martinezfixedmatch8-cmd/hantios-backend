@@ -8,8 +8,21 @@ export const createBranchSchema = z.object({
 });
 export type CreateBranchInput = z.infer<typeof createBranchSchema>;
 
-export const updateBranchSchema = createBranchSchema.partial();
+// Batch 6 (HNT2-MD-001) -- version is now required on every mutation.
+export const updateBranchSchema = createBranchSchema.partial().extend({
+  version: z.number().int().nonnegative(),
+});
 export type UpdateBranchInput = z.infer<typeof updateBranchSchema>;
+
+export const archiveBranchSchema = z.object({
+  version: z.number().int().nonnegative(),
+});
+export type ArchiveBranchInput = z.infer<typeof archiveBranchSchema>;
+
+export const restoreBranchSchema = z.object({
+  version: z.number().int().nonnegative(),
+});
+export type RestoreBranchInput = z.infer<typeof restoreBranchSchema>;
 
 export const listBranchesQuerySchema = paginationQuerySchema.extend({
   status: z.enum(["active", "archived"]).optional(),

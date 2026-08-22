@@ -57,3 +57,17 @@ export async function deactivateExpenseCategory(req: Request, res: Response, nex
     next(err);
   }
 }
+
+// Batch 6 (HNT2-EXP-001) -- restore. No Idempotency-Key, matching this
+// module's existing convention (confirmed: Option A is not expanded to
+// expense categories without a separate approval).
+export async function restoreExpenseCategory(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const actor = getActor(req);
+    const { id } = idParamSchema.parse(req.params);
+    const category = await expenseCategoryService.restoreExpenseCategory(id, actor);
+    res.status(200).json({ data: category });
+  } catch (err) {
+    next(err);
+  }
+}

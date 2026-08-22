@@ -1065,7 +1065,7 @@ describe("Expenses", () => {
 
   describe("Tags (many-to-many, filter-only)", () => {
     async function createTagAs(token: string, name = `Tag ${randomUUID()}`) {
-      const res = await request(app).post("/tags").set("Authorization", `Bearer ${token}`).send({ name });
+      const res = await request(app).post("/tags").set("Authorization", `Bearer ${token}`).set("Idempotency-Key", idemKey()).send({ name });
       if (res.status !== 201) throw new Error(`createTagAs failed: ${res.status} ${JSON.stringify(res.body)}`);
       return res.body.data;
     }

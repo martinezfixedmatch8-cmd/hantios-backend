@@ -173,8 +173,14 @@ export async function recordPurchaseOrderPayment(
     const grnNumber = grns.length > 0 ? grns.map((g) => g.grn_number).join(", ") : null;
 
     await ensureSystemCategoriesSeeded(tx, actor.businessId);
-    const category = await tx.expense_categories.findUniqueOrThrow({
-      where: { business_id_name: { business_id: actor.businessId, name: INVENTORY_PURCHASES_CATEGORY_NAME } },
+    // Batch 6 (HNT2-EXP-001) narrowed expense_categories' own unique
+    // constraint to active-only, removing the compound business_id_name
+    // Prisma lookup key -- findFirstOrThrow is semantically equivalent
+    // here since this always targets a system category (seeded just
+    // above), which can never be deactivated, so exactly one row can ever
+    // match.
+    const category = await tx.expense_categories.findFirstOrThrow({
+      where: { business_id: actor.businessId, name: INVENTORY_PURCHASES_CATEGORY_NAME },
     });
 
     const now = new Date();
