@@ -1,7 +1,7 @@
 import type { Request, Response, NextFunction } from "express";
 import { unauthorized } from "../lib/errors";
 import { idParamSchema } from "../validation/common.schema";
-import { listReceiptsQuerySchema, requestReceiptDeliverySchema } from "../validation/receipt.schema";
+import { listReceiptsQuerySchema, requestReceiptDeliverySchema, listDeliveryAttemptsQuerySchema } from "../validation/receipt.schema";
 import * as receiptService from "../services/receipt.service";
 
 function getActor(req: Request) {
@@ -39,8 +39,15 @@ export async function listDeliveryAttempts(req: Request, res: Response, next: Ne
   try {
     const actor = getActor(req);
     const { id } = idParamSchema.parse(req.params);
-    const result = await receiptService.listDeliveryAttempts(id, actor);
-    res.status(200).json({ data: result });
+    const query = listDeliveryAttemptsQuerySchema.parse(req.query);
+    const result = await receiptService.listDeliveryAttempts(id, actor, query);
+    // HNT2-RECEIPT-001 -- the service now returns the standard {data,
+    // pagination} envelope directly (matching listReceipts's own pattern
+    // immediately above), so this sends it as-is. Wrapping it again in
+    // { data: result } would nest as { data: { data, pagination } } instead
+    // of the correct top-level { data, pagination } -- a real bug caught
+    // before shipping, not a hypothetical one.
+    res.status(200).json(result);
   } catch (err) {
     next(err);
   }

@@ -450,8 +450,19 @@ export async function voidSale(saleId: string, input: VoidSaleInput, actor: Acto
   // Batch-fetched upfront, same reasoning as createSale's own productMap --
   // min_stock_level is needed per line to check for a stock recovery, and
   // the sale's own item snapshot doesn't carry it.
-  const voidProducts = await prisma.products.findMany({ where: { id: { in: items.map((item) => item.productId) } } });
+  // HNT2-SALE-002 -- business_id scoped + fail-closed on count mismatch,
+  // matching createSale's own identical batch-fetch precedent (line ~102).
+  // Defense-in-depth: item.productId already comes from this sale's own
+  // immutable, tenant-owned snapshot, so this can't cross tenants on the
+  // normal path -- but the query itself must still express that invariant
+  // rather than trust it implicitly. Deduplicated first (a sale may
+  // legitimately repeat a product across lines).
+  const voidProductIds = [...new Set(items.map((item) => item.productId))];
+  const voidProducts = await prisma.products.findMany({ where: { id: { in: voidProductIds }, business_id: actor.businessId } });
   const voidProductMap = new Map(voidProducts.map((p) => [p.id, p]));
+  if (voidProductMap.size !== voidProductIds.length) {
+    throw badRequest("One or more products referenced by this sale could not be resolved");
+  }
   const stockAlertEvents: PendingStockAlertEvent[] = [];
 
   const voided = await prisma.$transaction(async (tx) => {
@@ -622,9 +633,15 @@ export async function refundSale(saleId: string, input: RefundSaleInput, actor: 
   // Batch-fetched upfront, same reasoning as Void's own voidProductMap --
   // min_stock_level is needed per restocked line to check for a stock
   // recovery, and the sale's own item snapshot doesn't carry it.
-  const touchedProductIds = normalizedLines.map((l) => items[l.lineIndex].productId);
-  const refundProducts = await prisma.products.findMany({ where: { id: { in: touchedProductIds } } });
+  // HNT2-SALE-002 -- same business_id scoping + dedup + fail-closed guard
+  // as Void's own fix above (two normalized lines can legitimately
+  // reference the same product, e.g. two refunded lines of one SKU).
+  const touchedProductIds = [...new Set(normalizedLines.map((l) => items[l.lineIndex].productId))];
+  const refundProducts = await prisma.products.findMany({ where: { id: { in: touchedProductIds }, business_id: actor.businessId } });
   const refundProductMap = new Map(refundProducts.map((p) => [p.id, p]));
+  if (refundProductMap.size !== touchedProductIds.length) {
+    throw badRequest("One or more products referenced by this sale could not be resolved");
+  }
   const stockAlertEvents: PendingStockAlertEvent[] = [];
 
   const refundResult = await prisma.$transaction(async (tx) => {

@@ -434,6 +434,28 @@ describe("Module 06 -- Receipt System", () => {
       expect(res.body.data.rendererVersion).toBe(1);
     });
 
+    // Batch 7 (HNT2-RECEIPT-001, Option A) -- deliveryAttempts is no longer
+    // embedded on the receipt detail response; the dedicated paginated
+    // GET /receipts/:id/delivery-attempts route (see below) is the sole
+    // source of delivery history now. Confirmed via a repo-wide search
+    // before implementing: zero test/app code read this field before this
+    // change, so this is a deliberate, evidence-backed shape change, not a
+    // silent regression.
+    it("no longer embeds deliveryAttempts on the receipt detail response (HNT2-RECEIPT-001, Option A)", async () => {
+      const { sale } = await createSaleReceipt(1, 10);
+      const receipt = await prisma.receipts.findFirstOrThrow({ where: { business_id: businessId, sale_id: sale.id } });
+
+      await request(app)
+        .post(`/receipts/${receipt.id}/deliver`)
+        .set("Authorization", `Bearer ${ownerToken}`)
+        .set("Idempotency-Key", idemKey())
+        .send({ channel: "pos_print" });
+
+      const res = await request(app).get(`/receipts/${receipt.id}`).set("Authorization", `Bearer ${ownerToken}`);
+      expect(res.status).toBe(200);
+      expect(res.body.data.deliveryAttempts).toBeUndefined();
+    });
+
     it("cross-tenant isolation: a receipt cannot be fetched by ID from a different business", async () => {
       const { sale } = await createSaleReceipt(1, 5);
       const receipt = await prisma.receipts.findFirstOrThrow({ where: { business_id: businessId, sale_id: sale.id } });
@@ -562,6 +584,110 @@ describe("Module 06 -- Receipt System", () => {
       expect(again.status).toBe(201);
       expect(again.body.data.id).not.toBe(first.body.data.id);
       expect(again.body.data.attempt_number).toBe(2);
+    });
+  });
+
+  // Batch 7 (HNT2-RECEIPT-001) -- listDeliveryAttempts is now bounded via
+  // this repo's shared pagination envelope (src/lib/pagination.ts's own
+  // paginate(), the same one listReceipts already uses), matching the
+  // standard {data, pagination} shape rather than an unbounded bare array.
+  describe("HNT2-RECEIPT-001 -- bounded, paginated delivery-attempt history", () => {
+    // Seeded directly in the database (legitimate test-fixture setup, per
+    // the locked review requirement) rather than via 100+ real sequential
+    // HTTP deliver calls -- this is purely a read-side pagination fixture,
+    // not an attempt to bypass the real write path (which stays untouched
+    // and is already covered by the tests above).
+    async function seedManyAttempts(receiptId: string, count: number) {
+      const rows = Array.from({ length: count }, (_, i) => ({
+        id: generateId(),
+        business_id: businessId,
+        receipt_id: receiptId,
+        attempt_number: i + 1,
+        channel: "pos_print" as const,
+        status: "success" as const,
+        requested_by: ownerId,
+      }));
+      await prisma.receipt_delivery_attempts.createMany({ data: rows });
+    }
+
+    it("returns a bounded page with correct {data, pagination} metadata for a receipt with more attempts than the page-size maximum", async () => {
+      const { sale } = await createSaleReceipt(1, 10);
+      const receipt = await prisma.receipts.findFirstOrThrow({ where: { business_id: businessId, sale_id: sale.id } });
+      const TOTAL = 105; // > the shared pagination helper's own max pageSize (100)
+      await seedManyAttempts(receipt.id, TOTAL);
+
+      const firstPage = await request(app)
+        .get(`/receipts/${receipt.id}/delivery-attempts`)
+        .query({ pageSize: 100 })
+        .set("Authorization", `Bearer ${ownerToken}`);
+      expect(firstPage.status).toBe(200);
+      expect(firstPage.body.data).toHaveLength(100);
+      expect(firstPage.body.pagination).toEqual({ page: 1, pageSize: 100, total: TOTAL, totalPages: 2 });
+      // Ascending order preserved.
+      const numbers = firstPage.body.data.map((a: { attempt_number: number }) => a.attempt_number);
+      expect(numbers).toEqual([...numbers].sort((a, b) => a - b));
+      expect(numbers[0]).toBe(1);
+      expect(numbers[numbers.length - 1]).toBe(100);
+
+      const secondPage = await request(app)
+        .get(`/receipts/${receipt.id}/delivery-attempts`)
+        .query({ page: 2, pageSize: 100 })
+        .set("Authorization", `Bearer ${ownerToken}`);
+      expect(secondPage.status).toBe(200);
+      expect(secondPage.body.data).toHaveLength(5);
+      expect(secondPage.body.data[0].attempt_number).toBe(101);
+      expect(secondPage.body.pagination).toEqual({ page: 2, pageSize: 100, total: TOTAL, totalPages: 2 });
+
+      // Default page size (20) when unspecified.
+      const defaultPage = await request(app)
+        .get(`/receipts/${receipt.id}/delivery-attempts`)
+        .set("Authorization", `Bearer ${ownerToken}`);
+      expect(defaultPage.status).toBe(200);
+      expect(defaultPage.body.data).toHaveLength(20);
+      expect(defaultPage.body.pagination).toEqual({ page: 1, pageSize: 20, total: TOTAL, totalPages: 6 });
+    });
+
+    // The exact bug class the review caught before this shipped: wrapping
+    // the service's own {data, pagination} envelope in a second { data: ... }
+    // would nest as { data: { data, pagination } } instead of the correct
+    // top-level { data, pagination }. This test locks in the correct,
+    // unnested shape so it cannot silently regress here or in any similarly
+    // structured endpoint added later.
+    it("returns the pagination envelope at the TOP level, never double-wrapped", async () => {
+      const { sale } = await createSaleReceipt(1, 10);
+      const receipt = await prisma.receipts.findFirstOrThrow({ where: { business_id: businessId, sale_id: sale.id } });
+      await request(app)
+        .post(`/receipts/${receipt.id}/deliver`)
+        .set("Authorization", `Bearer ${ownerToken}`)
+        .set("Idempotency-Key", idemKey())
+        .send({ channel: "pos_print" });
+
+      const res = await request(app).get(`/receipts/${receipt.id}/delivery-attempts`).set("Authorization", `Bearer ${ownerToken}`);
+      expect(res.status).toBe(200);
+      // Top-level keys are exactly {data, pagination} -- proves the
+      // controller sent the service's own envelope as-is (res.json(result))
+      // rather than double-wrapping it as { data: { data, pagination } }.
+      expect(Object.keys(res.body).sort()).toEqual(["data", "pagination"]);
+      expect(Array.isArray(res.body.data)).toBe(true);
+      // If this had been double-wrapped, `data` would itself be an object
+      // with its own nested `data`/`pagination` keys instead of a plain array.
+      expect((res.body.data as unknown as { data?: unknown }).data).toBeUndefined();
+      expect((res.body.data as unknown as { pagination?: unknown }).pagination).toBeUndefined();
+      expect(res.body.pagination).toMatchObject({ page: 1, pageSize: 20, total: 1, totalPages: 1 });
+    });
+
+    it("tenant isolation survives the pagination change: a delivery-attempt history cannot be read from a different business", async () => {
+      const { sale } = await createSaleReceipt(1, 10);
+      const receipt = await prisma.receipts.findFirstOrThrow({ where: { business_id: businessId, sale_id: sale.id } });
+
+      const otherOwner = await signupTestOwner();
+      businessIds.push(otherOwner.businessId);
+      const otherLogin = await loginTestOwner(otherOwner.email, otherOwner.password, otherOwner.deviceId);
+
+      const res = await request(app)
+        .get(`/receipts/${receipt.id}/delivery-attempts`)
+        .set("Authorization", `Bearer ${otherLogin.accessToken}`);
+      expect(res.status).toBe(404);
     });
   });
 });
