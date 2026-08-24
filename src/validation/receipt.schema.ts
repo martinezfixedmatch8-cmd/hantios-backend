@@ -16,3 +16,11 @@ export const requestReceiptDeliverySchema = z.object({
   channel: z.enum(["whatsapp", "pos_print"]),
 });
 export type RequestReceiptDeliveryInput = z.infer<typeof requestReceiptDeliverySchema>;
+
+// HNT2-RECEIPT-001 -- page/pageSize only, deliberately narrower than the
+// generic paginationQuerySchema: attempt order is always attempt_number
+// ascending (never client-configurable), and there's no free-text field on
+// a delivery attempt worth searching, so sort/order/search are omitted
+// rather than exposed-but-unused.
+export const listDeliveryAttemptsQuerySchema = paginationQuerySchema.pick({ page: true, pageSize: true });
+export type ListDeliveryAttemptsQueryInput = z.infer<typeof listDeliveryAttemptsQuerySchema>;

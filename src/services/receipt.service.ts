@@ -344,12 +344,14 @@ export async function listReceipts(query: ListReceiptsQuery, actor: Actor) {
   return paginate(rows, total, resolved.page, resolved.pageSize);
 }
 
+// HNT2-RECEIPT-001, Option A -- deliveryAttempts is no longer embedded here
+// (confirmed via a repo-wide search: zero application or test code read this
+// field off getReceipt's own response before this fix; the dedicated
+// GET /receipts/:id/delivery-attempts route, now paginated below, is the
+// sole source of delivery history). Reprint/render behavior is unaffected --
+// renderedText never depended on delivery history.
 export async function getReceipt(id: string, actor: Actor) {
   const receipt = await getOwned(prisma.receipts.findUnique({ where: { id } }), actor.businessId, "Receipt");
-  const deliveryAttempts = await prisma.receipt_delivery_attempts.findMany({
-    where: { receipt_id: id, business_id: actor.businessId },
-    orderBy: { attempt_number: "asc" },
-  });
   const snapshot = receipt.snapshot as unknown as ReceiptSnapshot;
   const renderedText = renderReceiptText({
     receiptNumber: receipt.receipt_number,
@@ -365,7 +367,7 @@ export async function getReceipt(id: string, actor: Actor) {
     language: receipt.language,
     snapshot,
   });
-  return { ...receipt, renderedText, rendererVersion: RECEIPT_RENDERER_VERSION, deliveryAttempts };
+  return { ...receipt, renderedText, rendererVersion: RECEIPT_RENDERER_VERSION };
 }
 
 // ============================================================================
@@ -594,10 +596,20 @@ export async function completeDeliveryIdempotencyKey(businessId: string, key: st
   });
 }
 
-export async function listDeliveryAttempts(receiptId: string, actor: Actor) {
+// HNT2-RECEIPT-001 -- bounded via the shared pagination envelope
+// (src/lib/pagination.ts's own paginate(), the same one listReceipts uses).
+// Deliberately NOT resolveListQuery(): attempt order must always stay
+// attempt_number ascending (both this batch's own lock and delivery
+// history's own natural meaning), never client-configurable sort/search,
+// so skip/take are derived directly from the narrow {page, pageSize} query
+// (listDeliveryAttemptsQuerySchema) rather than the generic list-query shape.
+export async function listDeliveryAttempts(receiptId: string, actor: Actor, query: { page: number; pageSize: number }) {
   await getOwned(prisma.receipts.findUnique({ where: { id: receiptId } }), actor.businessId, "Receipt");
-  return prisma.receipt_delivery_attempts.findMany({
-    where: { receipt_id: receiptId, business_id: actor.businessId },
-    orderBy: { attempt_number: "asc" },
-  });
+  const where = { receipt_id: receiptId, business_id: actor.businessId };
+  const skip = (query.page - 1) * query.pageSize;
+  const [rows, total] = await Promise.all([
+    prisma.receipt_delivery_attempts.findMany({ where, orderBy: { attempt_number: "asc" }, skip, take: query.pageSize }),
+    prisma.receipt_delivery_attempts.count({ where }),
+  ]);
+  return paginate(rows, total, query.page, query.pageSize);
 }

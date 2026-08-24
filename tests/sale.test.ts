@@ -864,6 +864,118 @@ describe("Sales", () => {
     });
   });
 
+  // Batch 7 (HNT2-SALE-002) -- void/refund's own secondary product-snapshot
+  // reads (min_stock_level lookups) are now business_id-scoped and fail
+  // closed on a count mismatch, matching createSale's own identical
+  // precedent. Defense-in-depth: item.productId already comes from the
+  // sale's own immutable, tenant-owned items snapshot, so this can't cross
+  // tenants on the normal path -- these tests prove (a) the new guard does
+  // NOT reject a legitimate sale that repeats a product across lines, and
+  // (b) a malformed PERSISTED relation (never a client-controlled items
+  // array -- void/refund act on the sale's own stored snapshot) fails
+  // closed instead of silently loading foreign product data.
+  describe("HNT2-SALE-002 -- business-scoped, fail-closed product snapshot reads", () => {
+    it("void succeeds for a sale with two lines referencing the SAME product (duplicate-product regression)", async () => {
+      const product = await stockedProduct(10);
+      const sale = await createSaleAs(ownerToken, [
+        { productId: product.id, quantity: 2 },
+        { productId: product.id, quantity: 3 },
+      ]);
+
+      const res = await request(app)
+        .post(`/sales/${sale.id}/void`)
+        .set("Authorization", `Bearer ${ownerToken}`)
+        .set("Idempotency-Key", idemKey())
+        .send({ version: sale.version, reason: "Duplicate-product regression check" });
+      expect(res.status).toBe(200);
+
+      // Both lines' quantities (2 + 3) restored exactly.
+      const stock = await prisma.branch_inventory.findFirst({ where: { branch_id: branchId, product_id: product.id } });
+      expect(Number(stock?.quantity)).toBe(10);
+    });
+
+    it("refund succeeds for two lines referencing the SAME product in one refund event (duplicate-product regression)", async () => {
+      const product = await stockedProduct(10);
+      const created = await createSaleAs(ownerToken, [
+        { productId: product.id, quantity: 2 },
+        { productId: product.id, quantity: 3 },
+      ]);
+      const sale = await backdateSale(created.id);
+
+      const res = await request(app)
+        .post(`/sales/${sale.id}/refund`)
+        .set("Authorization", `Bearer ${ownerToken}`)
+        .set("Idempotency-Key", idemKey())
+        .send({
+          version: sale.version,
+          reason: "Duplicate-product regression check",
+          items: [
+            { lineIndex: 0, returnedQuantity: 2, restockable: true },
+            { lineIndex: 1, returnedQuantity: 3, restockable: true },
+          ],
+        });
+      expect(res.status).toBe(201);
+
+      const stock = await prisma.branch_inventory.findFirst({ where: { branch_id: branchId, product_id: product.id } });
+      expect(Number(stock?.quantity)).toBe(10);
+    });
+
+    it("void fails closed (400) when the sale's own persisted items snapshot references a different business's product", async () => {
+      const otherOwner = await signupTestOwner();
+      businessIds.push(otherOwner.businessId);
+      const foreignProduct = await createTestProduct(otherOwner.businessId);
+
+      const product = await stockedProduct(10);
+      const sale = await createSaleAs(ownerToken, [{ productId: product.id, quantity: 2 }]);
+
+      // Corrupt the SALE'S OWN PERSISTED items snapshot directly in the
+      // database -- simulating a malformed/data-import relation, never a
+      // client-controlled items array (void's own request body has no
+      // items field at all; it always acts on this stored snapshot).
+      const corruptedItems = (sale.items as Array<Record<string, unknown>>).map((line) => ({ ...line, productId: foreignProduct.id }));
+      await prisma.sales.update({ where: { id: sale.id }, data: { items: corruptedItems } });
+
+      const res = await request(app)
+        .post(`/sales/${sale.id}/void`)
+        .set("Authorization", `Bearer ${ownerToken}`)
+        .set("Idempotency-Key", idemKey())
+        .send({ version: sale.version, reason: "Should fail closed" });
+      expect(res.status).toBe(400);
+
+      // Confirm it failed BEFORE mutating anything -- sale still completed,
+      // stock untouched.
+      const saleAfter = await prisma.sales.findUniqueOrThrow({ where: { id: sale.id } });
+      expect(saleAfter.status).toBe("completed");
+      const stock = await prisma.branch_inventory.findFirst({ where: { branch_id: branchId, product_id: product.id } });
+      expect(Number(stock?.quantity)).toBe(8);
+    });
+
+    it("refund fails closed (400) when the sale's own persisted items snapshot references a different business's product", async () => {
+      const otherOwner = await signupTestOwner();
+      businessIds.push(otherOwner.businessId);
+      const foreignProduct = await createTestProduct(otherOwner.businessId);
+
+      const product = await stockedProduct(10);
+      const created = await createSaleAs(ownerToken, [{ productId: product.id, quantity: 2 }]);
+      const sale = await backdateSale(created.id);
+
+      const corruptedItems = (sale.items as Array<Record<string, unknown>>).map((line) => ({ ...line, productId: foreignProduct.id }));
+      await prisma.sales.update({ where: { id: sale.id }, data: { items: corruptedItems } });
+
+      const res = await request(app)
+        .post(`/sales/${sale.id}/refund`)
+        .set("Authorization", `Bearer ${ownerToken}`)
+        .set("Idempotency-Key", idemKey())
+        .send({ version: sale.version, reason: "Should fail closed", items: [{ lineIndex: 0, returnedQuantity: 2, restockable: true }] });
+      expect(res.status).toBe(400);
+
+      const saleAfter = await prisma.sales.findUniqueOrThrow({ where: { id: sale.id } });
+      expect(saleAfter.status).toBe("completed");
+      const reversals = await prisma.sales.findMany({ where: { refund_of_sale_id: sale.id } });
+      expect(reversals).toHaveLength(0);
+    });
+  });
+
   describe("full permission matrix (denied access)", () => {
     const deniedCreate: UserRole[] = ["accountant", "storekeeper", "shareholder", "custom"];
     const deniedVoid: UserRole[] = ["manager", "accountant", "storekeeper", "shareholder", "custom"];

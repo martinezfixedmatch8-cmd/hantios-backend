@@ -1532,6 +1532,20 @@ Batch 6 narrows `departments`/`positions` to active-only normalized name uniquen
 
 The application commit can be reverted, but schema rollback for the active-only uniqueness decision is conditional. Before a global uniqueness constraint can be restored, a read-only conflict inventory must confirm that no active/archived same-name pairs exist, or an approved data-resolution plan must rename/archive one row in each pair. No automatic destructive rollback is permitted.
 
+## Tenant/Pagination Hardening — Batch 7
+
+Two narrow, isolated hardening fixes from the same independent audit program (Manus AI), built on top of Batch 6 (not yet merged into `main` at the time — this batch branches directly off Batch 6's own commit, per an explicit Git-baseline reconciliation that first caught the audit proposal's own citation of a nonexistent commit hash and a false "Batches 1-6 live in production" claim).
+
+**HNT2-SALE-002 — void/refund product-snapshot reads now `business_id`-scoped, fail-closed.** `sale.service.ts`'s `voidSale`/`refundSale` each do one secondary `products.findMany` purely to look up `min_stock_level` for the low-stock-alert check (never for any price/cost figure — those come exclusively from the sale's own immutable `items` snapshot, untouched by this fix). Neither query carried `business_id`. **Classification, confirmed directly from the call sites, not the audit's own framing alone: this is defense-in-depth/fail-closed tenant hardening, not a financial miscalculation or an active exploit** — `item.productId` already comes from the sale's own tenant-owned, immutable snapshot, so the normal path can't cross tenants today; the map is read only for the stock-alert threshold, so even a foreign/missing product ID's real-world consequence today is a silently-skipped low-stock alert for that line, never a wrong void/refund total. Fixed to match `createSale`'s own already-correct precedent in the same file (line ~102): batch-fetch deduplicated product IDs scoped to `actor.businessId`, then `badRequest` (this file's own established convention for this exact scenario, not Purchase Orders' different 404 convention) if the resolved count doesn't match the requested count. Deduplication (`[...new Set(...)]`) is required specifically because a sale can legitimately repeat a product across lines — a plain length comparison would have falsely rejected that case.
+
+**HNT2-RECEIPT-001 — receipt delivery-attempt reads are now bounded.** `listDeliveryAttempts` (`GET /receipts/:id/delivery-attempts`) previously returned every attempt unbounded, wrapped in a bare `{data: [...]}` with no `pagination`. Now uses the shared `paginate()` envelope (the same one `listReceipts` already uses), via a new `listDeliveryAttemptsQuerySchema` deliberately narrower than the generic `paginationQuerySchema` (`.pick({page, pageSize})` only — `sort`/`order`/`search` are omitted, not exposed-but-unused, since attempt order must always stay `attempt_number` ascending, never client-configurable). `getReceipt`'s own embedded `deliveryAttempts` field is removed entirely (**Option A**, confirmed via an exhaustive repo-wide search before implementing: zero application or test code read that field anywhere) — the dedicated paginated route is now the sole source of delivery history. The append-only write path that creates `receipt_delivery_attempts` rows is untouched.
+
+**A real bug the review caught before implementation, not after**: the controller's `listDeliveryAttempts` handler originally wrapped every response in `{data: result}` regardless of what the service returned — once the service was changed to return `{data, pagination}` directly (matching `listReceipts`'s own `res.status(200).json(result)` pattern in the same controller file), leaving the old wrapping in place would have nested the response as `{data: {data, pagination}}` instead of the correct top-level `{data, pagination}`. Fixed to mirror `listReceipts` exactly; a dedicated regression test asserts the top-level response keys are exactly `["data", "pagination"]` and that `body.data` itself has no nested `data`/`pagination` keys, so this exact class of bug can't silently regress here or in a similarly-shaped endpoint added later.
+
+No schema or migration change (neither finding needed one). No changes to Sale Void/Refund's core financial/inventory logic (Aug 13 redesign) or to the append-only delivery-attempts write path. `HNT-TEN-001` (the broader composite tenant-FK architecture) and Batch 8 remain explicitly out of scope.
+
+**Tests**: 8 new (4 in `tests/sale.test.ts` — duplicate-product-in-one-sale regression for both void and refund, malformed/cross-business persisted-product-reference fail-closed for both void and refund, the fixture created directly in the database per the review's own instruction, never via a client-controlled `items` array; 4 in `tests/receipt.test.ts` — `getReceipt` no longer embeds `deliveryAttempts`, bounded pagination with correct metadata across a >100-attempt receipt, the top-level-envelope regression test, tenant isolation preserved). Focused run: `tests/sale.test.ts` + `tests/receipt.test.ts`, 93/93 passing. Ripple-effect check: an exhaustive grep found exactly 9 test files with any code-path overlap with the two changed areas (void/refund, receipt delivery-attempts) — all 9 verified clean (246 tests, 0 failures) in this same session. `npx tsc --noEmit` and `npm run lint` both clean (0 errors, the same 4 pre-existing baseline warnings).
+
 ## Notification routing (locked)
 
 - `SECURITY` → Email (new login, password changed/reset, suspicious login, email/phone changed), falls back to WhatsApp only if email is unverified — never suppress a security alert silently. **Carve-out:** the New-Device-Login OTP challenge is `SECURITY` but always WhatsApp regardless of email-verified status — the code has to reach the device being verified, so "email-first" doesn't apply to the challenge itself. A passive "you just logged in from a new device" *informational* email (distinct from the blocking OTP challenge) is named in this table but not built — only the challenge itself exists.
@@ -1671,11 +1685,16 @@ The previous loss happened partly because no GitHub remote existed. Going forwar
 
 
 
+
+
+
+
+
 <!-- cloude-code-toolbox:mcp-skills-awareness-begin -->
 
 ### MCP & Skills awareness (Cloude Code ToolBox)
 
-_Last synced: 2026-08-18T06:25:39.370Z._
+_Last synced: 2026-08-24T06:31:16.295Z._
 
 - **Full report:** `.claude/cloude-code-toolbox-mcp-skills-awareness.md` in this workspace (auto-overwritten on each scan). Use it as ground truth for configured servers and skill folders.
 - **MCP:** For **live tools** in Claude Code, enable the matching server via `/mcp`. Servers are configured in `~/.claude.json` (user) and `.mcp.json` (project).
