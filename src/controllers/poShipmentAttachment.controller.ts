@@ -16,13 +16,14 @@ export async function uploadShipmentAttachment(req: Request, res: Response, next
     const { id, shipmentId } = shipmentIdParamSchema.parse(req.params);
     const idempotencyKey = req.idempotencyKey as string;
 
-    const replayed = await getReplayedResponse(actor.businessId, idempotencyKey, service.uploadShipmentAttachmentEndpoint(id, shipmentId));
+    const input = uploadOwnerShipmentAttachmentSchema.parse(req.body);
+
+    const replayed = await getReplayedResponse(actor.businessId, (actor.party === "owner" ? actor.userId : "supplier"), idempotencyKey, service.uploadShipmentAttachmentEndpoint(id, shipmentId), input);
     if (replayed) {
       res.status(replayed.status).json(replayed.body);
       return;
     }
 
-    const input = uploadOwnerShipmentAttachmentSchema.parse(req.body);
     const result = await service.uploadShipmentAttachment(id, shipmentId, input, actor, idempotencyKey);
     res.status(201).json({ data: result });
   } catch (err) {

@@ -72,7 +72,7 @@ export async function recordPurchaseOrderPayment(
   let matchVariance = new Prisma.Decimal(0);
 
   const result = await prisma.$transaction(async (tx) => {
-    await claimIdempotencyKey(tx, actor.businessId, idempotencyKey, recordPurchaseOrderPaymentEndpoint(purchaseOrderId));
+    await claimIdempotencyKey(tx, actor.businessId, actor.userId, idempotencyKey, recordPurchaseOrderPaymentEndpoint(purchaseOrderId), input);
 
     // HNT-PO-001 fix -- a Commercial Invoice supersede or a new GRN could
     // previously commit between this endpoint's own pre-transaction reads
@@ -267,7 +267,7 @@ export async function recordPurchaseOrderPayment(
 
     const updatedPo = await tx.purchase_orders.findUniqueOrThrow({ where: { id: purchaseOrderId } });
     const responseBody = JSON.parse(JSON.stringify({ data: { payment, purchaseOrder: updatedPo, expense } })) as unknown;
-    await completeIdempotencyKey(tx, actor.businessId, idempotencyKey, recordPurchaseOrderPaymentEndpoint(purchaseOrderId), 201, responseBody);
+    await completeIdempotencyKey(tx, actor.businessId, actor.userId, idempotencyKey, recordPurchaseOrderPaymentEndpoint(purchaseOrderId), 201, responseBody);
 
     return { payment, purchaseOrder: updatedPo, expense, poSettlementReceipt };
   }, PO_PAYMENT_TRANSACTION_OPTIONS);

@@ -21,13 +21,14 @@ export async function createBranch(req: Request, res: Response, next: NextFuncti
     const actor = getActor(req);
     const idempotencyKey = req.idempotencyKey as string;
 
-    const replayed = await getReplayedResponse(actor.businessId, idempotencyKey, branchService.CREATE_BRANCH_ENDPOINT);
+    const input = createBranchSchema.parse(req.body);
+
+    const replayed = await getReplayedResponse(actor.businessId, actor.userId, idempotencyKey, branchService.CREATE_BRANCH_ENDPOINT, input);
     if (replayed) {
       res.status(replayed.status).json(replayed.body);
       return;
     }
 
-    const input = createBranchSchema.parse(req.body);
     const branch = await branchService.createBranch(input, actor, idempotencyKey);
     res.status(201).json({ data: branch });
   } catch (err) {
@@ -75,13 +76,14 @@ export async function archiveBranch(req: Request, res: Response, next: NextFunct
     const { id } = idParamSchema.parse(req.params);
     const idempotencyKey = req.idempotencyKey as string;
 
-    const replayed = await getReplayedResponse(actor.businessId, idempotencyKey, branchService.archiveBranchEndpoint(id));
+    const input = archiveBranchSchema.parse(req.body);
+
+    const replayed = await getReplayedResponse(actor.businessId, actor.userId, idempotencyKey, branchService.archiveBranchEndpoint(id), input);
     if (replayed) {
       res.status(replayed.status).json(replayed.body);
       return;
     }
 
-    const input = archiveBranchSchema.parse(req.body);
     const branch = await branchService.archiveBranch(id, input, actor, idempotencyKey);
     res.status(200).json({ data: branch });
   } catch (err) {
@@ -95,13 +97,14 @@ export async function restoreBranch(req: Request, res: Response, next: NextFunct
     const { id } = idParamSchema.parse(req.params);
     const idempotencyKey = req.idempotencyKey as string;
 
-    const replayed = await getReplayedResponse(actor.businessId, idempotencyKey, branchService.restoreBranchEndpoint(id));
+    const input = restoreBranchSchema.parse(req.body);
+
+    const replayed = await getReplayedResponse(actor.businessId, actor.userId, idempotencyKey, branchService.restoreBranchEndpoint(id), input);
     if (replayed) {
       res.status(replayed.status).json(replayed.body);
       return;
     }
 
-    const input = restoreBranchSchema.parse(req.body);
     const branch = await branchService.restoreBranch(id, input, actor, idempotencyKey);
     res.status(200).json({ data: branch });
   } catch (err) {

@@ -11,13 +11,14 @@ export async function createInternalNote(req: Request, res: Response, next: Next
     const { id } = idParamSchema.parse(req.params);
     const idempotencyKey = req.idempotencyKey as string;
 
-    const replayed = await getReplayedResponse(req.auth.businessId, idempotencyKey, noteService.createInternalNoteEndpoint(id));
+    const input = createInternalNoteSchema.parse(req.body);
+
+    const replayed = await getReplayedResponse(req.auth.businessId, req.auth.userId, idempotencyKey, noteService.createInternalNoteEndpoint(id), input);
     if (replayed) {
       res.status(replayed.status).json(replayed.body);
       return;
     }
 
-    const input = createInternalNoteSchema.parse(req.body);
     const actor = { userId: req.auth.userId, businessId: req.auth.businessId, userName: req.auth.name, userRole: req.auth.role };
     const note = await noteService.createInternalNote(id, input, actor, idempotencyKey);
     res.status(201).json({ data: note });

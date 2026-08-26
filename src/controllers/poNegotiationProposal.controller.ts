@@ -21,13 +21,14 @@ export async function saveDraft(req: Request, res: Response, next: NextFunction)
     const { id } = idParamSchema.parse(req.params);
     const idempotencyKey = req.idempotencyKey as string;
 
-    const replayed = await getReplayedResponse(actor.businessId, idempotencyKey, proposalService.draftProposalEndpoint(id));
+    const input = draftProposalSchema.parse(req.body);
+
+    const replayed = await getReplayedResponse(actor.businessId, (actor.party === "owner" ? actor.userId : "supplier"), idempotencyKey, proposalService.draftProposalEndpoint(id), input);
     if (replayed) {
       res.status(replayed.status).json(replayed.body);
       return;
     }
 
-    const input = draftProposalSchema.parse(req.body);
     const proposal = await proposalService.saveDraft(id, input, actor, idempotencyKey);
     res.status(200).json({ data: proposal });
   } catch (err) {
@@ -42,13 +43,14 @@ export async function submitProposal(req: Request, res: Response, next: NextFunc
     const { id, proposalId } = proposalIdParamSchema.parse(req.params);
     const idempotencyKey = req.idempotencyKey as string;
 
-    const replayed = await getReplayedResponse(actor.businessId, idempotencyKey, proposalService.submitProposalEndpoint(id, proposalId));
+    const input = submitProposalSchema.parse(req.body);
+
+    const replayed = await getReplayedResponse(actor.businessId, (actor.party === "owner" ? actor.userId : "supplier"), idempotencyKey, proposalService.submitProposalEndpoint(id, proposalId), input);
     if (replayed) {
       res.status(replayed.status).json(replayed.body);
       return;
     }
 
-    const input = submitProposalSchema.parse(req.body);
     const proposal = await proposalService.submitProposal(id, proposalId, input.version, actor, idempotencyKey);
     res.status(200).json({ data: proposal });
   } catch (err) {
@@ -63,7 +65,7 @@ export async function acceptProposal(req: Request, res: Response, next: NextFunc
     const { id, proposalId } = proposalIdParamSchema.parse(req.params);
     const idempotencyKey = req.idempotencyKey as string;
 
-    const replayed = await getReplayedResponse(actor.businessId, idempotencyKey, proposalService.acceptProposalEndpoint(id, proposalId));
+    const replayed = await getReplayedResponse(actor.businessId, (actor.party === "owner" ? actor.userId : "supplier"), idempotencyKey, proposalService.acceptProposalEndpoint(id, proposalId), {});
     if (replayed) {
       res.status(replayed.status).json(replayed.body);
       return;
@@ -83,13 +85,14 @@ export async function rejectProposal(req: Request, res: Response, next: NextFunc
     const { id, proposalId } = proposalIdParamSchema.parse(req.params);
     const idempotencyKey = req.idempotencyKey as string;
 
-    const replayed = await getReplayedResponse(actor.businessId, idempotencyKey, proposalService.rejectProposalEndpoint(id, proposalId));
+    const input = rejectProposalSchema.parse(req.body);
+
+    const replayed = await getReplayedResponse(actor.businessId, (actor.party === "owner" ? actor.userId : "supplier"), idempotencyKey, proposalService.rejectProposalEndpoint(id, proposalId), input);
     if (replayed) {
       res.status(replayed.status).json(replayed.body);
       return;
     }
 
-    const input = rejectProposalSchema.parse(req.body);
     const proposal = await proposalService.rejectProposal(id, proposalId, input, actor, idempotencyKey);
     res.status(200).json({ data: proposal });
   } catch (err) {

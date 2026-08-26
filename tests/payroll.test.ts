@@ -416,8 +416,15 @@ describe("Module 12 Session A -- Payroll Core", () => {
       expect(snap.payroll.periodLabel).toBe("July 2026");
 
       // Automatic WhatsApp delivery -- fire-and-forget, but should land
-      // very quickly against this always-synchronous ConsoleNotificationProvider.
-      await new Promise((r) => setTimeout(r, 300));
+      // quickly against this always-synchronous ConsoleNotificationProvider.
+      // Batch 8 Session A (HNT-IDEMP-001): requestReceiptDelivery's final
+      // attempt-status update and completeIdempotencyKey now happen
+      // together in one real second transaction (closing a genuine
+      // idempotency-key orphan gap -- see receipt.service.ts's own header
+      // comment), which measurably adds one more real Neon round trip
+      // versus the single bare UPDATE this wait was originally calibrated
+      // against. Widened from 300ms accordingly.
+      await new Promise((r) => setTimeout(r, 1500));
       const attempt = await prisma.receipt_delivery_attempts.findFirst({ where: { receipt_id: receipt!.id, channel: "whatsapp" } });
       expect(attempt).not.toBeNull();
       expect(attempt!.employee_id).toBe(employee.id);

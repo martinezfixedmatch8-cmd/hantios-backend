@@ -130,7 +130,7 @@ export async function createShipment(poId: string, input: CreateShipmentInput, a
   const createdByName = actorName(actor);
 
   const result = await prisma.$transaction(async (tx) => {
-    await claimIdempotencyKey(tx, actor.businessId, idempotencyKey, createShipmentEndpoint(poId));
+    await claimIdempotencyKey(tx, actor.businessId, (actor.party === "owner" ? actor.userId : "supplier"), idempotencyKey, createShipmentEndpoint(poId), input);
 
     const shipmentNumber = await getNextShipmentNumber(tx, actor.businessId, business.timezone);
 
@@ -205,7 +205,7 @@ export async function createShipment(poId: string, input: CreateShipmentInput, a
 
     const fresh = await tx.po_shipments.findUniqueOrThrow({ where: { id: created.id }, include: SHIPMENT_INCLUDE });
     const responseBody = JSON.parse(JSON.stringify({ data: fresh })) as unknown;
-    await completeIdempotencyKey(tx, actor.businessId, idempotencyKey, createShipmentEndpoint(poId), 201, responseBody);
+    await completeIdempotencyKey(tx, actor.businessId, (actor.party === "owner" ? actor.userId : "supplier"), idempotencyKey, createShipmentEndpoint(poId), 201, responseBody);
     return fresh;
   }, SHIPMENT_TRANSACTION_OPTIONS);
 
@@ -261,7 +261,7 @@ export async function updateShipmentStatus(
   const changedByName = actorName(actor);
 
   const result = await prisma.$transaction(async (tx) => {
-    await claimIdempotencyKey(tx, actor.businessId, idempotencyKey, updateShipmentStatusEndpoint(poId, shipmentId));
+    await claimIdempotencyKey(tx, actor.businessId, (actor.party === "owner" ? actor.userId : "supplier"), idempotencyKey, updateShipmentStatusEndpoint(poId, shipmentId), input);
 
     const data: Prisma.po_shipmentsUpdateManyMutationInput = { status: input.status, version: { increment: 1 } };
     if (input.status === "cancelled") {
@@ -318,7 +318,7 @@ export async function updateShipmentStatus(
 
     const fresh = await tx.po_shipments.findUniqueOrThrow({ where: { id: shipmentId }, include: SHIPMENT_INCLUDE });
     const responseBody = JSON.parse(JSON.stringify({ data: fresh })) as unknown;
-    await completeIdempotencyKey(tx, actor.businessId, idempotencyKey, updateShipmentStatusEndpoint(poId, shipmentId), 200, responseBody);
+    await completeIdempotencyKey(tx, actor.businessId, (actor.party === "owner" ? actor.userId : "supplier"), idempotencyKey, updateShipmentStatusEndpoint(poId, shipmentId), 200, responseBody);
     return fresh;
   }, SHIPMENT_TRANSACTION_OPTIONS);
 
@@ -396,7 +396,7 @@ export async function updateShipment(
   }
 
   const result = await prisma.$transaction(async (tx) => {
-    await claimIdempotencyKey(tx, actor.businessId, idempotencyKey, updateShipmentEndpoint(poId, shipmentId));
+    await claimIdempotencyKey(tx, actor.businessId, (actor.party === "owner" ? actor.userId : "supplier"), idempotencyKey, updateShipmentEndpoint(poId, shipmentId), input);
 
     const guarded = await tx.po_shipments.updateMany({
       where: { id: shipmentId, business_id: actor.businessId, version: input.version, status: { notIn: TERMINAL_SHIPMENT_STATUSES } },
@@ -424,7 +424,7 @@ export async function updateShipment(
 
     const fresh = await tx.po_shipments.findUniqueOrThrow({ where: { id: shipmentId }, include: SHIPMENT_INCLUDE });
     const responseBody = JSON.parse(JSON.stringify({ data: fresh })) as unknown;
-    await completeIdempotencyKey(tx, actor.businessId, idempotencyKey, updateShipmentEndpoint(poId, shipmentId), 200, responseBody);
+    await completeIdempotencyKey(tx, actor.businessId, (actor.party === "owner" ? actor.userId : "supplier"), idempotencyKey, updateShipmentEndpoint(poId, shipmentId), 200, responseBody);
     return fresh;
   }, SHIPMENT_TRANSACTION_OPTIONS);
 
@@ -457,7 +457,7 @@ export async function updateShipmentEta(
   const newTo = input.newExpectedArrivalTo ?? shipment.expected_arrival_to;
 
   const result = await prisma.$transaction(async (tx) => {
-    await claimIdempotencyKey(tx, actor.businessId, idempotencyKey, updateShipmentEtaEndpoint(poId, shipmentId));
+    await claimIdempotencyKey(tx, actor.businessId, (actor.party === "owner" ? actor.userId : "supplier"), idempotencyKey, updateShipmentEtaEndpoint(poId, shipmentId), input);
 
     const guarded = await tx.po_shipments.updateMany({
       where: { id: shipmentId, business_id: actor.businessId, status: { notIn: TERMINAL_SHIPMENT_STATUSES } },
@@ -498,7 +498,7 @@ export async function updateShipmentEta(
 
     const fresh = await tx.po_shipments.findUniqueOrThrow({ where: { id: shipmentId } });
     const responseBody = JSON.parse(JSON.stringify({ data: fresh })) as unknown;
-    await completeIdempotencyKey(tx, actor.businessId, idempotencyKey, updateShipmentEtaEndpoint(poId, shipmentId), 200, responseBody);
+    await completeIdempotencyKey(tx, actor.businessId, (actor.party === "owner" ? actor.userId : "supplier"), idempotencyKey, updateShipmentEtaEndpoint(poId, shipmentId), 200, responseBody);
     return fresh;
   }, SHIPMENT_TRANSACTION_OPTIONS);
 

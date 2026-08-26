@@ -22,13 +22,14 @@ export async function createSale(req: Request, res: Response, next: NextFunction
     const actor = getActor(req);
     const idempotencyKey = req.idempotencyKey as string; // guaranteed by requireIdempotencyKey
 
-    const replayed = await getReplayedResponse(actor.businessId, idempotencyKey, saleService.CREATE_SALE_ENDPOINT);
+    const input = createSaleSchema.parse(req.body);
+
+    const replayed = await getReplayedResponse(actor.businessId, actor.userId, idempotencyKey, saleService.CREATE_SALE_ENDPOINT, input);
     if (replayed) {
       res.status(replayed.status).json(replayed.body);
       return;
     }
 
-    const input = createSaleSchema.parse(req.body);
     const sale = await saleService.createSale(input, actor, idempotencyKey);
     res.status(201).json({ data: sale });
   } catch (err) {
@@ -42,13 +43,14 @@ export async function voidSale(req: Request, res: Response, next: NextFunction):
     const { id } = idParamSchema.parse(req.params);
     const idempotencyKey = req.idempotencyKey as string; // guaranteed by requireIdempotencyKey
 
-    const replayed = await getReplayedResponse(actor.businessId, idempotencyKey, saleService.voidSaleEndpoint(id));
+    const input = voidSaleSchema.parse(req.body);
+
+    const replayed = await getReplayedResponse(actor.businessId, actor.userId, idempotencyKey, saleService.voidSaleEndpoint(id), input);
     if (replayed) {
       res.status(replayed.status).json(replayed.body);
       return;
     }
 
-    const input = voidSaleSchema.parse(req.body);
     const sale = await saleService.voidSale(id, input, actor, idempotencyKey);
     res.status(200).json({ data: sale });
   } catch (err) {
@@ -62,13 +64,14 @@ export async function refundSale(req: Request, res: Response, next: NextFunction
     const { id } = idParamSchema.parse(req.params);
     const idempotencyKey = req.idempotencyKey as string; // guaranteed by requireIdempotencyKey
 
-    const replayed = await getReplayedResponse(actor.businessId, idempotencyKey, saleService.refundSaleEndpoint(id));
+    const input = refundSaleSchema.parse(req.body);
+
+    const replayed = await getReplayedResponse(actor.businessId, actor.userId, idempotencyKey, saleService.refundSaleEndpoint(id), input);
     if (replayed) {
       res.status(replayed.status).json(replayed.body);
       return;
     }
 
-    const input = refundSaleSchema.parse(req.body);
     const refund = await saleService.refundSale(id, input, actor, idempotencyKey);
     res.status(201).json({ data: refund });
   } catch (err) {
@@ -82,13 +85,14 @@ export async function setSaleAttribution(req: Request, res: Response, next: Next
     const { id } = idParamSchema.parse(req.params);
     const idempotencyKey = req.idempotencyKey as string; // guaranteed by requireIdempotencyKey
 
-    const replayed = await getReplayedResponse(actor.businessId, idempotencyKey, saleService.setSaleAttributionEndpoint(id));
+    const input = setSaleAttributionSchema.parse(req.body);
+
+    const replayed = await getReplayedResponse(actor.businessId, actor.userId, idempotencyKey, saleService.setSaleAttributionEndpoint(id), input);
     if (replayed) {
       res.status(replayed.status).json(replayed.body);
       return;
     }
 
-    const input = setSaleAttributionSchema.parse(req.body);
     const sale = await saleService.setSaleAttribution(id, input, actor, idempotencyKey);
     res.status(200).json({ data: sale });
   } catch (err) {

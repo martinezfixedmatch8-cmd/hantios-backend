@@ -64,7 +64,7 @@ export async function saveDraft(poId: string, input: DraftProposalInput, actor: 
   const ipAddress = actor.party === "supplier" ? actor.ipAddress : null;
 
   const result = await prisma.$transaction(async (tx) => {
-    await claimIdempotencyKey(tx, actor.businessId, idempotencyKey, draftProposalEndpoint(poId));
+    await claimIdempotencyKey(tx, actor.businessId, (actor.party === "owner" ? actor.userId : "supplier"), idempotencyKey, draftProposalEndpoint(poId), input);
     let proposalId: string;
     if (existing) {
       const guarded = await tx.po_negotiation_proposals.updateMany({
@@ -138,7 +138,7 @@ export async function saveDraft(poId: string, input: DraftProposalInput, actor: 
 
     const fresh = await tx.po_negotiation_proposals.findUniqueOrThrow({ where: { id: proposalId }, include: PROPOSAL_INCLUDE });
     const responseBody = JSON.parse(JSON.stringify({ data: fresh })) as unknown;
-    await completeIdempotencyKey(tx, actor.businessId, idempotencyKey, draftProposalEndpoint(poId), 200, responseBody);
+    await completeIdempotencyKey(tx, actor.businessId, (actor.party === "owner" ? actor.userId : "supplier"), idempotencyKey, draftProposalEndpoint(poId), 200, responseBody);
     return fresh;
   }, PROPOSAL_TRANSACTION_OPTIONS);
 
@@ -168,7 +168,13 @@ export async function submitProposal(
   if (proposal.proposed_by !== actor.party) throw notFound("Proposal not found");
 
   const result = await prisma.$transaction(async (tx) => {
-    await claimIdempotencyKey(tx, actor.businessId, idempotencyKey, submitProposalEndpoint(poId, proposalId));
+    // Batch 8 Session A bugfix: hash {version} -- the one field both the
+    // owner-side (submitProposalSchema, just {version}) and supplier-portal
+    // (submitSupplierProposalSchema, {version, senderName, senderPhone})
+    // callers can agree on identically. An earlier version hashed {} here,
+    // a genuine mismatch against either controller's own real payload that
+    // caused a false 409 on a legitimate replay from either side.
+    await claimIdempotencyKey(tx, actor.businessId, (actor.party === "owner" ? actor.userId : "supplier"), idempotencyKey, submitProposalEndpoint(poId, proposalId), { version });
 
     const guarded = await tx.po_negotiation_proposals.updateMany({
       where: { id: proposalId, business_id: actor.businessId, status: "draft", version },
@@ -224,7 +230,7 @@ export async function submitProposal(
 
     const fresh = await tx.po_negotiation_proposals.findUniqueOrThrow({ where: { id: proposalId }, include: PROPOSAL_INCLUDE });
     const responseBody = JSON.parse(JSON.stringify({ data: fresh })) as unknown;
-    await completeIdempotencyKey(tx, actor.businessId, idempotencyKey, submitProposalEndpoint(poId, proposalId), 200, responseBody);
+    await completeIdempotencyKey(tx, actor.businessId, (actor.party === "owner" ? actor.userId : "supplier"), idempotencyKey, submitProposalEndpoint(poId, proposalId), 200, responseBody);
     return { fresh, revisionNumber };
   }, PROPOSAL_TRANSACTION_OPTIONS);
 
@@ -331,7 +337,7 @@ export async function acceptProposal(poId: string, proposalId: string, actor: Ne
   if (proposal.status === "draft") throw badRequest("A draft proposal must be submitted before it can be accepted");
 
   const result = await prisma.$transaction(async (tx) => {
-    await claimIdempotencyKey(tx, actor.businessId, idempotencyKey, acceptProposalEndpoint(poId, proposalId));
+    await claimIdempotencyKey(tx, actor.businessId, (actor.party === "owner" ? actor.userId : "supplier"), idempotencyKey, acceptProposalEndpoint(poId, proposalId), {});
 
     // Guard: proposal must still be pending -- atomic, Final-State-
     // Protection shape identical to every other status transition in this
@@ -395,7 +401,7 @@ export async function acceptProposal(poId: string, proposalId: string, actor: Ne
     });
 
     const responseBody = JSON.parse(JSON.stringify({ data: { proposal: { ...proposal, status: "accepted" }, purchaseOrder: updatedPo, agreementSnapshot: snapshot } })) as unknown;
-    await completeIdempotencyKey(tx, actor.businessId, idempotencyKey, acceptProposalEndpoint(poId, proposalId), 200, responseBody);
+    await completeIdempotencyKey(tx, actor.businessId, (actor.party === "owner" ? actor.userId : "supplier"), idempotencyKey, acceptProposalEndpoint(poId, proposalId), 200, responseBody);
 
     return { purchaseOrder: updatedPo, snapshot };
   }, PROPOSAL_TRANSACTION_OPTIONS);
@@ -422,7 +428,7 @@ export async function rejectProposal(poId: string, proposalId: string, input: Re
   if (proposal.status === "draft") throw badRequest("A draft proposal must be submitted before it can be rejected");
 
   const result = await prisma.$transaction(async (tx) => {
-    await claimIdempotencyKey(tx, actor.businessId, idempotencyKey, rejectProposalEndpoint(poId, proposalId));
+    await claimIdempotencyKey(tx, actor.businessId, (actor.party === "owner" ? actor.userId : "supplier"), idempotencyKey, rejectProposalEndpoint(poId, proposalId), input);
 
     const auditActor = resolveAuditActor(actor, po);
 
@@ -447,7 +453,7 @@ export async function rejectProposal(poId: string, proposalId: string, input: Re
 
     const fresh = await tx.po_negotiation_proposals.findUniqueOrThrow({ where: { id: proposalId }, include: PROPOSAL_INCLUDE });
     const responseBody = JSON.parse(JSON.stringify({ data: fresh })) as unknown;
-    await completeIdempotencyKey(tx, actor.businessId, idempotencyKey, rejectProposalEndpoint(poId, proposalId), 200, responseBody);
+    await completeIdempotencyKey(tx, actor.businessId, (actor.party === "owner" ? actor.userId : "supplier"), idempotencyKey, rejectProposalEndpoint(poId, proposalId), 200, responseBody);
     return fresh;
   }, PROPOSAL_TRANSACTION_OPTIONS);
 

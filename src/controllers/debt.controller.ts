@@ -30,13 +30,14 @@ export async function createDebt(req: Request, res: Response, next: NextFunction
     const actor = getActor(req);
     const idempotencyKey = getIdempotencyKey(req);
 
-    const replayed = await getReplayedResponse(actor.businessId, idempotencyKey, debtService.CREATE_DEBT_ENDPOINT);
+    const input = createDebtSchema.parse(req.body);
+
+    const replayed = await getReplayedResponse(actor.businessId, actor.userId, idempotencyKey, debtService.CREATE_DEBT_ENDPOINT, input);
     if (replayed) {
       res.status(replayed.status).json(replayed.body);
       return;
     }
 
-    const input = createDebtSchema.parse(req.body);
     const debt = await debtService.createDebt(input, actor, idempotencyKey);
     res.status(201).json({ data: debt });
   } catch (err) {
@@ -86,13 +87,14 @@ export async function recordPayment(req: Request, res: Response, next: NextFunct
     const { id } = idParamSchema.parse(req.params);
     const idempotencyKey = getIdempotencyKey(req);
 
-    const replayed = await getReplayedResponse(actor.businessId, idempotencyKey, debtService.recordPaymentEndpoint(id));
+    const input = recordPaymentSchema.parse(req.body);
+
+    const replayed = await getReplayedResponse(actor.businessId, actor.userId, idempotencyKey, debtService.recordPaymentEndpoint(id), input);
     if (replayed) {
       res.status(replayed.status).json(replayed.body);
       return;
     }
 
-    const input = recordPaymentSchema.parse(req.body);
     const payment = await debtService.recordPayment(id, input, actor, idempotencyKey);
     res.status(201).json({ data: payment });
   } catch (err) {
@@ -106,13 +108,14 @@ export async function reversePayment(req: Request, res: Response, next: NextFunc
     const { id, paymentId } = paymentIdParamSchema.parse(req.params);
     const idempotencyKey = getIdempotencyKey(req);
 
-    const replayed = await getReplayedResponse(actor.businessId, idempotencyKey, debtService.reversePaymentEndpoint(id, paymentId));
+    const input = reversePaymentSchema.parse(req.body);
+
+    const replayed = await getReplayedResponse(actor.businessId, actor.userId, idempotencyKey, debtService.reversePaymentEndpoint(id, paymentId), input);
     if (replayed) {
       res.status(replayed.status).json(replayed.body);
       return;
     }
 
-    const input = reversePaymentSchema.parse(req.body);
     const reversal = await debtService.reversePayment(id, paymentId, input, actor, idempotencyKey);
     res.status(201).json({ data: reversal });
   } catch (err) {
@@ -126,13 +129,14 @@ export async function disputeDebt(req: Request, res: Response, next: NextFunctio
     const { id } = idParamSchema.parse(req.params);
     const idempotencyKey = getIdempotencyKey(req);
 
-    const replayed = await getReplayedResponse(actor.businessId, idempotencyKey, `POST /debts/${id}/dispute`);
+    const input = debtStatusActionSchema.parse(req.body);
+
+    const replayed = await getReplayedResponse(actor.businessId, actor.userId, idempotencyKey, `POST /debts/${id}/dispute`, input);
     if (replayed) {
       res.status(replayed.status).json(replayed.body);
       return;
     }
 
-    const input = debtStatusActionSchema.parse(req.body);
     const debt = await debtService.disputeDebt(id, input, actor, idempotencyKey);
     res.status(200).json({ data: debt });
   } catch (err) {
@@ -146,13 +150,14 @@ export async function resolveDisputeDebt(req: Request, res: Response, next: Next
     const { id } = idParamSchema.parse(req.params);
     const idempotencyKey = getIdempotencyKey(req);
 
-    const replayed = await getReplayedResponse(actor.businessId, idempotencyKey, `POST /debts/${id}/resolve-dispute`);
+    const input = debtStatusActionSchema.parse(req.body);
+
+    const replayed = await getReplayedResponse(actor.businessId, actor.userId, idempotencyKey, `POST /debts/${id}/resolve-dispute`, input);
     if (replayed) {
       res.status(replayed.status).json(replayed.body);
       return;
     }
 
-    const input = debtStatusActionSchema.parse(req.body);
     const debt = await debtService.resolveDisputeDebt(id, input, actor, idempotencyKey);
     res.status(200).json({ data: debt });
   } catch (err) {
@@ -166,13 +171,14 @@ export async function writeOffDebt(req: Request, res: Response, next: NextFuncti
     const { id } = idParamSchema.parse(req.params);
     const idempotencyKey = getIdempotencyKey(req);
 
-    const replayed = await getReplayedResponse(actor.businessId, idempotencyKey, debtService.writeOffEndpoint(id));
+    const input = debtStatusActionSchema.parse(req.body);
+
+    const replayed = await getReplayedResponse(actor.businessId, actor.userId, idempotencyKey, debtService.writeOffEndpoint(id), input);
     if (replayed) {
       res.status(replayed.status).json(replayed.body);
       return;
     }
 
-    const input = debtStatusActionSchema.parse(req.body);
     const debt = await debtService.writeOffDebt(id, input, actor, idempotencyKey);
     res.status(200).json({ data: debt });
   } catch (err) {
@@ -197,13 +203,14 @@ export async function applyInterest(req: Request, res: Response, next: NextFunct
     const { id } = idParamSchema.parse(req.params);
     const idempotencyKey = getIdempotencyKey(req);
 
-    const replayed = await getReplayedResponse(actor.businessId, idempotencyKey, debtService.applyInterestEndpoint(id));
+    const input = applyInterestSchema.parse(req.body);
+
+    const replayed = await getReplayedResponse(actor.businessId, actor.userId, idempotencyKey, debtService.applyInterestEndpoint(id), input);
     if (replayed) {
       res.status(replayed.status).json(replayed.body);
       return;
     }
 
-    const input = applyInterestSchema.parse(req.body);
     const result = await debtService.applyInterest(id, input, actor, idempotencyKey);
     // No new interest was due (e.g. one_time already applied, or not enough
     // time elapsed) -- not an error, just nothing to record.

@@ -22,13 +22,14 @@ export async function createShipment(req: Request, res: Response, next: NextFunc
     const { id } = idParamSchema.parse(req.params);
     const idempotencyKey = req.idempotencyKey as string;
 
-    const replayed = await getReplayedResponse(actor.businessId, idempotencyKey, service.createShipmentEndpoint(id));
+    const input = createShipmentSchema.parse(req.body);
+
+    const replayed = await getReplayedResponse(actor.businessId, (actor.party === "owner" ? actor.userId : "supplier"), idempotencyKey, service.createShipmentEndpoint(id), input);
     if (replayed) {
       res.status(replayed.status).json(replayed.body);
       return;
     }
 
-    const input = createShipmentSchema.parse(req.body);
     const result = await service.createShipment(id, input, actor, idempotencyKey);
     res.status(201).json({ data: result });
   } catch (err) {
@@ -66,13 +67,14 @@ export async function updateShipmentStatus(req: Request, res: Response, next: Ne
     const { id, shipmentId } = shipmentIdParamSchema.parse(req.params);
     const idempotencyKey = req.idempotencyKey as string;
 
-    const replayed = await getReplayedResponse(actor.businessId, idempotencyKey, service.updateShipmentStatusEndpoint(id, shipmentId));
+    const input = updateShipmentStatusSchema.parse(req.body);
+
+    const replayed = await getReplayedResponse(actor.businessId, (actor.party === "owner" ? actor.userId : "supplier"), idempotencyKey, service.updateShipmentStatusEndpoint(id, shipmentId), input);
     if (replayed) {
       res.status(replayed.status).json(replayed.body);
       return;
     }
 
-    const input = updateShipmentStatusSchema.parse(req.body);
     const result = await service.updateShipmentStatus(id, shipmentId, input, actor, idempotencyKey);
     res.status(200).json({ data: result });
   } catch (err) {
@@ -87,13 +89,14 @@ export async function updateShipment(req: Request, res: Response, next: NextFunc
     const { id, shipmentId } = shipmentIdParamSchema.parse(req.params);
     const idempotencyKey = req.idempotencyKey as string;
 
-    const replayed = await getReplayedResponse(actor.businessId, idempotencyKey, service.updateShipmentEndpoint(id, shipmentId));
+    const input = updateShipmentSchema.parse(req.body);
+
+    const replayed = await getReplayedResponse(actor.businessId, (actor.party === "owner" ? actor.userId : "supplier"), idempotencyKey, service.updateShipmentEndpoint(id, shipmentId), input);
     if (replayed) {
       res.status(replayed.status).json(replayed.body);
       return;
     }
 
-    const input = updateShipmentSchema.parse(req.body);
     const result = await service.updateShipment(id, shipmentId, input, actor, idempotencyKey);
     res.status(200).json({ data: result });
   } catch (err) {
@@ -108,13 +111,14 @@ export async function updateShipmentEta(req: Request, res: Response, next: NextF
     const { id, shipmentId } = shipmentIdParamSchema.parse(req.params);
     const idempotencyKey = req.idempotencyKey as string;
 
-    const replayed = await getReplayedResponse(actor.businessId, idempotencyKey, service.updateShipmentEtaEndpoint(id, shipmentId));
+    const input = updateShipmentEtaSchema.parse(req.body);
+
+    const replayed = await getReplayedResponse(actor.businessId, (actor.party === "owner" ? actor.userId : "supplier"), idempotencyKey, service.updateShipmentEtaEndpoint(id, shipmentId), input);
     if (replayed) {
       res.status(replayed.status).json(replayed.body);
       return;
     }
 
-    const input = updateShipmentEtaSchema.parse(req.body);
     const result = await service.updateShipmentEta(id, shipmentId, input, actor, idempotencyKey);
     res.status(200).json({ data: result });
   } catch (err) {

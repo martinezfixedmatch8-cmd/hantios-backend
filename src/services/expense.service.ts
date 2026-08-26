@@ -263,7 +263,7 @@ export async function createExpense(input: CreateExpenseInput, actor: Actor, ide
   const currency = getCurrency(business.currency);
 
   const expense = await prisma.$transaction(async (tx) => {
-    await claimIdempotencyKey(tx, actor.businessId, idempotencyKey, CREATE_EXPENSE_ENDPOINT);
+    await claimIdempotencyKey(tx, actor.businessId, actor.userId, idempotencyKey, CREATE_EXPENSE_ENDPOINT, input);
 
     const withRelations = await createExpenseInTransaction(tx, {
       businessId: actor.businessId,
@@ -293,7 +293,7 @@ export async function createExpense(input: CreateExpenseInput, actor: Actor, ide
     });
 
     const responseBody = JSON.parse(JSON.stringify({ data: withRelations })) as unknown;
-    await completeIdempotencyKey(tx, actor.businessId, idempotencyKey, CREATE_EXPENSE_ENDPOINT, 201, responseBody);
+    await completeIdempotencyKey(tx, actor.businessId, actor.userId, idempotencyKey, CREATE_EXPENSE_ENDPOINT, 201, responseBody);
 
     return withRelations;
   }, EXPENSE_TRANSACTION_OPTIONS);
@@ -402,7 +402,7 @@ export async function updateExpense(id: string, input: UpdateExpenseInput, actor
   await validateTagIds(input.tagIds, actor.businessId);
 
   const result = await prisma.$transaction(async (tx) => {
-    await claimIdempotencyKey(tx, actor.businessId, idempotencyKey, updateExpenseEndpoint(id));
+    await claimIdempotencyKey(tx, actor.businessId, actor.userId, idempotencyKey, updateExpenseEndpoint(id), input);
 
     const updateResult = await tx.expenses.updateMany({
       where: { id, business_id: actor.businessId, version: input.version },
@@ -452,7 +452,7 @@ export async function updateExpense(id: string, input: UpdateExpenseInput, actor
 
     const updated = await tx.expenses.findUniqueOrThrow({ where: { id }, include: EXPENSE_INCLUDE });
     const responseBody = JSON.parse(JSON.stringify({ data: updated })) as unknown;
-    await completeIdempotencyKey(tx, actor.businessId, idempotencyKey, updateExpenseEndpoint(id), 200, responseBody);
+    await completeIdempotencyKey(tx, actor.businessId, actor.userId, idempotencyKey, updateExpenseEndpoint(id), 200, responseBody);
 
     return updated;
   }, EXPENSE_TRANSACTION_OPTIONS);
@@ -467,7 +467,7 @@ export async function archiveExpense(id: string, input: ArchiveExpenseInput, act
   if (expense.status === "archived") throw badRequest("Expense is already archived");
 
   const result = await prisma.$transaction(async (tx) => {
-    await claimIdempotencyKey(tx, actor.businessId, idempotencyKey, archiveExpenseEndpoint(id));
+    await claimIdempotencyKey(tx, actor.businessId, actor.userId, idempotencyKey, archiveExpenseEndpoint(id), input);
 
     const updateResult = await tx.expenses.updateMany({
       where: { id, business_id: actor.businessId, version: input.version, status: "active" },
@@ -490,7 +490,7 @@ export async function archiveExpense(id: string, input: ArchiveExpenseInput, act
 
     const updated = await tx.expenses.findUniqueOrThrow({ where: { id } });
     const responseBody = JSON.parse(JSON.stringify({ data: updated })) as unknown;
-    await completeIdempotencyKey(tx, actor.businessId, idempotencyKey, archiveExpenseEndpoint(id), 200, responseBody);
+    await completeIdempotencyKey(tx, actor.businessId, actor.userId, idempotencyKey, archiveExpenseEndpoint(id), 200, responseBody);
     return updated;
   }, EXPENSE_TRANSACTION_OPTIONS);
 
@@ -504,7 +504,7 @@ export async function restoreExpense(id: string, input: RestoreExpenseInput, act
   if (expense.status === "active") throw badRequest("Expense is not archived");
 
   const result = await prisma.$transaction(async (tx) => {
-    await claimIdempotencyKey(tx, actor.businessId, idempotencyKey, restoreExpenseEndpoint(id));
+    await claimIdempotencyKey(tx, actor.businessId, actor.userId, idempotencyKey, restoreExpenseEndpoint(id), input);
 
     const updateResult = await tx.expenses.updateMany({
       where: { id, business_id: actor.businessId, version: input.version, status: "archived" },
@@ -527,7 +527,7 @@ export async function restoreExpense(id: string, input: RestoreExpenseInput, act
 
     const updated = await tx.expenses.findUniqueOrThrow({ where: { id } });
     const responseBody = JSON.parse(JSON.stringify({ data: updated })) as unknown;
-    await completeIdempotencyKey(tx, actor.businessId, idempotencyKey, restoreExpenseEndpoint(id), 200, responseBody);
+    await completeIdempotencyKey(tx, actor.businessId, actor.userId, idempotencyKey, restoreExpenseEndpoint(id), 200, responseBody);
     return updated;
   }, EXPENSE_TRANSACTION_OPTIONS);
 
@@ -546,7 +546,7 @@ export async function addAttachments(id: string, input: AddAttachmentsInput, act
   }
 
   const result = await prisma.$transaction(async (tx) => {
-    await claimIdempotencyKey(tx, actor.businessId, idempotencyKey, addAttachmentsEndpoint(id));
+    await claimIdempotencyKey(tx, actor.businessId, actor.userId, idempotencyKey, addAttachmentsEndpoint(id), input);
 
     const registered = await Promise.all(
       input.attachments.map((a) =>
@@ -585,7 +585,7 @@ export async function addAttachments(id: string, input: AddAttachmentsInput, act
 
     const updated = await tx.expenses.findUniqueOrThrow({ where: { id }, include: { expense_attachments: true } });
     const responseBody = JSON.parse(JSON.stringify({ data: updated })) as unknown;
-    await completeIdempotencyKey(tx, actor.businessId, idempotencyKey, addAttachmentsEndpoint(id), 201, responseBody);
+    await completeIdempotencyKey(tx, actor.businessId, actor.userId, idempotencyKey, addAttachmentsEndpoint(id), 201, responseBody);
     return updated;
   }, EXPENSE_TRANSACTION_OPTIONS);
 
@@ -600,7 +600,7 @@ export async function deleteAttachment(id: string, attachmentId: string, actor: 
   if (attachment.expense_id !== id) throw notFound("Attachment not found");
 
   const result = await prisma.$transaction(async (tx) => {
-    await claimIdempotencyKey(tx, actor.businessId, idempotencyKey, deleteAttachmentEndpoint(id, attachmentId));
+    await claimIdempotencyKey(tx, actor.businessId, actor.userId, idempotencyKey, deleteAttachmentEndpoint(id, attachmentId), {});
 
     await tx.expense_attachments.delete({ where: { id: attachmentId } });
 
@@ -617,7 +617,7 @@ export async function deleteAttachment(id: string, attachmentId: string, actor: 
 
     const updated = await tx.expenses.findUniqueOrThrow({ where: { id }, include: { expense_attachments: true } });
     const responseBody = JSON.parse(JSON.stringify({ data: updated })) as unknown;
-    await completeIdempotencyKey(tx, actor.businessId, idempotencyKey, deleteAttachmentEndpoint(id, attachmentId), 200, responseBody);
+    await completeIdempotencyKey(tx, actor.businessId, actor.userId, idempotencyKey, deleteAttachmentEndpoint(id, attachmentId), 200, responseBody);
     return updated;
   }, EXPENSE_TRANSACTION_OPTIONS);
 
@@ -637,7 +637,7 @@ export async function approveExpense(id: string, input: ApproveExpenseInput, act
   }
 
   const result = await prisma.$transaction(async (tx) => {
-    await claimIdempotencyKey(tx, actor.businessId, idempotencyKey, approveExpenseEndpoint(id));
+    await claimIdempotencyKey(tx, actor.businessId, actor.userId, idempotencyKey, approveExpenseEndpoint(id), input);
 
     const updateResult = await tx.expenses.updateMany({
       where: { id, business_id: actor.businessId, version: input.version, workflow_status: "pending" },
@@ -660,7 +660,7 @@ export async function approveExpense(id: string, input: ApproveExpenseInput, act
 
     const updated = await tx.expenses.findUniqueOrThrow({ where: { id } });
     const responseBody = JSON.parse(JSON.stringify({ data: updated })) as unknown;
-    await completeIdempotencyKey(tx, actor.businessId, idempotencyKey, approveExpenseEndpoint(id), 200, responseBody);
+    await completeIdempotencyKey(tx, actor.businessId, actor.userId, idempotencyKey, approveExpenseEndpoint(id), 200, responseBody);
     return updated;
   }, EXPENSE_TRANSACTION_OPTIONS);
 
@@ -676,7 +676,7 @@ export async function rejectExpense(id: string, input: RejectExpenseInput, actor
   }
 
   const result = await prisma.$transaction(async (tx) => {
-    await claimIdempotencyKey(tx, actor.businessId, idempotencyKey, rejectExpenseEndpoint(id));
+    await claimIdempotencyKey(tx, actor.businessId, actor.userId, idempotencyKey, rejectExpenseEndpoint(id), input);
 
     const updateResult = await tx.expenses.updateMany({
       where: { id, business_id: actor.businessId, version: input.version, workflow_status: "pending" },
@@ -699,7 +699,7 @@ export async function rejectExpense(id: string, input: RejectExpenseInput, actor
 
     const updated = await tx.expenses.findUniqueOrThrow({ where: { id } });
     const responseBody = JSON.parse(JSON.stringify({ data: updated })) as unknown;
-    await completeIdempotencyKey(tx, actor.businessId, idempotencyKey, rejectExpenseEndpoint(id), 200, responseBody);
+    await completeIdempotencyKey(tx, actor.businessId, actor.userId, idempotencyKey, rejectExpenseEndpoint(id), 200, responseBody);
     return updated;
   }, EXPENSE_TRANSACTION_OPTIONS);
 
@@ -715,7 +715,7 @@ export async function markExpensePaid(id: string, input: MarkPaidExpenseInput, a
   }
 
   const result = await prisma.$transaction(async (tx) => {
-    await claimIdempotencyKey(tx, actor.businessId, idempotencyKey, markPaidExpenseEndpoint(id));
+    await claimIdempotencyKey(tx, actor.businessId, actor.userId, idempotencyKey, markPaidExpenseEndpoint(id), input);
 
     const updateResult = await tx.expenses.updateMany({
       where: { id, business_id: actor.businessId, version: input.version, workflow_status: "approved" },
@@ -738,7 +738,7 @@ export async function markExpensePaid(id: string, input: MarkPaidExpenseInput, a
 
     const updated = await tx.expenses.findUniqueOrThrow({ where: { id } });
     const responseBody = JSON.parse(JSON.stringify({ data: updated })) as unknown;
-    await completeIdempotencyKey(tx, actor.businessId, idempotencyKey, markPaidExpenseEndpoint(id), 200, responseBody);
+    await completeIdempotencyKey(tx, actor.businessId, actor.userId, idempotencyKey, markPaidExpenseEndpoint(id), 200, responseBody);
     return updated;
   }, EXPENSE_TRANSACTION_OPTIONS);
 
@@ -780,13 +780,13 @@ export async function createExpenseCorrection(id: string, input: CreateExpenseCo
   }
 
   const endpoint = createExpenseCorrectionEndpoint(id);
-  const replayed = await getReplayedResponse(actor.businessId, idempotencyKey, endpoint);
+  const replayed = await getReplayedResponse(actor.businessId, actor.userId, idempotencyKey, endpoint, input);
   if (replayed) {
     return (replayed.body as { data: Awaited<ReturnType<typeof prisma.expense_corrections.create>> }).data;
   }
 
   const correction = await prisma.$transaction(async (tx) => {
-    await claimIdempotencyKey(tx, actor.businessId, idempotencyKey, endpoint);
+    await claimIdempotencyKey(tx, actor.businessId, actor.userId, idempotencyKey, endpoint, input);
 
     const created = await tx.expense_corrections.create({
       data: {
@@ -821,7 +821,7 @@ export async function createExpenseCorrection(id: string, input: CreateExpenseCo
     });
 
     const responseBody = JSON.parse(JSON.stringify({ data: created })) as unknown;
-    await completeIdempotencyKey(tx, actor.businessId, idempotencyKey, endpoint, 201, responseBody);
+    await completeIdempotencyKey(tx, actor.businessId, actor.userId, idempotencyKey, endpoint, 201, responseBody);
     return created;
   });
 
@@ -846,7 +846,7 @@ export async function updateRecurrence(id: string, input: UpdateRecurrenceInput,
   );
 
   const result = await prisma.$transaction(async (tx) => {
-    await claimIdempotencyKey(tx, actor.businessId, idempotencyKey, updateRecurrenceEndpoint(id));
+    await claimIdempotencyKey(tx, actor.businessId, actor.userId, idempotencyKey, updateRecurrenceEndpoint(id), input);
 
     const updated = await tx.expense_recurrence.update({
       where: { id: recurrence.id },
@@ -870,7 +870,7 @@ export async function updateRecurrence(id: string, input: UpdateRecurrenceInput,
     });
 
     const responseBody = JSON.parse(JSON.stringify({ data: updated })) as unknown;
-    await completeIdempotencyKey(tx, actor.businessId, idempotencyKey, updateRecurrenceEndpoint(id), 200, responseBody);
+    await completeIdempotencyKey(tx, actor.businessId, actor.userId, idempotencyKey, updateRecurrenceEndpoint(id), 200, responseBody);
     return updated;
   }, EXPENSE_TRANSACTION_OPTIONS);
 

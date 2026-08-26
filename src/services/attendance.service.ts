@@ -61,7 +61,7 @@ async function createAttendanceRecordEntry(
   // established a real bug fix for in Session A: without this, a genuine
   // retry could hit an already-claimed per-entry key and report a false
   // failure instead of replaying the original success.
-  const replayed = await getReplayedResponse(actor.businessId, idempotencyKey, endpoint);
+  const replayed = await getReplayedResponse(actor.businessId, actor.userId, idempotencyKey, endpoint, input);
   if (replayed) {
     return (replayed.body as { data: Awaited<ReturnType<typeof prisma.attendance_records.create>> }).data;
   }
@@ -70,7 +70,7 @@ async function createAttendanceRecordEntry(
   await assertWorkDateNotInFuture(actor.businessId, input.workDate);
 
   const record = await prisma.$transaction(async (tx) => {
-    await claimIdempotencyKey(tx, actor.businessId, idempotencyKey, endpoint);
+    await claimIdempotencyKey(tx, actor.businessId, actor.userId, idempotencyKey, endpoint, {});
 
     // Module 12 Session D -- self-service creates status:"recorded"
     // (Session B's own reserved-but-previously-unreachable value, made
@@ -113,7 +113,7 @@ async function createAttendanceRecordEntry(
     });
 
     const responseBody = JSON.parse(JSON.stringify({ data: created })) as unknown;
-    await completeIdempotencyKey(tx, actor.businessId, idempotencyKey, endpoint, 201, responseBody);
+    await completeIdempotencyKey(tx, actor.businessId, actor.userId, idempotencyKey, endpoint, 201, responseBody);
 
     return created;
   });
@@ -260,7 +260,7 @@ export async function createAttendanceAdjustment(
   const endpoint = createAttendanceAdjustmentEndpoint(attendanceRecordId);
 
   const adjustment = await prisma.$transaction(async (tx) => {
-    await claimIdempotencyKey(tx, actor.businessId, idempotencyKey, endpoint);
+    await claimIdempotencyKey(tx, actor.businessId, actor.userId, idempotencyKey, endpoint, input);
 
     const existingAdjustments = await tx.attendance_adjustments.findMany({ where: { attendance_record_id: attendanceRecordId } });
     const currentEffective = existingAdjustments.reduce((sum, a) => sum.plus(a.delta_hours), record.hours_worked);
@@ -292,7 +292,7 @@ export async function createAttendanceAdjustment(
     });
 
     const responseBody = JSON.parse(JSON.stringify({ data: created })) as unknown;
-    await completeIdempotencyKey(tx, actor.businessId, idempotencyKey, endpoint, 201, responseBody);
+    await completeIdempotencyKey(tx, actor.businessId, actor.userId, idempotencyKey, endpoint, 201, responseBody);
 
     return created;
   });

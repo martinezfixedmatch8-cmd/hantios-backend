@@ -45,7 +45,7 @@ export async function createMessage(
   }
 
   const message = await prisma.$transaction(async (tx) => {
-    await claimIdempotencyKey(tx, actor.businessId, idempotencyKey, createMessageEndpoint(poId));
+    await claimIdempotencyKey(tx, actor.businessId, (actor.party === "owner" ? actor.userId : "supplier"), idempotencyKey, createMessageEndpoint(poId), input);
 
     const created = await tx.po_negotiation_messages.create({
       data: {
@@ -75,7 +75,7 @@ export async function createMessage(
     });
 
     const responseBody = JSON.parse(JSON.stringify({ data: created })) as unknown;
-    await completeIdempotencyKey(tx, actor.businessId, idempotencyKey, createMessageEndpoint(poId), 201, responseBody);
+    await completeIdempotencyKey(tx, actor.businessId, (actor.party === "owner" ? actor.userId : "supplier"), idempotencyKey, createMessageEndpoint(poId), 201, responseBody);
     return created;
   }, MESSAGE_TRANSACTION_OPTIONS);
 
@@ -117,7 +117,7 @@ export async function markMessageRead(poId: string, messageId: string, actor: Ne
   if (message.purchase_order_id !== poId) throw notFound("Message not found");
 
   const result = await prisma.$transaction(async (tx) => {
-    await claimIdempotencyKey(tx, actor.businessId, idempotencyKey, markMessageReadEndpoint(poId, messageId));
+    await claimIdempotencyKey(tx, actor.businessId, (actor.party === "owner" ? actor.userId : "supplier"), idempotencyKey, markMessageReadEndpoint(poId, messageId), {});
 
     let didMarkRead = false;
     if (message.sender_type !== actor.party && !message.read_at) {
@@ -130,7 +130,7 @@ export async function markMessageRead(poId: string, messageId: string, actor: Ne
 
     const fresh = await tx.po_negotiation_messages.findUniqueOrThrow({ where: { id: messageId } });
     const responseBody = JSON.parse(JSON.stringify({ data: fresh })) as unknown;
-    await completeIdempotencyKey(tx, actor.businessId, idempotencyKey, markMessageReadEndpoint(poId, messageId), 200, responseBody);
+    await completeIdempotencyKey(tx, actor.businessId, (actor.party === "owner" ? actor.userId : "supplier"), idempotencyKey, markMessageReadEndpoint(poId, messageId), 200, responseBody);
     return { fresh, didMarkRead };
   }, MESSAGE_TRANSACTION_OPTIONS);
 

@@ -3,6 +3,7 @@ import { unauthorized } from "../lib/errors";
 import { idParamSchema } from "../validation/common.schema";
 import { listReceiptsQuerySchema, requestReceiptDeliverySchema, listDeliveryAttemptsQuerySchema } from "../validation/receipt.schema";
 import * as receiptService from "../services/receipt.service";
+import { getReplayedResponse } from "../lib/idempotency";
 
 function getActor(req: Request) {
   if (!req.auth) throw unauthorized();
@@ -60,25 +61,25 @@ export async function requestReceiptDelivery(req: Request, res: Response, next: 
     const idempotencyKey = getIdempotencyKey(req);
     const input = requestReceiptDeliverySchema.parse(req.body);
 
-    // Local Layer-1 (request idempotency, with payload-hash comparison --
-    // see receipt.service.ts's own header comment for why this is a
-    // Module-06-local addition, not a change to the shared primitive) +
-    // Layer-2 (source/business uniqueness -- N/A here, delivery isn't a
-    // source-event, every explicit request is legitimate).
-    const replayed = await receiptService.checkDeliveryIdempotentReplay(actor.businessId, idempotencyKey, id, input);
+    // Batch 8 Session A (HNT-IDEMP-001/002) -- now the same shared
+    // getReplayedResponse/claimIdempotencyKey/completeIdempotencyKey every
+    // other endpoint in this repo uses, payload-hash mismatch protection
+    // included. See receipt.service.ts's own header comment for the full
+    // migration story.
+    const replayed = await getReplayedResponse(
+      actor.businessId,
+      actor.userId,
+      idempotencyKey,
+      receiptService.requestReceiptDeliveryEndpoint(id),
+      input
+    );
     if (replayed) {
-      // replayed.body is the unwrapped attempt object (checkDeliveryIdempotentReplay
-      // strips _payloadHash for its own comparison) -- re-wrap to match the
-      // fresh-response envelope shape exactly, so a replay is byte-identical
-      // to the original from the client's own point of view.
-      res.status(replayed.status).json({ data: replayed.body });
+      res.status(replayed.status).json(replayed.body);
       return;
     }
 
     const result = await receiptService.requestReceiptDelivery(id, input, actor, idempotencyKey);
-    const { _payloadHash, ...responseData } = result;
-    await receiptService.completeDeliveryIdempotencyKey(actor.businessId, idempotencyKey, id, 201, { data: responseData, _payloadHash });
-    res.status(201).json({ data: responseData });
+    res.status(201).json({ data: result });
   } catch (err) {
     next(err);
   }

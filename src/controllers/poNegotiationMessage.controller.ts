@@ -16,13 +16,14 @@ export async function createMessage(req: Request, res: Response, next: NextFunct
     const { id } = idParamSchema.parse(req.params);
     const idempotencyKey = req.idempotencyKey as string;
 
-    const replayed = await getReplayedResponse(actor.businessId, idempotencyKey, messageService.createMessageEndpoint(id));
+    const input = createOwnerMessageSchema.parse(req.body);
+
+    const replayed = await getReplayedResponse(actor.businessId, (actor.party === "owner" ? actor.userId : "supplier"), idempotencyKey, messageService.createMessageEndpoint(id), input);
     if (replayed) {
       res.status(replayed.status).json(replayed.body);
       return;
     }
 
-    const input = createOwnerMessageSchema.parse(req.body);
     const message = await messageService.createMessage(id, input, actor, idempotencyKey);
     res.status(201).json({ data: message });
   } catch (err) {
@@ -49,7 +50,7 @@ export async function markMessageRead(req: Request, res: Response, next: NextFun
     const { id, messageId } = messageIdParamSchema.parse(req.params);
     const idempotencyKey = req.idempotencyKey as string;
 
-    const replayed = await getReplayedResponse(actor.businessId, idempotencyKey, messageService.markMessageReadEndpoint(id, messageId));
+    const replayed = await getReplayedResponse(actor.businessId, (actor.party === "owner" ? actor.userId : "supplier"), idempotencyKey, messageService.markMessageReadEndpoint(id, messageId), {});
     if (replayed) {
       res.status(replayed.status).json(replayed.body);
       return;

@@ -60,7 +60,7 @@ export async function createSupplierPaymentInstruction(
   await assertActiveSupplier(supplierId, actor.businessId);
 
   const result = await prisma.$transaction(async (tx) => {
-    await claimIdempotencyKey(tx, actor.businessId, idempotencyKey, createSupplierPaymentInstructionEndpoint(supplierId));
+    await claimIdempotencyKey(tx, actor.businessId, actor.userId, idempotencyKey, createSupplierPaymentInstructionEndpoint(supplierId), input);
 
     const existingCount = await tx.supplier_payment_instructions.count({ where: { supplier_id: supplierId } });
 
@@ -101,7 +101,7 @@ export async function createSupplierPaymentInstruction(
     // including to the creator's own response, per the confirmed policy.
     const masked = maskInstructionFields(created);
     const responseBody = JSON.parse(JSON.stringify({ data: masked })) as unknown;
-    await completeIdempotencyKey(tx, actor.businessId, idempotencyKey, createSupplierPaymentInstructionEndpoint(supplierId), 201, responseBody);
+    await completeIdempotencyKey(tx, actor.businessId, actor.userId, idempotencyKey, createSupplierPaymentInstructionEndpoint(supplierId), 201, responseBody);
     return masked;
   });
 
@@ -160,7 +160,7 @@ export async function setDefaultSupplierPaymentInstruction(
   }
 
   const result = await prisma.$transaction(async (tx) => {
-    await claimIdempotencyKey(tx, actor.businessId, idempotencyKey, setDefaultSupplierPaymentInstructionEndpoint(supplierId, instructionId));
+    await claimIdempotencyKey(tx, actor.businessId, actor.userId, idempotencyKey, setDefaultSupplierPaymentInstructionEndpoint(supplierId, instructionId), {});
 
     await tx.supplier_payment_instructions.updateMany({
       where: { supplier_id: supplierId, is_default: true },
@@ -189,7 +189,7 @@ export async function setDefaultSupplierPaymentInstruction(
 
     const masked = maskInstructionFields(updated);
     const responseBody = JSON.parse(JSON.stringify({ data: masked })) as unknown;
-    await completeIdempotencyKey(tx, actor.businessId, idempotencyKey, setDefaultSupplierPaymentInstructionEndpoint(supplierId, instructionId), 200, responseBody);
+    await completeIdempotencyKey(tx, actor.businessId, actor.userId, idempotencyKey, setDefaultSupplierPaymentInstructionEndpoint(supplierId, instructionId), 200, responseBody);
     return masked;
   });
 
@@ -228,7 +228,7 @@ export async function archiveSupplierPaymentInstruction(
   }
 
   const result = await prisma.$transaction(async (tx) => {
-    await claimIdempotencyKey(tx, actor.businessId, idempotencyKey, archiveSupplierPaymentInstructionEndpoint(supplierId, instructionId));
+    await claimIdempotencyKey(tx, actor.businessId, actor.userId, idempotencyKey, archiveSupplierPaymentInstructionEndpoint(supplierId, instructionId), input);
 
     const guarded = await tx.supplier_payment_instructions.updateMany({
       where: { id: instructionId, business_id: actor.businessId, version: input.version, status: "active" },
@@ -252,7 +252,7 @@ export async function archiveSupplierPaymentInstruction(
 
     const masked = maskInstructionFields(updated);
     const responseBody = JSON.parse(JSON.stringify({ data: masked })) as unknown;
-    await completeIdempotencyKey(tx, actor.businessId, idempotencyKey, archiveSupplierPaymentInstructionEndpoint(supplierId, instructionId), 200, responseBody);
+    await completeIdempotencyKey(tx, actor.businessId, actor.userId, idempotencyKey, archiveSupplierPaymentInstructionEndpoint(supplierId, instructionId), 200, responseBody);
     return masked;
   });
 
@@ -288,7 +288,7 @@ export async function restoreSupplierPaymentInstruction(
   }
 
   const result = await prisma.$transaction(async (tx) => {
-    await claimIdempotencyKey(tx, actor.businessId, idempotencyKey, restoreSupplierPaymentInstructionEndpoint(supplierId, instructionId));
+    await claimIdempotencyKey(tx, actor.businessId, actor.userId, idempotencyKey, restoreSupplierPaymentInstructionEndpoint(supplierId, instructionId), input);
 
     const guarded = await tx.supplier_payment_instructions.updateMany({
       where: { id: instructionId, business_id: actor.businessId, version: input.version, status: "archived" },
@@ -312,7 +312,7 @@ export async function restoreSupplierPaymentInstruction(
 
     const masked = maskInstructionFields(updated);
     const responseBody = JSON.parse(JSON.stringify({ data: masked })) as unknown;
-    await completeIdempotencyKey(tx, actor.businessId, idempotencyKey, restoreSupplierPaymentInstructionEndpoint(supplierId, instructionId), 200, responseBody);
+    await completeIdempotencyKey(tx, actor.businessId, actor.userId, idempotencyKey, restoreSupplierPaymentInstructionEndpoint(supplierId, instructionId), 200, responseBody);
     return masked;
   });
 
@@ -345,7 +345,7 @@ export async function revokeSupplierPaymentInstruction(
   }
 
   const result = await prisma.$transaction(async (tx) => {
-    await claimIdempotencyKey(tx, actor.businessId, idempotencyKey, revokeSupplierPaymentInstructionEndpoint(supplierId, instructionId));
+    await claimIdempotencyKey(tx, actor.businessId, actor.userId, idempotencyKey, revokeSupplierPaymentInstructionEndpoint(supplierId, instructionId), input);
 
     const guarded = await tx.supplier_payment_instructions.updateMany({
       where: { id: instructionId, business_id: actor.businessId, version: input.version, status: { not: "revoked" } },
@@ -375,7 +375,7 @@ export async function revokeSupplierPaymentInstruction(
 
     const masked = maskInstructionFields(updated);
     const responseBody = JSON.parse(JSON.stringify({ data: masked })) as unknown;
-    await completeIdempotencyKey(tx, actor.businessId, idempotencyKey, revokeSupplierPaymentInstructionEndpoint(supplierId, instructionId), 200, responseBody);
+    await completeIdempotencyKey(tx, actor.businessId, actor.userId, idempotencyKey, revokeSupplierPaymentInstructionEndpoint(supplierId, instructionId), 200, responseBody);
     return masked;
   });
 

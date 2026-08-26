@@ -79,14 +79,14 @@ export async function createMessage(req: Request, res: Response, next: NextFunct
   try {
     const { purchaseOrder } = getSecureLink(req);
     const idempotencyKey = getIdempotencyKey(req);
+    const input = createSupplierMessageSchema.parse(req.body);
 
-    const replayed = await getReplayedResponse(purchaseOrder.business_id, idempotencyKey, messageService.createMessageEndpoint(purchaseOrder.id));
+    const replayed = await getReplayedResponse(purchaseOrder.business_id, "supplier", idempotencyKey, messageService.createMessageEndpoint(purchaseOrder.id), input);
     if (replayed) {
       res.status(replayed.status).json(replayed.body);
       return;
     }
 
-    const input = createSupplierMessageSchema.parse(req.body);
     const actor = await buildSupplierActor(req, { senderName: input.senderName, senderPhone: input.senderPhone });
     const message = await messageService.createMessage(purchaseOrder.id, input, actor, idempotencyKey);
     res.status(201).json({ data: message });
@@ -114,8 +114,10 @@ export async function markMessageRead(req: Request, res: Response, next: NextFun
 
     const replayed = await getReplayedResponse(
       purchaseOrder.business_id,
+      "supplier",
       idempotencyKey,
-      messageService.markMessageReadEndpoint(purchaseOrder.id, messageId)
+      messageService.markMessageReadEndpoint(purchaseOrder.id, messageId),
+      {}
     );
     if (replayed) {
       res.status(replayed.status).json(replayed.body);
@@ -140,14 +142,14 @@ export async function saveDraftProposal(req: Request, res: Response, next: NextF
   try {
     const { purchaseOrder } = getSecureLink(req);
     const idempotencyKey = getIdempotencyKey(req);
+    const input = draftSupplierProposalSchema.parse(req.body);
 
-    const replayed = await getReplayedResponse(purchaseOrder.business_id, idempotencyKey, proposalService.draftProposalEndpoint(purchaseOrder.id));
+    const replayed = await getReplayedResponse(purchaseOrder.business_id, "supplier", idempotencyKey, proposalService.draftProposalEndpoint(purchaseOrder.id), input);
     if (replayed) {
       res.status(replayed.status).json(replayed.body);
       return;
     }
 
-    const input = draftSupplierProposalSchema.parse(req.body);
     const actor = await buildSupplierActor(req, { senderName: input.senderName, senderPhone: input.senderPhone });
     const proposal = await proposalService.saveDraft(purchaseOrder.id, input, actor, idempotencyKey);
     res.status(200).json({ data: proposal });
@@ -161,18 +163,26 @@ export async function submitProposal(req: Request, res: Response, next: NextFunc
     const { purchaseOrder } = getSecureLink(req);
     const { proposalId } = proposalIdParamSchema.parse(req.params);
     const idempotencyKey = getIdempotencyKey(req);
+    const input = submitSupplierProposalSchema.parse(req.body);
 
+    // Batch 8 Session A bugfix: hash {version} only, matching exactly what
+    // submitProposal's own claimIdempotencyKey call hashes -- the shared
+    // service function has no way to see senderName/senderPhone (owner-side
+    // callers never send them), so hashing the full input here (which
+    // includes them) would never match the service's own stored hash,
+    // causing a false 409 on a legitimate replay.
     const replayed = await getReplayedResponse(
       purchaseOrder.business_id,
+      "supplier",
       idempotencyKey,
-      proposalService.submitProposalEndpoint(purchaseOrder.id, proposalId)
+      proposalService.submitProposalEndpoint(purchaseOrder.id, proposalId),
+      { version: input.version }
     );
     if (replayed) {
       res.status(replayed.status).json(replayed.body);
       return;
     }
 
-    const input = submitSupplierProposalSchema.parse(req.body);
     const actor = await buildSupplierActor(req, { senderName: input.senderName, senderPhone: input.senderPhone });
     const proposal = await proposalService.submitProposal(purchaseOrder.id, proposalId, input.version, actor, idempotencyKey);
     res.status(200).json({ data: proposal });
@@ -190,18 +200,20 @@ export async function rejectProposal(req: Request, res: Response, next: NextFunc
     const { purchaseOrder } = getSecureLink(req);
     const { proposalId } = proposalIdParamSchema.parse(req.params);
     const idempotencyKey = getIdempotencyKey(req);
+    const input = rejectSupplierProposalSchema.parse(req.body);
 
     const replayed = await getReplayedResponse(
       purchaseOrder.business_id,
+      "supplier",
       idempotencyKey,
-      proposalService.rejectProposalEndpoint(purchaseOrder.id, proposalId)
+      proposalService.rejectProposalEndpoint(purchaseOrder.id, proposalId),
+      input
     );
     if (replayed) {
       res.status(replayed.status).json(replayed.body);
       return;
     }
 
-    const input = rejectSupplierProposalSchema.parse(req.body);
     const actor = await buildSupplierActor(req, { senderName: input.senderName, senderPhone: input.senderPhone });
     const proposal = await proposalService.rejectProposal(purchaseOrder.id, proposalId, { reason: input.reason }, actor, idempotencyKey);
     res.status(200).json({ data: proposal });
@@ -225,14 +237,14 @@ export async function uploadAttachment(req: Request, res: Response, next: NextFu
   try {
     const { purchaseOrder } = getSecureLink(req);
     const idempotencyKey = getIdempotencyKey(req);
+    const input = uploadSupplierAttachmentSchema.parse(req.body);
 
-    const replayed = await getReplayedResponse(purchaseOrder.business_id, idempotencyKey, attachmentService.uploadAttachmentEndpoint(purchaseOrder.id));
+    const replayed = await getReplayedResponse(purchaseOrder.business_id, "supplier", idempotencyKey, attachmentService.uploadAttachmentEndpoint(purchaseOrder.id), input);
     if (replayed) {
       res.status(replayed.status).json(replayed.body);
       return;
     }
 
-    const input = uploadSupplierAttachmentSchema.parse(req.body);
     const actor = await buildSupplierActor(req, { senderName: input.senderName, senderPhone: input.senderPhone });
     const attachment = await attachmentService.uploadAttachment(purchaseOrder.id, input, actor, idempotencyKey);
     res.status(201).json({ data: attachment });

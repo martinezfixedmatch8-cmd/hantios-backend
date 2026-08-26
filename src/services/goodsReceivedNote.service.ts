@@ -75,7 +75,7 @@ export async function createGoodsReceivedNote(
   const business = await prisma.businesses.findUniqueOrThrow({ where: { id: actor.businessId } });
 
   const grn = await prisma.$transaction(async (tx) => {
-    await claimIdempotencyKey(tx, actor.businessId, idempotencyKey, createGoodsReceivedNoteEndpoint(purchaseOrderId));
+    await claimIdempotencyKey(tx, actor.businessId, actor.userId, idempotencyKey, createGoodsReceivedNoteEndpoint(purchaseOrderId), input);
 
     const grnNumber = await getNextGrnNumber(tx, actor.businessId);
 
@@ -188,7 +188,7 @@ export async function createGoodsReceivedNote(
 
     const withItems = await tx.goods_received_notes.findUniqueOrThrow({ where: { id: createdGrn.id }, include: GRN_INCLUDE });
     const responseBody = JSON.parse(JSON.stringify({ data: withItems })) as unknown;
-    await completeIdempotencyKey(tx, actor.businessId, idempotencyKey, createGoodsReceivedNoteEndpoint(purchaseOrderId), 201, responseBody);
+    await completeIdempotencyKey(tx, actor.businessId, actor.userId, idempotencyKey, createGoodsReceivedNoteEndpoint(purchaseOrderId), 201, responseBody);
 
     return { grn: withItems, newStatus, grnReceipt };
   }, GRN_TRANSACTION_OPTIONS);

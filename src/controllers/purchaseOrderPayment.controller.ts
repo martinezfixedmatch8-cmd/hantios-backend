@@ -19,18 +19,20 @@ export async function recordPurchaseOrderPayment(req: Request, res: Response, ne
     const actor = getActor(req);
     const { id } = idParamSchema.parse(req.params);
     const idempotencyKey = getIdempotencyKey(req);
+    const input = recordPurchaseOrderPaymentSchema.parse(req.body);
 
     const replayed = await getReplayedResponse(
       actor.businessId,
+      actor.userId,
       idempotencyKey,
-      purchaseOrderPaymentService.recordPurchaseOrderPaymentEndpoint(id)
+      purchaseOrderPaymentService.recordPurchaseOrderPaymentEndpoint(id),
+      input
     );
     if (replayed) {
       res.status(replayed.status).json(replayed.body);
       return;
     }
 
-    const input = recordPurchaseOrderPaymentSchema.parse(req.body);
     const result = await purchaseOrderPaymentService.recordPurchaseOrderPayment(id, input, actor, idempotencyKey);
     res.status(201).json({ data: result });
   } catch (err) {

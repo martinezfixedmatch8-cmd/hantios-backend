@@ -78,7 +78,7 @@ export const CREATE_COMMISSION_ADJUSTMENT_ENDPOINT = "POST /commission-adjustmen
 // for audit/reconciliation; not automatically netted into any future
 // payroll generation run this session.
 export async function createCommissionAdjustment(input: CreateCommissionAdjustmentInput, actor: Actor, idempotencyKey: string) {
-  const replayed = await getReplayedResponse(actor.businessId, idempotencyKey, CREATE_COMMISSION_ADJUSTMENT_ENDPOINT);
+  const replayed = await getReplayedResponse(actor.businessId, actor.userId, idempotencyKey, CREATE_COMMISSION_ADJUSTMENT_ENDPOINT, input);
   if (replayed) {
     return (replayed.body as { data: Awaited<ReturnType<typeof prisma.commission_adjustments.create>> }).data;
   }
@@ -97,7 +97,7 @@ export async function createCommissionAdjustment(input: CreateCommissionAdjustme
   }
 
   const adjustment = await prisma.$transaction(async (tx) => {
-    await claimIdempotencyKey(tx, actor.businessId, idempotencyKey, CREATE_COMMISSION_ADJUSTMENT_ENDPOINT);
+    await claimIdempotencyKey(tx, actor.businessId, actor.userId, idempotencyKey, CREATE_COMMISSION_ADJUSTMENT_ENDPOINT, input);
 
     const created = await tx.commission_adjustments.create({
       data: {
@@ -124,7 +124,7 @@ export async function createCommissionAdjustment(input: CreateCommissionAdjustme
     });
 
     const responseBody = JSON.parse(JSON.stringify({ data: created })) as unknown;
-    await completeIdempotencyKey(tx, actor.businessId, idempotencyKey, CREATE_COMMISSION_ADJUSTMENT_ENDPOINT, 201, responseBody);
+    await completeIdempotencyKey(tx, actor.businessId, actor.userId, idempotencyKey, CREATE_COMMISSION_ADJUSTMENT_ENDPOINT, 201, responseBody);
 
     return created;
   });

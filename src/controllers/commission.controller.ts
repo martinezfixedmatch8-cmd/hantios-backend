@@ -14,13 +14,14 @@ export async function createCommissionAdjustment(req: Request, res: Response, ne
     const actor = getActor(req);
     const idempotencyKey = req.idempotencyKey as string; // guaranteed by requireIdempotencyKey
 
-    const replayed = await getReplayedResponse(actor.businessId, idempotencyKey, commissionService.CREATE_COMMISSION_ADJUSTMENT_ENDPOINT);
+    const input = createCommissionAdjustmentSchema.parse(req.body);
+
+    const replayed = await getReplayedResponse(actor.businessId, actor.userId, idempotencyKey, commissionService.CREATE_COMMISSION_ADJUSTMENT_ENDPOINT, input);
     if (replayed) {
       res.status(replayed.status).json(replayed.body);
       return;
     }
 
-    const input = createCommissionAdjustmentSchema.parse(req.body);
     const result = await commissionService.createCommissionAdjustment(input, actor, idempotencyKey);
     res.status(201).json({ data: result });
   } catch (err) {

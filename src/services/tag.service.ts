@@ -29,7 +29,7 @@ function isP2002(err: unknown): boolean {
 // concurrency backstop.
 export async function createTag(input: CreateTagInput, actor: Actor, idempotencyKey: string) {
   return prisma.$transaction(async (tx) => {
-    await claimIdempotencyKey(tx, actor.businessId, idempotencyKey, CREATE_TAG_ENDPOINT);
+    await claimIdempotencyKey(tx, actor.businessId, actor.userId, idempotencyKey, CREATE_TAG_ENDPOINT, input);
 
     const existing = await tx.tags.findFirst({
       where: { business_id: actor.businessId, name: input.name, status: "active" },
@@ -56,7 +56,7 @@ export async function createTag(input: CreateTagInput, actor: Actor, idempotency
     });
 
     const responseBody = JSON.parse(JSON.stringify({ data: tag })) as unknown;
-    await completeIdempotencyKey(tx, actor.businessId, idempotencyKey, CREATE_TAG_ENDPOINT, 201, responseBody);
+    await completeIdempotencyKey(tx, actor.businessId, actor.userId, idempotencyKey, CREATE_TAG_ENDPOINT, 201, responseBody);
     return tag;
   });
 }
@@ -126,13 +126,13 @@ export async function updateTag(id: string, input: UpdateTagInput, actor: Actor)
 
 export async function archiveTag(id: string, input: ArchiveTagInput, actor: Actor, idempotencyKey: string) {
   return prisma.$transaction(async (tx) => {
-    await claimIdempotencyKey(tx, actor.businessId, idempotencyKey, archiveTagEndpoint(id));
+    await claimIdempotencyKey(tx, actor.businessId, actor.userId, idempotencyKey, archiveTagEndpoint(id), input);
 
     const tag = await getOwned(tx.tags.findUnique({ where: { id } }), actor.businessId, "Tag");
 
     if (tag.status === "archived") {
       const responseBody = JSON.parse(JSON.stringify({ data: tag })) as unknown;
-      await completeIdempotencyKey(tx, actor.businessId, idempotencyKey, archiveTagEndpoint(id), 200, responseBody);
+      await completeIdempotencyKey(tx, actor.businessId, actor.userId, idempotencyKey, archiveTagEndpoint(id), 200, responseBody);
       return tag;
     }
 
@@ -155,7 +155,7 @@ export async function archiveTag(id: string, input: ArchiveTagInput, actor: Acto
     });
 
     const responseBody = JSON.parse(JSON.stringify({ data: updated })) as unknown;
-    await completeIdempotencyKey(tx, actor.businessId, idempotencyKey, archiveTagEndpoint(id), 200, responseBody);
+    await completeIdempotencyKey(tx, actor.businessId, actor.userId, idempotencyKey, archiveTagEndpoint(id), 200, responseBody);
     return updated;
   });
 }
@@ -165,13 +165,13 @@ export async function archiveTag(id: string, input: ArchiveTagInput, actor: Acto
 // active-only-reuse decision) -- P2002 converts that race to a clean 409.
 export async function restoreTag(id: string, input: RestoreTagInput, actor: Actor, idempotencyKey: string) {
   return prisma.$transaction(async (tx) => {
-    await claimIdempotencyKey(tx, actor.businessId, idempotencyKey, restoreTagEndpoint(id));
+    await claimIdempotencyKey(tx, actor.businessId, actor.userId, idempotencyKey, restoreTagEndpoint(id), input);
 
     const tag = await getOwned(tx.tags.findUnique({ where: { id } }), actor.businessId, "Tag");
 
     if (tag.status === "active") {
       const responseBody = JSON.parse(JSON.stringify({ data: tag })) as unknown;
-      await completeIdempotencyKey(tx, actor.businessId, idempotencyKey, restoreTagEndpoint(id), 200, responseBody);
+      await completeIdempotencyKey(tx, actor.businessId, actor.userId, idempotencyKey, restoreTagEndpoint(id), 200, responseBody);
       return tag;
     }
 
@@ -200,7 +200,7 @@ export async function restoreTag(id: string, input: RestoreTagInput, actor: Acto
     });
 
     const responseBody = JSON.parse(JSON.stringify({ data: updated })) as unknown;
-    await completeIdempotencyKey(tx, actor.businessId, idempotencyKey, restoreTagEndpoint(id), 200, responseBody);
+    await completeIdempotencyKey(tx, actor.businessId, actor.userId, idempotencyKey, restoreTagEndpoint(id), 200, responseBody);
     return updated;
   });
 }

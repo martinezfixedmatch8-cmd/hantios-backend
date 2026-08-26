@@ -26,13 +26,14 @@ export async function createPurchaseOrder(req: Request, res: Response, next: Nex
     const actor = getActor(req);
     const idempotencyKey = getIdempotencyKey(req);
 
-    const replayed = await getReplayedResponse(actor.businessId, idempotencyKey, purchaseOrderService.CREATE_PO_ENDPOINT);
+    const input = createPurchaseOrderSchema.parse(req.body);
+
+    const replayed = await getReplayedResponse(actor.businessId, actor.userId, idempotencyKey, purchaseOrderService.CREATE_PO_ENDPOINT, input);
     if (replayed) {
       res.status(replayed.status).json(replayed.body);
       return;
     }
 
-    const input = createPurchaseOrderSchema.parse(req.body);
     const po = await purchaseOrderService.createPurchaseOrder(input, actor, idempotencyKey);
     res.status(201).json({ data: po });
   } catch (err) {
@@ -80,13 +81,14 @@ export async function sendPurchaseOrder(req: Request, res: Response, next: NextF
     const { id } = idParamSchema.parse(req.params);
     const idempotencyKey = getIdempotencyKey(req);
 
-    const replayed = await getReplayedResponse(actor.businessId, idempotencyKey, purchaseOrderService.sendPurchaseOrderEndpoint(id));
+    const input = sendPurchaseOrderSchema.parse(req.body);
+
+    const replayed = await getReplayedResponse(actor.businessId, actor.userId, idempotencyKey, purchaseOrderService.sendPurchaseOrderEndpoint(id), input);
     if (replayed) {
       res.status(replayed.status).json(replayed.body);
       return;
     }
 
-    const input = sendPurchaseOrderSchema.parse(req.body);
     const po = await purchaseOrderService.sendPurchaseOrder(id, input, actor, idempotencyKey);
     res.status(200).json({ data: po });
   } catch (err) {
@@ -100,13 +102,14 @@ export async function confirmPurchaseOrder(req: Request, res: Response, next: Ne
     const { id } = idParamSchema.parse(req.params);
     const idempotencyKey = getIdempotencyKey(req);
 
-    const replayed = await getReplayedResponse(actor.businessId, idempotencyKey, purchaseOrderService.confirmPurchaseOrderEndpoint(id));
+    const input = confirmPurchaseOrderSchema.parse(req.body);
+
+    const replayed = await getReplayedResponse(actor.businessId, actor.userId, idempotencyKey, purchaseOrderService.confirmPurchaseOrderEndpoint(id), input);
     if (replayed) {
       res.status(replayed.status).json(replayed.body);
       return;
     }
 
-    const input = confirmPurchaseOrderSchema.parse(req.body);
     const po = await purchaseOrderService.confirmPurchaseOrder(id, input, actor, idempotencyKey);
     res.status(200).json({ data: po });
   } catch (err) {
@@ -120,13 +123,14 @@ export async function cancelPurchaseOrder(req: Request, res: Response, next: Nex
     const { id } = idParamSchema.parse(req.params);
     const idempotencyKey = getIdempotencyKey(req);
 
-    const replayed = await getReplayedResponse(actor.businessId, idempotencyKey, purchaseOrderService.cancelPurchaseOrderEndpoint(id));
+    const input = cancelPurchaseOrderSchema.parse(req.body);
+
+    const replayed = await getReplayedResponse(actor.businessId, actor.userId, idempotencyKey, purchaseOrderService.cancelPurchaseOrderEndpoint(id), input);
     if (replayed) {
       res.status(replayed.status).json(replayed.body);
       return;
     }
 
-    const input = cancelPurchaseOrderSchema.parse(req.body);
     const po = await purchaseOrderService.cancelPurchaseOrder(id, input, actor, idempotencyKey);
     res.status(200).json({ data: po });
   } catch (err) {

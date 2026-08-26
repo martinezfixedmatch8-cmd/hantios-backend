@@ -29,13 +29,14 @@ export async function createSupplierPaymentInstruction(req: Request, res: Respon
     const { supplierId } = supplierIdParamSchema.parse(req.params);
     const idempotencyKey = getIdempotencyKey(req);
 
-    const replayed = await getReplayedResponse(actor.businessId, idempotencyKey, service.createSupplierPaymentInstructionEndpoint(supplierId));
+    const input = createSupplierPaymentInstructionSchema.parse(req.body);
+
+    const replayed = await getReplayedResponse(actor.businessId, actor.userId, idempotencyKey, service.createSupplierPaymentInstructionEndpoint(supplierId), input);
     if (replayed) {
       res.status(replayed.status).json(replayed.body);
       return;
     }
 
-    const input = createSupplierPaymentInstructionSchema.parse(req.body);
     const result = await service.createSupplierPaymentInstruction(supplierId, input, actor, idempotencyKey);
     res.status(201).json({ data: result });
   } catch (err) {
@@ -61,7 +62,7 @@ export async function setDefaultSupplierPaymentInstruction(req: Request, res: Re
     const { supplierId, id } = instructionIdParamSchema.parse(req.params);
     const idempotencyKey = getIdempotencyKey(req);
 
-    const replayed = await getReplayedResponse(actor.businessId, idempotencyKey, service.setDefaultSupplierPaymentInstructionEndpoint(supplierId, id));
+    const replayed = await getReplayedResponse(actor.businessId, actor.userId, idempotencyKey, service.setDefaultSupplierPaymentInstructionEndpoint(supplierId, id), {});
     if (replayed) {
       res.status(replayed.status).json(replayed.body);
       return;
@@ -80,13 +81,14 @@ export async function archiveSupplierPaymentInstruction(req: Request, res: Respo
     const { supplierId, id } = instructionIdParamSchema.parse(req.params);
     const idempotencyKey = getIdempotencyKey(req);
 
-    const replayed = await getReplayedResponse(actor.businessId, idempotencyKey, service.archiveSupplierPaymentInstructionEndpoint(supplierId, id));
+    const input = archiveSupplierPaymentInstructionSchema.parse(req.body);
+
+    const replayed = await getReplayedResponse(actor.businessId, actor.userId, idempotencyKey, service.archiveSupplierPaymentInstructionEndpoint(supplierId, id), input);
     if (replayed) {
       res.status(replayed.status).json(replayed.body);
       return;
     }
 
-    const input = archiveSupplierPaymentInstructionSchema.parse(req.body);
     const result = await service.archiveSupplierPaymentInstruction(supplierId, id, input, actor, idempotencyKey);
     res.status(200).json({ data: result });
   } catch (err) {
@@ -100,13 +102,14 @@ export async function restoreSupplierPaymentInstruction(req: Request, res: Respo
     const { supplierId, id } = instructionIdParamSchema.parse(req.params);
     const idempotencyKey = getIdempotencyKey(req);
 
-    const replayed = await getReplayedResponse(actor.businessId, idempotencyKey, service.restoreSupplierPaymentInstructionEndpoint(supplierId, id));
+    const input = restoreSupplierPaymentInstructionSchema.parse(req.body);
+
+    const replayed = await getReplayedResponse(actor.businessId, actor.userId, idempotencyKey, service.restoreSupplierPaymentInstructionEndpoint(supplierId, id), input);
     if (replayed) {
       res.status(replayed.status).json(replayed.body);
       return;
     }
 
-    const input = restoreSupplierPaymentInstructionSchema.parse(req.body);
     const result = await service.restoreSupplierPaymentInstruction(supplierId, id, input, actor, idempotencyKey);
     res.status(200).json({ data: result });
   } catch (err) {
@@ -120,13 +123,14 @@ export async function revokeSupplierPaymentInstruction(req: Request, res: Respon
     const { supplierId, id } = instructionIdParamSchema.parse(req.params);
     const idempotencyKey = getIdempotencyKey(req);
 
-    const replayed = await getReplayedResponse(actor.businessId, idempotencyKey, service.revokeSupplierPaymentInstructionEndpoint(supplierId, id));
+    const input = revokeSupplierPaymentInstructionSchema.parse(req.body);
+
+    const replayed = await getReplayedResponse(actor.businessId, actor.userId, idempotencyKey, service.revokeSupplierPaymentInstructionEndpoint(supplierId, id), input);
     if (replayed) {
       res.status(replayed.status).json(replayed.body);
       return;
     }
 
-    const input = revokeSupplierPaymentInstructionSchema.parse(req.body);
     const result = await service.revokeSupplierPaymentInstruction(supplierId, id, input, actor, idempotencyKey);
     res.status(200).json({ data: result });
   } catch (err) {

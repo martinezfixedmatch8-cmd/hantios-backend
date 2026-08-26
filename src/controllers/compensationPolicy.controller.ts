@@ -19,13 +19,14 @@ export async function createCompensationPolicy(req: Request, res: Response, next
     const actor = getActor(req);
     const idempotencyKey = req.idempotencyKey as string; // guaranteed by requireIdempotencyKey
 
-    const replayed = await getReplayedResponse(actor.businessId, idempotencyKey, policyService.CREATE_COMPENSATION_POLICY_ENDPOINT);
+    const input = createCompensationPolicySchema.parse(req.body);
+
+    const replayed = await getReplayedResponse(actor.businessId, actor.userId, idempotencyKey, policyService.CREATE_COMPENSATION_POLICY_ENDPOINT, input);
     if (replayed) {
       res.status(replayed.status).json(replayed.body);
       return;
     }
 
-    const input = createCompensationPolicySchema.parse(req.body);
     const result = await policyService.createCompensationPolicy(input, actor, idempotencyKey);
     res.status(201).json({ data: result });
   } catch (err) {

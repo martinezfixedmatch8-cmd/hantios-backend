@@ -25,13 +25,14 @@ export async function createEmployee(req: Request, res: Response, next: NextFunc
     const actor = getActor(req);
     const idempotencyKey = getIdempotencyKey(req);
 
-    const replayed = await getReplayedResponse(actor.businessId, idempotencyKey, employeeService.CREATE_EMPLOYEE_ENDPOINT);
+    const input = createEmployeeSchema.parse(req.body);
+
+    const replayed = await getReplayedResponse(actor.businessId, actor.userId, idempotencyKey, employeeService.CREATE_EMPLOYEE_ENDPOINT, input);
     if (replayed) {
       res.status(replayed.status).json(replayed.body);
       return;
     }
 
-    const input = createEmployeeSchema.parse(req.body);
     const employee = await employeeService.createEmployee(input, actor, idempotencyKey);
     res.status(201).json({ data: employee });
   } catch (err) {
@@ -79,13 +80,14 @@ export async function archiveEmployee(req: Request, res: Response, next: NextFun
     const { id } = idParamSchema.parse(req.params);
     const idempotencyKey = getIdempotencyKey(req);
 
-    const replayed = await getReplayedResponse(actor.businessId, idempotencyKey, employeeService.archiveEmployeeEndpoint(id));
+    const input = archiveEmployeeSchema.parse(req.body);
+
+    const replayed = await getReplayedResponse(actor.businessId, actor.userId, idempotencyKey, employeeService.archiveEmployeeEndpoint(id), input);
     if (replayed) {
       res.status(replayed.status).json(replayed.body);
       return;
     }
 
-    const input = archiveEmployeeSchema.parse(req.body);
     const employee = await employeeService.archiveEmployee(id, input, actor, idempotencyKey);
     res.status(200).json({ data: employee });
   } catch (err) {

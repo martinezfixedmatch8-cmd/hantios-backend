@@ -46,7 +46,7 @@ export async function uploadShipmentAttachment(
   const uploaderName = actor.party === "owner" ? actor.userName : actor.name;
 
   const result = await prisma.$transaction(async (tx) => {
-    await claimIdempotencyKey(tx, actor.businessId, idempotencyKey, uploadShipmentAttachmentEndpoint(poId, shipmentId));
+    await claimIdempotencyKey(tx, actor.businessId, (actor.party === "owner" ? actor.userId : "supplier"), idempotencyKey, uploadShipmentAttachmentEndpoint(poId, shipmentId), input);
 
     const registered = await getStorageProvider().registerUpload({
       businessId: actor.businessId,
@@ -83,7 +83,7 @@ export async function uploadShipmentAttachment(
     });
 
     const responseBody = JSON.parse(JSON.stringify({ data: created })) as unknown;
-    await completeIdempotencyKey(tx, actor.businessId, idempotencyKey, uploadShipmentAttachmentEndpoint(poId, shipmentId), 201, responseBody);
+    await completeIdempotencyKey(tx, actor.businessId, (actor.party === "owner" ? actor.userId : "supplier"), idempotencyKey, uploadShipmentAttachmentEndpoint(poId, shipmentId), 201, responseBody);
     return created;
   }, ATTACHMENT_TRANSACTION_OPTIONS);
 

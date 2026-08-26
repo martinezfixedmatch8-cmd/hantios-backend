@@ -21,13 +21,14 @@ export async function createPosition(req: Request, res: Response, next: NextFunc
     const actor = getActor(req);
     const idempotencyKey = req.idempotencyKey as string;
 
-    const replayed = await getReplayedResponse(actor.businessId, idempotencyKey, positionService.CREATE_POSITION_ENDPOINT);
+    const input = createPositionSchema.parse(req.body);
+
+    const replayed = await getReplayedResponse(actor.businessId, actor.userId, idempotencyKey, positionService.CREATE_POSITION_ENDPOINT, input);
     if (replayed) {
       res.status(replayed.status).json(replayed.body);
       return;
     }
 
-    const input = createPositionSchema.parse(req.body);
     const position = await positionService.createPosition(input, actor, idempotencyKey);
     res.status(201).json({ data: position });
   } catch (err) {
@@ -75,13 +76,14 @@ export async function archivePosition(req: Request, res: Response, next: NextFun
     const { id } = idParamSchema.parse(req.params);
     const idempotencyKey = req.idempotencyKey as string;
 
-    const replayed = await getReplayedResponse(actor.businessId, idempotencyKey, positionService.archivePositionEndpoint(id));
+    const input = archivePositionSchema.parse(req.body);
+
+    const replayed = await getReplayedResponse(actor.businessId, actor.userId, idempotencyKey, positionService.archivePositionEndpoint(id), input);
     if (replayed) {
       res.status(replayed.status).json(replayed.body);
       return;
     }
 
-    const input = archivePositionSchema.parse(req.body);
     const position = await positionService.archivePosition(id, input, actor, idempotencyKey);
     res.status(200).json({ data: position });
   } catch (err) {
@@ -95,13 +97,14 @@ export async function restorePosition(req: Request, res: Response, next: NextFun
     const { id } = idParamSchema.parse(req.params);
     const idempotencyKey = req.idempotencyKey as string;
 
-    const replayed = await getReplayedResponse(actor.businessId, idempotencyKey, positionService.restorePositionEndpoint(id));
+    const input = restorePositionSchema.parse(req.body);
+
+    const replayed = await getReplayedResponse(actor.businessId, actor.userId, idempotencyKey, positionService.restorePositionEndpoint(id), input);
     if (replayed) {
       res.status(replayed.status).json(replayed.body);
       return;
     }
 
-    const input = restorePositionSchema.parse(req.body);
     const position = await positionService.restorePosition(id, input, actor, idempotencyKey);
     res.status(200).json({ data: position });
   } catch (err) {

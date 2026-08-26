@@ -19,7 +19,7 @@ export async function regenerateSecureLink(req: Request, res: Response, next: Ne
     const { id } = idParamSchema.parse(req.params);
     const idempotencyKey = getIdempotencyKey(req);
 
-    const replayed = await getReplayedResponse(actor.businessId, idempotencyKey, poSecureLinkService.regenerateSecureLinkEndpoint(id));
+    const replayed = await getReplayedResponse(actor.businessId, actor.userId, idempotencyKey, poSecureLinkService.regenerateSecureLinkEndpoint(id), {});
     if (replayed) {
       res.status(replayed.status).json(replayed.body);
       return;
@@ -38,7 +38,7 @@ export async function revokeSecureLink(req: Request, res: Response, next: NextFu
     const { id } = idParamSchema.parse(req.params);
     const idempotencyKey = getIdempotencyKey(req);
 
-    const replayed = await getReplayedResponse(actor.businessId, idempotencyKey, poSecureLinkService.revokeSecureLinkEndpoint(id));
+    const replayed = await getReplayedResponse(actor.businessId, actor.userId, idempotencyKey, poSecureLinkService.revokeSecureLinkEndpoint(id), {});
     if (replayed) {
       res.status(replayed.status).json(replayed.body);
       return;

@@ -32,7 +32,7 @@ export const archiveSupplierEndpoint = (id: string): string => `POST /suppliers/
 
 export async function createSupplier(input: CreateSupplierInput, actor: Actor, idempotencyKey: string) {
   const supplier = await prisma.$transaction(async (tx) => {
-    await claimIdempotencyKey(tx, actor.businessId, idempotencyKey, CREATE_SUPPLIER_ENDPOINT);
+    await claimIdempotencyKey(tx, actor.businessId, actor.userId, idempotencyKey, CREATE_SUPPLIER_ENDPOINT, input);
 
     const created = await tx.suppliers.create({
       data: {
@@ -59,7 +59,7 @@ export async function createSupplier(input: CreateSupplierInput, actor: Actor, i
     });
 
     const responseBody = JSON.parse(JSON.stringify({ data: created })) as unknown;
-    await completeIdempotencyKey(tx, actor.businessId, idempotencyKey, CREATE_SUPPLIER_ENDPOINT, 201, responseBody);
+    await completeIdempotencyKey(tx, actor.businessId, actor.userId, idempotencyKey, CREATE_SUPPLIER_ENDPOINT, 201, responseBody);
 
     return created;
   });
@@ -147,7 +147,7 @@ export async function archiveSupplier(id: string, input: ArchiveSupplierInput, a
   if (supplier.status === "archived") throw badRequest("Supplier is already archived");
 
   const result = await prisma.$transaction(async (tx) => {
-    await claimIdempotencyKey(tx, actor.businessId, idempotencyKey, archiveSupplierEndpoint(id));
+    await claimIdempotencyKey(tx, actor.businessId, actor.userId, idempotencyKey, archiveSupplierEndpoint(id), input);
 
     const updateResult = await tx.suppliers.updateMany({
       where: { id, business_id: actor.businessId, version: input.version, status: "active" },
@@ -170,7 +170,7 @@ export async function archiveSupplier(id: string, input: ArchiveSupplierInput, a
 
     const updated = await tx.suppliers.findUniqueOrThrow({ where: { id } });
     const responseBody = JSON.parse(JSON.stringify({ data: updated })) as unknown;
-    await completeIdempotencyKey(tx, actor.businessId, idempotencyKey, archiveSupplierEndpoint(id), 200, responseBody);
+    await completeIdempotencyKey(tx, actor.businessId, actor.userId, idempotencyKey, archiveSupplierEndpoint(id), 200, responseBody);
     return updated;
   });
 
