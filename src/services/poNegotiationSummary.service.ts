@@ -54,7 +54,14 @@ export async function setDeadline(poId: string, respondBy: Date | null, version:
   const po = await getOwned(prisma.purchase_orders.findUnique({ where: { id: poId } }), actor.businessId, "Purchase order");
 
   const result = await prisma.$transaction(async (tx) => {
-    await claimIdempotencyKey(tx, actor.businessId, idempotencyKey, setDeadlineEndpoint(poId));
+    // Batch 8 Session A bugfix: must hash the SAME normalized shape the
+    // controller hashes (see its own comment) -- an earlier version hashed
+    // {} here, a genuine mismatch against the controller's real payload
+    // that caused a false payload-mismatch 409 on a legitimate replay.
+    await claimIdempotencyKey(tx, actor.businessId, actor.userId, idempotencyKey, setDeadlineEndpoint(poId), {
+      version,
+      respondBy: respondBy ? respondBy.toISOString() : null,
+    });
 
     const guarded = await tx.purchase_orders.updateMany({
       where: { id: poId, business_id: actor.businessId, version },
@@ -75,7 +82,7 @@ export async function setDeadline(poId: string, respondBy: Date | null, version:
 
     const fresh = await tx.purchase_orders.findUniqueOrThrow({ where: { id: poId } });
     const responseBody = JSON.parse(JSON.stringify({ data: fresh })) as unknown;
-    await completeIdempotencyKey(tx, actor.businessId, idempotencyKey, setDeadlineEndpoint(poId), 200, responseBody);
+    await completeIdempotencyKey(tx, actor.businessId, actor.userId, idempotencyKey, setDeadlineEndpoint(poId), 200, responseBody);
     return fresh;
   }, SUMMARY_TRANSACTION_OPTIONS);
 

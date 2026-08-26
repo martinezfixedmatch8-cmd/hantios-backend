@@ -21,13 +21,14 @@ export async function createPaymentMethod(req: Request, res: Response, next: Nex
     const actor = getActor(req);
     const idempotencyKey = req.idempotencyKey as string;
 
-    const replayed = await getReplayedResponse(actor.businessId, idempotencyKey, paymentMethodService.CREATE_PAYMENT_METHOD_ENDPOINT);
+    const input = createPaymentMethodSchema.parse(req.body);
+
+    const replayed = await getReplayedResponse(actor.businessId, actor.userId, idempotencyKey, paymentMethodService.CREATE_PAYMENT_METHOD_ENDPOINT, input);
     if (replayed) {
       res.status(replayed.status).json(replayed.body);
       return;
     }
 
-    const input = createPaymentMethodSchema.parse(req.body);
     const paymentMethod = await paymentMethodService.createPaymentMethod(input, actor, idempotencyKey);
     res.status(201).json({ data: paymentMethod });
   } catch (err) {
@@ -75,13 +76,14 @@ export async function archivePaymentMethod(req: Request, res: Response, next: Ne
     const { id } = idParamSchema.parse(req.params);
     const idempotencyKey = req.idempotencyKey as string;
 
-    const replayed = await getReplayedResponse(actor.businessId, idempotencyKey, paymentMethodService.archivePaymentMethodEndpoint(id));
+    const input = archivePaymentMethodSchema.parse(req.body);
+
+    const replayed = await getReplayedResponse(actor.businessId, actor.userId, idempotencyKey, paymentMethodService.archivePaymentMethodEndpoint(id), input);
     if (replayed) {
       res.status(replayed.status).json(replayed.body);
       return;
     }
 
-    const input = archivePaymentMethodSchema.parse(req.body);
     const paymentMethod = await paymentMethodService.archivePaymentMethod(id, input, actor, idempotencyKey);
     res.status(200).json({ data: paymentMethod });
   } catch (err) {
@@ -95,13 +97,14 @@ export async function restorePaymentMethod(req: Request, res: Response, next: Ne
     const { id } = idParamSchema.parse(req.params);
     const idempotencyKey = req.idempotencyKey as string;
 
-    const replayed = await getReplayedResponse(actor.businessId, idempotencyKey, paymentMethodService.restorePaymentMethodEndpoint(id));
+    const input = restorePaymentMethodSchema.parse(req.body);
+
+    const replayed = await getReplayedResponse(actor.businessId, actor.userId, idempotencyKey, paymentMethodService.restorePaymentMethodEndpoint(id), input);
     if (replayed) {
       res.status(replayed.status).json(replayed.body);
       return;
     }
 
-    const input = restorePaymentMethodSchema.parse(req.body);
     const paymentMethod = await paymentMethodService.restorePaymentMethod(id, input, actor, idempotencyKey);
     res.status(200).json({ data: paymentMethod });
   } catch (err) {

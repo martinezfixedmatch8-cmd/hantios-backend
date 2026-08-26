@@ -712,15 +712,85 @@ model expense_tags {
 model idempotency_keys {
   id              String     @id
   business_id     String
+  // Batch 8 Session A (HNT-IDEMP-001) -- actor scoping, added so two
+  // different users in the same business can never collide on an
+  // identically-valued client-generated key at the same endpoint. Real
+  // users.id for every JWT-authenticated caller; a fixed literal
+  // ("supplier") for the PO Negotiation/Shipment supplier portal, which has
+  // no users row to key off -- safe because every one of those routes'
+  // own endpoint strings is already PO-scoped (see poNegotiation*.service.ts),
+  // so a flat literal can never cross-contaminate two different suppliers.
+  // Legacy (pre-migration) rows are backfilled to 'legacy', a sentinel with
+  // no real identity meaning -- inert, since those rows are also given a
+  // short expiry in the same migration and are swept away shortly after.
+  actor_id        String
   key             String
   endpoint        String
   response_status Int
   response_body   Json
+  // Batch 8 Session A (HNT2-IDEMP-002) -- payload-mismatch protection.
+  // Nullable because pre-migration rows never had one computed; null is
+  // always treated as "no protection for this row", never as a match or a
+  // mismatch. Computed once at claim time from the caller's own validated
+  // input via canonicalHash() (sorted-key JSON, so key order never affects
+  // the result), never recomputed at complete time.
+  payload_hash    String?
+  // Batch 8 Session A (HNT-OPS-002) -- TTL. Set at claim time to
+  // now()+IDEMPOTENCY_KEY_TTL_HOURS (24h), regardless of eventual outcome.
+  // Nullable only for the brief instant before the migration's own backfill
+  // runs; every row from that point forward always has one. A completed
+  // row past its own expires_at is treated by getReplayedResponse as if it
+  // doesn't exist (proceeds to a fresh claim); an in-flight
+  // (response_status=0) row is NEVER treated as expired regardless of this
+  // value -- see claimIdempotencyKey's own reclaim guard in idempotency.ts.
+  expires_at      DateTime?
   created_at      DateTime   @default(now())
   businesses      businesses @relation(fields: [business_id], references: [id])
 
-  @@unique([business_id, key, endpoint])
+  @@unique([business_id, actor_id, key, endpoint])
   @@index([business_id])
+}
+
+// Batch 8 Session A (HNT-OPS-001) -- durable job/lease table replacing
+// node-cron's own in-memory-only noOverlap guard, which does nothing to
+// recover a job that crashed mid-run. Shared by the reminder scheduler,
+// payroll scheduler, and receipt-delivery-recovery sweep. Not business-
+// scoped (unlike almost every other table in this schema) -- a job here
+// represents one scheduler-level occurrence across the whole process, not
+// a single business's own data.
+enum ScheduledJobStatus {
+  pending
+  running
+  retry_wait
+  succeeded
+  // dead_letter is intentionally the sole terminal-failure state -- a
+  // separate "failed" value was considered and dropped: retry_wait already
+  // owns every retryable failure, dead_letter already owns every exhausted
+  // one, and a third "failed" state would have no reachable transition of
+  // its own (the same "don't track one fact two ways" principle that
+  // already dropped Debts' redundant `disputed` boolean).
+  dead_letter
+}
+
+model scheduled_job_runs {
+  id              String              @id
+  // One row per real-world occurrence -- e.g. "debt-reminder-scheduler:2026-08-24T14"
+  // (one UTC hour-slot) or "payroll-scheduler:2026-08-24" (one UTC day).
+  // Deterministic and composed so a duplicate trigger (a restart, a second
+  // process) naturally collides on the same key rather than needing
+  // separate dedup logic.
+  job_key         String              @unique
+  job_type        String
+  status          ScheduledJobStatus  @default(pending)
+  leased_until    DateTime?
+  attempts        Int                 @default(0)
+  max_attempts    Int
+  next_attempt_at DateTime?
+  last_error      String?
+  created_at      DateTime            @default(now())
+  updated_at      DateTime            @updatedAt
+
+  @@index([job_type, status])
 }
 
 /// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
@@ -2973,8 +3043,18 @@ enum ReceiptDeliveryChannel {
 // architecture that doesn't exist.
 enum ReceiptDeliveryStatus {
   pending
+  // Batch 8 Session A (HNT-DELIV-001) -- written atomically immediately
+  // before the NotificationProvider.send() call, closing the gap where a
+  // crash mid-send left a row indistinguishable from "never attempted."
+  sending
   success
   failed
+  // Batch 8 Session A (HNT-DELIV-001) -- a stale "sending" row past the
+  // staleness window whose true outcome genuinely cannot be determined
+  // (the active NotificationProvider has no checkDeliveryStatus capability
+  // to reconcile against). Never auto-marked "failed" -- that would be a
+  // guess, not a verified fact. Requires manual review.
+  unknown
 }
 
 /// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
@@ -3103,6 +3183,17 @@ model receipt_delivery_attempts {
   completed_at   DateTime?
   failure_reason String?
   requested_by   String
+  // Batch 8 Session A (HNT-DELIV-001 correction) -- the raw client
+  // Idempotency-Key used for this attempt, so the recovery sweep
+  // (receiptDeliveryRecovery.ts) can look up the exact matching
+  // idempotency_keys row (business_id, actor_id=requested_by, key,
+  // endpoint=requestReceiptDeliveryEndpoint(receipt_id)) and complete it
+  // atomically alongside marking a stuck row "unknown" -- without this,
+  // recovery could only touch the delivery-attempt row itself, leaving
+  // the paired idempotency claim orphaned at response_status=0 forever.
+  // Nullable: attempts created before this column existed have nothing to
+  // look up and simply fall back to attempt-only recovery.
+  idempotency_key String?
   // WhatsApp-only: the destination customer reference (nullable -- a
   // receipt doesn't always have a known customer) PLUS a snapshotted
   // phone number, mirroring debt.customer_phone's own established

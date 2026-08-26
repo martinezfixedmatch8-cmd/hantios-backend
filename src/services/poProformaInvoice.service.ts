@@ -65,7 +65,7 @@ export async function issueProformaInvoice(poId: string, input: IssueProformaInv
   const total = subtotal.plus(shippingCost).plus(insurance);
 
   const result = await prisma.$transaction(async (tx) => {
-    await claimIdempotencyKey(tx, actor.businessId, idempotencyKey, issueProformaInvoiceEndpoint(poId));
+    await claimIdempotencyKey(tx, actor.businessId, actor.userId, idempotencyKey, issueProformaInvoiceEndpoint(poId), input);
 
     // One active-thing-at-a-time -- same pattern as Secure Link's own
     // regenerate-revokes-prior shape. Issuing a new Proforma Invoice for
@@ -106,7 +106,7 @@ export async function issueProformaInvoice(poId: string, input: IssueProformaInv
     });
 
     const responseBody = JSON.parse(JSON.stringify({ data: created })) as unknown;
-    await completeIdempotencyKey(tx, actor.businessId, idempotencyKey, issueProformaInvoiceEndpoint(poId), 201, responseBody);
+    await completeIdempotencyKey(tx, actor.businessId, actor.userId, idempotencyKey, issueProformaInvoiceEndpoint(poId), 201, responseBody);
     return created;
   }, PROFORMA_TRANSACTION_OPTIONS);
 

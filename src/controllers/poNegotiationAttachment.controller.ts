@@ -13,13 +13,14 @@ export async function uploadAttachment(req: Request, res: Response, next: NextFu
     const { id } = idParamSchema.parse(req.params);
     const idempotencyKey = req.idempotencyKey as string;
 
-    const replayed = await getReplayedResponse(actor.businessId, idempotencyKey, attachmentService.uploadAttachmentEndpoint(id));
+    const input = uploadOwnerAttachmentSchema.parse(req.body);
+
+    const replayed = await getReplayedResponse(actor.businessId, (actor.party === "owner" ? actor.userId : "supplier"), idempotencyKey, attachmentService.uploadAttachmentEndpoint(id), input);
     if (replayed) {
       res.status(replayed.status).json(replayed.body);
       return;
     }
 
-    const input = uploadOwnerAttachmentSchema.parse(req.body);
     const attachment = await attachmentService.uploadAttachment(id, input, actor, idempotencyKey);
     res.status(201).json({ data: attachment });
   } catch (err) {

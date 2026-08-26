@@ -13,13 +13,14 @@ export async function createMilestone(req: Request, res: Response, next: NextFun
     const { id } = idParamSchema.parse(req.params);
     const idempotencyKey = req.idempotencyKey as string;
 
-    const replayed = await getReplayedResponse(actor.businessId, idempotencyKey, service.createMilestoneEndpoint(id));
+    const input = createMilestoneSchema.parse(req.body);
+
+    const replayed = await getReplayedResponse(actor.businessId, (actor.party === "owner" ? actor.userId : "supplier"), idempotencyKey, service.createMilestoneEndpoint(id), input);
     if (replayed) {
       res.status(replayed.status).json(replayed.body);
       return;
     }
 
-    const input = createMilestoneSchema.parse(req.body);
     const result = await service.createMilestone(id, input, actor, idempotencyKey);
     res.status(201).json({ data: result });
   } catch (err) {

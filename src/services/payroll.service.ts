@@ -390,7 +390,7 @@ export async function markPayrollPaid(id: string, input: MarkPayrollPaidInput, a
   // cleanly rather than 409ing on an already-claimed key. Without this, a
   // retried bulk-pay call would show every already-paid employee as
   // "failed" instead of correctly replaying their own prior success.
-  const replayed = await getReplayedResponse(actor.businessId, idempotencyKey, markPayrollPaidEndpoint(id));
+  const replayed = await getReplayedResponse(actor.businessId, actor.userId, idempotencyKey, markPayrollPaidEndpoint(id), input);
   if (replayed) {
     return (replayed.body as { data: payroll_records }).data;
   }
@@ -409,7 +409,7 @@ export async function markPayrollPaid(id: string, input: MarkPayrollPaidInput, a
   const paymentMethod = input.paymentMethodId ? await prisma.payment_methods.findUnique({ where: { id: input.paymentMethodId } }) : null;
 
   const { record: updatedRecord, receipt: payrollReceipt } = await prisma.$transaction(async (tx) => {
-    await claimIdempotencyKey(tx, actor.businessId, idempotencyKey, markPayrollPaidEndpoint(id));
+    await claimIdempotencyKey(tx, actor.businessId, actor.userId, idempotencyKey, markPayrollPaidEndpoint(id), input);
 
     const paidAt = new Date();
     // Atomic guarded transition -- covers "already paid" and "modified
@@ -465,7 +465,7 @@ export async function markPayrollPaid(id: string, input: MarkPayrollPaidInput, a
 
     const updated = await tx.payroll_records.findUniqueOrThrow({ where: { id } });
     const responseBody = JSON.parse(JSON.stringify({ data: updated })) as unknown;
-    await completeIdempotencyKey(tx, actor.businessId, idempotencyKey, markPayrollPaidEndpoint(id), 200, responseBody);
+    await completeIdempotencyKey(tx, actor.businessId, actor.userId, idempotencyKey, markPayrollPaidEndpoint(id), 200, responseBody);
 
     return { record: updated, receipt };
   }, PAYROLL_TRANSACTION_OPTIONS);
@@ -526,7 +526,7 @@ export const BULK_PAY_PENDING_ENDPOINT = "POST /payroll/pay-all-pending";
 // bulkPayPending from ever being called a second way that bypasses this
 // wrapper.
 export async function bulkPayPending(input: BulkPayPendingInput, actor: Actor, idempotencyKey: string): Promise<BulkPayPendingResult> {
-  await prisma.$transaction((tx) => claimIdempotencyKey(tx, actor.businessId, idempotencyKey, BULK_PAY_PENDING_ENDPOINT));
+  await prisma.$transaction((tx) => claimIdempotencyKey(tx, actor.businessId, actor.userId, idempotencyKey, BULK_PAY_PENDING_ENDPOINT, input));
 
   const pending = await prisma.payroll_records.findMany({
     where: { business_id: actor.businessId, status: "pending" },
@@ -560,7 +560,7 @@ export async function bulkPayPending(input: BulkPayPendingInput, actor: Actor, i
   }
 
   const responseBody = JSON.parse(JSON.stringify({ data: result })) as unknown;
-  await prisma.$transaction((tx) => completeIdempotencyKey(tx, actor.businessId, idempotencyKey, BULK_PAY_PENDING_ENDPOINT, 200, responseBody));
+  await prisma.$transaction((tx) => completeIdempotencyKey(tx, actor.businessId, actor.userId, idempotencyKey, BULK_PAY_PENDING_ENDPOINT, 200, responseBody));
 
   return result;
 }
@@ -607,7 +607,7 @@ export async function createPayrollReversal(
   idempotencyKey: string
 ) {
   const endpoint = createPayrollReversalEndpoint(payrollRecordId);
-  const replayed = await getReplayedResponse(actor.businessId, idempotencyKey, endpoint);
+  const replayed = await getReplayedResponse(actor.businessId, actor.userId, idempotencyKey, endpoint, input);
   if (replayed) {
     return (replayed.body as { data: Awaited<ReturnType<typeof prisma.payroll_reversals.create>> }).data;
   }
@@ -618,7 +618,7 @@ export async function createPayrollReversal(
   }
 
   const reversal = await prisma.$transaction(async (tx) => {
-    await claimIdempotencyKey(tx, actor.businessId, idempotencyKey, endpoint);
+    await claimIdempotencyKey(tx, actor.businessId, actor.userId, idempotencyKey, endpoint, input);
 
     // HNT-PAY-003 fix -- lock the payroll record row so two concurrent
     // reversals against the SAME record can never both read the same
@@ -664,7 +664,7 @@ export async function createPayrollReversal(
     });
 
     const responseBody = JSON.parse(JSON.stringify({ data: created })) as unknown;
-    await completeIdempotencyKey(tx, actor.businessId, idempotencyKey, endpoint, 201, responseBody);
+    await completeIdempotencyKey(tx, actor.businessId, actor.userId, idempotencyKey, endpoint, 201, responseBody);
 
     return created;
   });

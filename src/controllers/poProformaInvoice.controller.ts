@@ -23,13 +23,14 @@ export async function issueProformaInvoice(req: Request, res: Response, next: Ne
     const { id } = idParamSchema.parse(req.params);
     const idempotencyKey = getIdempotencyKey(req);
 
-    const replayed = await getReplayedResponse(actor.businessId, idempotencyKey, service.issueProformaInvoiceEndpoint(id));
+    const input = issueProformaInvoiceSchema.parse(req.body);
+
+    const replayed = await getReplayedResponse(actor.businessId, actor.userId, idempotencyKey, service.issueProformaInvoiceEndpoint(id), input);
     if (replayed) {
       res.status(replayed.status).json(replayed.body);
       return;
     }
 
-    const input = issueProformaInvoiceSchema.parse(req.body);
     const result = await service.issueProformaInvoice(id, input, actor, idempotencyKey);
     res.status(201).json({ data: result });
   } catch (err) {

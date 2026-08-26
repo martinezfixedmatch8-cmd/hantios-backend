@@ -23,7 +23,7 @@ export async function issueCommercialInvoice(req: Request, res: Response, next: 
     const { id } = idParamSchema.parse(req.params);
     const idempotencyKey = getIdempotencyKey(req);
 
-    const replayed = await getReplayedResponse(actor.businessId, idempotencyKey, service.issueCommercialInvoiceEndpoint(id));
+    const replayed = await getReplayedResponse(actor.businessId, actor.userId, idempotencyKey, service.issueCommercialInvoiceEndpoint(id), {});
     if (replayed) {
       res.status(replayed.status).json(replayed.body);
       return;
@@ -42,13 +42,14 @@ export async function supersedeCommercialInvoice(req: Request, res: Response, ne
     const { id, invoiceId } = invoiceIdParamSchema.parse(req.params);
     const idempotencyKey = getIdempotencyKey(req);
 
-    const replayed = await getReplayedResponse(actor.businessId, idempotencyKey, service.supersedeCommercialInvoiceEndpoint(id, invoiceId));
+    const input = supersedeCommercialInvoiceSchema.parse(req.body);
+
+    const replayed = await getReplayedResponse(actor.businessId, actor.userId, idempotencyKey, service.supersedeCommercialInvoiceEndpoint(id, invoiceId), input);
     if (replayed) {
       res.status(replayed.status).json(replayed.body);
       return;
     }
 
-    const input = supersedeCommercialInvoiceSchema.parse(req.body);
     const result = await service.supersedeCommercialInvoice(id, invoiceId, input, actor, idempotencyKey);
     res.status(201).json({ data: result });
   } catch (err) {

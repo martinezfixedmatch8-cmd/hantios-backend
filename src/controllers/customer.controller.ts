@@ -26,13 +26,14 @@ export async function createCustomer(req: Request, res: Response, next: NextFunc
     const actor = getActor(req);
     const idempotencyKey = getIdempotencyKey(req);
 
-    const replayed = await getReplayedResponse(actor.businessId, idempotencyKey, customerService.CREATE_CUSTOMER_ENDPOINT);
+    const input = createCustomerSchema.parse(req.body);
+
+    const replayed = await getReplayedResponse(actor.businessId, actor.userId, idempotencyKey, customerService.CREATE_CUSTOMER_ENDPOINT, input);
     if (replayed) {
       res.status(replayed.status).json(replayed.body);
       return;
     }
 
-    const input = createCustomerSchema.parse(req.body);
     const customer = await customerService.createCustomer(input, actor, idempotencyKey);
     res.status(201).json({ data: customer });
   } catch (err) {
@@ -98,13 +99,14 @@ export async function archiveCustomer(req: Request, res: Response, next: NextFun
     const { id } = idParamSchema.parse(req.params);
     const idempotencyKey = getIdempotencyKey(req);
 
-    const replayed = await getReplayedResponse(actor.businessId, idempotencyKey, customerService.archiveCustomerEndpoint(id));
+    const input = archiveCustomerSchema.parse(req.body);
+
+    const replayed = await getReplayedResponse(actor.businessId, actor.userId, idempotencyKey, customerService.archiveCustomerEndpoint(id), input);
     if (replayed) {
       res.status(replayed.status).json(replayed.body);
       return;
     }
 
-    const input = archiveCustomerSchema.parse(req.body);
     const customer = await customerService.archiveCustomer(id, input, actor, idempotencyKey);
     res.status(200).json({ data: customer });
   } catch (err) {

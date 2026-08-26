@@ -62,7 +62,7 @@ export async function regenerateSecureLink(poId: string, actor: Actor, idempoten
   const replyToken = po.negotiation_reply_token ?? generateReplyToken();
 
   const link = await prisma.$transaction(async (tx) => {
-    await claimIdempotencyKey(tx, actor.businessId, idempotencyKey, regenerateSecureLinkEndpoint(poId));
+    await claimIdempotencyKey(tx, actor.businessId, actor.userId, idempotencyKey, regenerateSecureLinkEndpoint(poId), {});
 
     if (!po.negotiation_reply_token) {
       await tx.purchase_orders.updateMany({
@@ -103,7 +103,7 @@ export async function regenerateSecureLink(poId: string, actor: Actor, idempoten
     const responseBody = JSON.parse(
       JSON.stringify({ data: { ...created, url: buildSecureLinkUrl(rawToken) } })
     ) as unknown;
-    await completeIdempotencyKey(tx, actor.businessId, idempotencyKey, regenerateSecureLinkEndpoint(poId), 201, responseBody);
+    await completeIdempotencyKey(tx, actor.businessId, actor.userId, idempotencyKey, regenerateSecureLinkEndpoint(poId), 201, responseBody);
 
     return created;
   }, SECURE_LINK_TRANSACTION_OPTIONS);
@@ -162,7 +162,7 @@ export async function revokeSecureLink(poId: string, actor: Actor, idempotencyKe
   await getOwned(prisma.purchase_orders.findUnique({ where: { id: poId } }), actor.businessId, "Purchase order");
 
   const result = await prisma.$transaction(async (tx) => {
-    await claimIdempotencyKey(tx, actor.businessId, idempotencyKey, revokeSecureLinkEndpoint(poId));
+    await claimIdempotencyKey(tx, actor.businessId, actor.userId, idempotencyKey, revokeSecureLinkEndpoint(poId), {});
 
     const guarded = await tx.po_secure_links.updateMany({
       where: { purchase_order_id: poId, business_id: actor.businessId, status: "active" },
@@ -189,7 +189,7 @@ export async function revokeSecureLink(poId: string, actor: Actor, idempotencyKe
     });
 
     const responseBody = JSON.parse(JSON.stringify({ data: link })) as unknown;
-    await completeIdempotencyKey(tx, actor.businessId, idempotencyKey, revokeSecureLinkEndpoint(poId), 200, responseBody);
+    await completeIdempotencyKey(tx, actor.businessId, actor.userId, idempotencyKey, revokeSecureLinkEndpoint(poId), 200, responseBody);
     return link;
   }, SECURE_LINK_TRANSACTION_OPTIONS);
 

@@ -4,6 +4,35 @@ import { prisma } from "./prisma";
 import { getBusinessDay, dateOnlyString } from "./businessTime";
 import { getDebtReminderSchedule } from "./businessSettings";
 import { sendReminder } from "../services/debt.service";
+import { runScheduledJob } from "./scheduledJob";
+
+// Batch 8 Session A (HNT-OPS-001) -- job_type/max_attempts for this
+// scheduler's own outer tick (the job/lease row tracks "did this hour's
+// discovery pass run," never per-debt state -- sendReminder's own
+// claim/complete against debt_reminders is untouched, still the one true
+// per-debt dedup path).
+const JOB_TYPE = "reminder_scheduler_tick";
+const MAX_ATTEMPTS = 3;
+
+// Bounded catch-up: on every tick (including one fired immediately at
+// process boot), enumerate the current UTC hour-slot plus up to 6 prior
+// ones that haven't yet succeeded. discoverAndSendReminders is fully
+// idempotent and current-state-scanning (never "replay what was due at
+// that specific historical hour"), so this isn't replaying history -- it's
+// giving a downtime-recovering process a few fast, real chances to catch
+// up promptly instead of silently waiting for its own next natural tick,
+// each recorded as its own real job_key for observability. Deliberately
+// NOT business-timezone-scoped: confirmed via direct review that
+// discoverAndSendReminders' own outer iteration is timezone-agnostic by
+// design (it scans every business, then resolves eligibility per-business
+// via getBusinessDay INSIDE the loop) -- the same separation of concerns
+// payrollScheduler.ts's own comment already documents for its own outer
+// tick, re-verified here to hold for this scheduler too.
+const CATCH_UP_HOURS = 6;
+
+function hourSlotKey(date: Date): string {
+  return date.toISOString().slice(0, 13); // e.g. "2026-08-24T14"
+}
 
 // Orchestration boundary: this module's ONLY job is "discover which debts
 // are reminder-eligible right now, call the one true send path." Zero
@@ -77,6 +106,23 @@ export async function discoverAndSendReminders(): Promise<{ attempted: number; b
 
 let task: ScheduledTask | null = null;
 
+// Batch 8 Session A (HNT-OPS-001) -- runs the current hour-slot plus up to
+// CATCH_UP_HOURS prior ones (oldest first) that haven't yet succeeded,
+// each through the durable job/lease claim (runScheduledJob), so a crash
+// mid-tick leaves a real, reclaimable row instead of silently vanishing.
+// Called both by the cron tick itself and once immediately at process
+// boot (see startReminderScheduler below) -- the boot call is what closes
+// a downtime gap promptly rather than waiting for the next natural `:00`.
+export async function runReminderSchedulerCatchUp(now: Date = new Date()): Promise<void> {
+  for (let hoursBack = CATCH_UP_HOURS; hoursBack >= 0; hoursBack--) {
+    const slot = new Date(now.getTime() - hoursBack * 3_600_000);
+    const jobKey = `${JOB_TYPE}:${hourSlotKey(slot)}`;
+    await runScheduledJob(jobKey, JOB_TYPE, MAX_ATTEMPTS, async () => {
+      await discoverAndSendReminders();
+    });
+  }
+}
+
 // Hourly -- frequent enough that a debt becoming reminder-eligible today
 // doesn't wait almost a full day, cheap enough (a handful of queries per
 // business) not to be wasteful. Business-day boundaries vary by each
@@ -84,14 +130,14 @@ let task: ScheduledTask | null = null;
 // correct for every business anyway -- hourly polling sidesteps that
 // entirely. `noOverlap` is node-cron's own built-in defense (a slow tick
 // can't start a second overlapping one) -- belt-and-suspenders alongside the
-// real guarantee, which is the DB-level unique constraint in sendReminder's
-// claim step, not this.
+// real guarantee, which is now the durable job/lease claim above (HNT-OPS-001),
+// not just an in-memory flag that does nothing to recover from a crash.
 export function startReminderScheduler(): ScheduledTask {
   if (task) return task;
   task = cron.schedule(
     "0 * * * *",
     () => {
-      discoverAndSendReminders().catch((err) => {
+      runReminderSchedulerCatchUp().catch((err) => {
         console.error("[reminderScheduler] tick failed:", err);
       });
     },

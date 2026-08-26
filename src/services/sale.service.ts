@@ -197,7 +197,7 @@ export async function createSale(input: CreateSaleInput, actor: Actor, idempoten
     // real guard against a concurrent duplicate submission -- a collision here
     // rolls this whole transaction back, leaving the key free for a legitimate
     // retry if the earlier attempt genuinely failed.
-    await claimIdempotencyKey(tx, actor.businessId, idempotencyKey, CREATE_SALE_ENDPOINT);
+    await claimIdempotencyKey(tx, actor.businessId, actor.userId, idempotencyKey, CREATE_SALE_ENDPOINT, input);
 
     // Module 05: real customer link, shared with Debts -- an archived
     // customer holding this phone is never reused/reactivated (active-only
@@ -392,7 +392,7 @@ export async function createSale(input: CreateSaleInput, actor: Actor, idempoten
     // Response body normalized through JSON round-trip (Decimal/Date -> string via
     // their own toJSON) so a replayed response is byte-identical to the original.
     const responseBody = JSON.parse(JSON.stringify({ data: createdSale })) as unknown;
-    await completeIdempotencyKey(tx, actor.businessId, idempotencyKey, CREATE_SALE_ENDPOINT, 201, responseBody);
+    await completeIdempotencyKey(tx, actor.businessId, actor.userId, idempotencyKey, CREATE_SALE_ENDPOINT, 201, responseBody);
 
     return { sale: createdSale, receipt: saleReceipt };
   }, SALE_TRANSACTION_OPTIONS);
@@ -466,7 +466,7 @@ export async function voidSale(saleId: string, input: VoidSaleInput, actor: Acto
   const stockAlertEvents: PendingStockAlertEvent[] = [];
 
   const voided = await prisma.$transaction(async (tx) => {
-    await claimIdempotencyKey(tx, actor.businessId, idempotencyKey, voidSaleEndpoint(saleId));
+    await claimIdempotencyKey(tx, actor.businessId, actor.userId, idempotencyKey, voidSaleEndpoint(saleId), input);
 
     // Single atomic guarded transition enforces Final State Protection: a
     // sale already voided, already refunded, or modified concurrently by
@@ -571,7 +571,7 @@ export async function voidSale(saleId: string, input: VoidSaleInput, actor: Acto
     const updated = await tx.sales.findUniqueOrThrow({ where: { id: saleId } });
 
     const responseBody = JSON.parse(JSON.stringify({ data: updated })) as unknown;
-    await completeIdempotencyKey(tx, actor.businessId, idempotencyKey, voidSaleEndpoint(saleId), 200, responseBody);
+    await completeIdempotencyKey(tx, actor.businessId, actor.userId, idempotencyKey, voidSaleEndpoint(saleId), 200, responseBody);
 
     return updated;
   }, SALE_TRANSACTION_OPTIONS);
@@ -645,7 +645,7 @@ export async function refundSale(saleId: string, input: RefundSaleInput, actor: 
   const stockAlertEvents: PendingStockAlertEvent[] = [];
 
   const refundResult = await prisma.$transaction(async (tx) => {
-    await claimIdempotencyKey(tx, actor.businessId, idempotencyKey, refundSaleEndpoint(saleId));
+    await claimIdempotencyKey(tx, actor.businessId, actor.userId, idempotencyKey, refundSaleEndpoint(saleId), input);
 
     // Row-level lock on the original sale -- serializes any two concurrent
     // refund attempts against the SAME sale so the remaining-refundable-
@@ -941,7 +941,7 @@ export async function refundSale(saleId: string, input: RefundSaleInput, actor: 
     });
 
     const responseBody = JSON.parse(JSON.stringify({ data: reversal })) as unknown;
-    await completeIdempotencyKey(tx, actor.businessId, idempotencyKey, refundSaleEndpoint(saleId), 201, responseBody);
+    await completeIdempotencyKey(tx, actor.businessId, actor.userId, idempotencyKey, refundSaleEndpoint(saleId), 201, responseBody);
 
     return { reversal, refundReceipt };
   }, SALE_TRANSACTION_OPTIONS);
@@ -1025,7 +1025,7 @@ export async function setSaleAttribution(saleId: string, input: SetSaleAttributi
   const periodMonth = getBusinessLocalMonth(business.timezone, sale.timestamp);
 
   const { updated, reallocation } = await prisma.$transaction(async (tx) => {
-    await claimIdempotencyKey(tx, actor.businessId, idempotencyKey, endpoint);
+    await claimIdempotencyKey(tx, actor.businessId, actor.userId, idempotencyKey, endpoint, input);
 
     const updateResult = await tx.sales.updateMany({
       where: { id: saleId, business_id: actor.businessId, version: input.version },
@@ -1139,7 +1139,7 @@ export async function setSaleAttribution(saleId: string, input: SetSaleAttributi
     // fresh one, same rule every other idempotent endpoint in this repo
     // already follows.
     const responseBody = JSON.parse(JSON.stringify({ data: { ...result, reallocation: reallocationResult } })) as unknown;
-    await completeIdempotencyKey(tx, actor.businessId, idempotencyKey, endpoint, 200, responseBody);
+    await completeIdempotencyKey(tx, actor.businessId, actor.userId, idempotencyKey, endpoint, 200, responseBody);
     return { updated: result, reallocation: reallocationResult };
   });
 

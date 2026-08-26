@@ -572,7 +572,14 @@ describe("Module 12 Session D -- Final Completion", () => {
       const events = await prisma.sale_attribution_events.findMany({ where: { sale_id: sale.id }, orderBy: { changed_at: "asc" } });
       expect(events).toHaveLength(2);
       expect(events[1].source).toBe("correction"); // still fully auditable
-    });
+    }, 90000); // Batch 8 Session A: this file's own cumulative real-Neon-round-trip
+    // load (many sequential mark-paid + fire-and-forget receipt-delivery
+    // calls throughout its 34 tests) pushes this test, running late in the
+    // file, past the default 40s budget under a full-file run -- confirmed
+    // via an isolated `-t`-filtered run of just this describe block (7/7
+    // clean, well under 40s each) that the underlying logic itself is
+    // correct; this is a timing/infrastructure characteristic of the full
+    // file's total elapsed time, not a functional defect.
 
     it("State B: the NEW record already PAID -- no auto-reallocation either", async () => {
       const period = monthsAgo(18);
@@ -593,7 +600,7 @@ describe("Module 12 Session D -- Final Completion", () => {
 
       const adjustments = await prisma.commission_adjustments.findMany({ where: { sale_id: sale.id } });
       expect(adjustments).toHaveLength(0);
-    });
+    }, 90000); // Batch 8 Session A: see the timeout note on the previous test in this describe block.
 
     // State C: either record missing -- no silent creation, no partial reallocation.
     it("State C: the NEW employee has no payroll_records row for this period -- no silent creation, no partial reallocation", async () => {
@@ -630,7 +637,7 @@ describe("Module 12 Session D -- Final Completion", () => {
 
       const reloadedA = await prisma.payroll_records.findUniqueOrThrow({ where: { id: recordA.id } });
       expect(reloadedA.amount.toString()).toBe("50"); // original side untouched
-    });
+    }, 90000); // Batch 8 Session A: see the timeout note earlier in this describe block.
 
     it("State C: a first-time attribution (no previous employee) is not_applicable, never attempted as a reallocation", async () => {
       const employee = await createEmployee();
@@ -671,7 +678,7 @@ describe("Module 12 Session D -- Final Completion", () => {
 
       const adjustmentsAfterSecond = await prisma.commission_adjustments.findMany({ where: { sale_id: sale.id } });
       expect(adjustmentsAfterSecond).toHaveLength(2); // unchanged -- the failed attempt left NO trace
-    });
+    }, 90000); // Batch 8 Session A: see the timeout note earlier in this describe block.
 
     it("skips reallocation when either side is not a commission-driven model", async () => {
       const period = monthsAgo(21);
@@ -692,7 +699,7 @@ describe("Module 12 Session D -- Final Completion", () => {
 
       const adjustments = await prisma.commission_adjustments.findMany({ where: { sale_id: sale.id } });
       expect(adjustments).toHaveLength(0);
-    });
+    }, 90000); // Batch 8 Session A: see the timeout note earlier in this describe block.
   });
 
   describe("Self-service attendance", () => {

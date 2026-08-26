@@ -29,7 +29,7 @@ export async function createBranch(input: CreateBranchInput, actor: Actor, idemp
   }
 
   return prisma.$transaction(async (tx) => {
-    await claimIdempotencyKey(tx, actor.businessId, idempotencyKey, CREATE_BRANCH_ENDPOINT);
+    await claimIdempotencyKey(tx, actor.businessId, actor.userId, idempotencyKey, CREATE_BRANCH_ENDPOINT, input);
 
     const branch = await tx.branches.create({
       data: {
@@ -53,7 +53,7 @@ export async function createBranch(input: CreateBranchInput, actor: Actor, idemp
     });
 
     const responseBody = JSON.parse(JSON.stringify({ data: branch })) as unknown;
-    await completeIdempotencyKey(tx, actor.businessId, idempotencyKey, CREATE_BRANCH_ENDPOINT, 201, responseBody);
+    await completeIdempotencyKey(tx, actor.businessId, actor.userId, idempotencyKey, CREATE_BRANCH_ENDPOINT, 201, responseBody);
     return branch;
   });
 }
@@ -123,13 +123,13 @@ export async function updateBranch(id: string, input: UpdateBranchInput, actor: 
 // archived is a successful no-op, not an error.
 export async function archiveBranch(id: string, input: ArchiveBranchInput, actor: Actor, idempotencyKey: string) {
   return prisma.$transaction(async (tx) => {
-    await claimIdempotencyKey(tx, actor.businessId, idempotencyKey, archiveBranchEndpoint(id));
+    await claimIdempotencyKey(tx, actor.businessId, actor.userId, idempotencyKey, archiveBranchEndpoint(id), input);
 
     const branch = await getOwned(tx.branches.findUnique({ where: { id } }), actor.businessId, "Branch");
 
     if (branch.status === "archived") {
       const responseBody = JSON.parse(JSON.stringify({ data: branch })) as unknown;
-      await completeIdempotencyKey(tx, actor.businessId, idempotencyKey, archiveBranchEndpoint(id), 200, responseBody);
+      await completeIdempotencyKey(tx, actor.businessId, actor.userId, idempotencyKey, archiveBranchEndpoint(id), 200, responseBody);
       return branch;
     }
 
@@ -152,20 +152,20 @@ export async function archiveBranch(id: string, input: ArchiveBranchInput, actor
     });
 
     const responseBody = JSON.parse(JSON.stringify({ data: updated })) as unknown;
-    await completeIdempotencyKey(tx, actor.businessId, idempotencyKey, archiveBranchEndpoint(id), 200, responseBody);
+    await completeIdempotencyKey(tx, actor.businessId, actor.userId, idempotencyKey, archiveBranchEndpoint(id), 200, responseBody);
     return updated;
   });
 }
 
 export async function restoreBranch(id: string, input: RestoreBranchInput, actor: Actor, idempotencyKey: string) {
   return prisma.$transaction(async (tx) => {
-    await claimIdempotencyKey(tx, actor.businessId, idempotencyKey, restoreBranchEndpoint(id));
+    await claimIdempotencyKey(tx, actor.businessId, actor.userId, idempotencyKey, restoreBranchEndpoint(id), input);
 
     const branch = await getOwned(tx.branches.findUnique({ where: { id } }), actor.businessId, "Branch");
 
     if (branch.status === "active") {
       const responseBody = JSON.parse(JSON.stringify({ data: branch })) as unknown;
-      await completeIdempotencyKey(tx, actor.businessId, idempotencyKey, restoreBranchEndpoint(id), 200, responseBody);
+      await completeIdempotencyKey(tx, actor.businessId, actor.userId, idempotencyKey, restoreBranchEndpoint(id), 200, responseBody);
       return branch;
     }
 
@@ -188,7 +188,7 @@ export async function restoreBranch(id: string, input: RestoreBranchInput, actor
     });
 
     const responseBody = JSON.parse(JSON.stringify({ data: updated })) as unknown;
-    await completeIdempotencyKey(tx, actor.businessId, idempotencyKey, restoreBranchEndpoint(id), 200, responseBody);
+    await completeIdempotencyKey(tx, actor.businessId, actor.userId, idempotencyKey, restoreBranchEndpoint(id), 200, responseBody);
     return updated;
   });
 }

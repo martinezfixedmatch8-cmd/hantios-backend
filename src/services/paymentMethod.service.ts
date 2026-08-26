@@ -27,7 +27,7 @@ export const restorePaymentMethodEndpoint = (id: string): string => `POST /payme
 // Batch 6 (HNT2-MD-001) -- create now requires Idempotency-Key (Option A).
 export async function createPaymentMethod(input: CreatePaymentMethodInput, actor: Actor, idempotencyKey: string) {
   return prisma.$transaction(async (tx) => {
-    await claimIdempotencyKey(tx, actor.businessId, idempotencyKey, CREATE_PAYMENT_METHOD_ENDPOINT);
+    await claimIdempotencyKey(tx, actor.businessId, actor.userId, idempotencyKey, CREATE_PAYMENT_METHOD_ENDPOINT, input);
 
     const paymentMethod = await tx.payment_methods.create({
       data: {
@@ -52,7 +52,7 @@ export async function createPaymentMethod(input: CreatePaymentMethodInput, actor
     });
 
     const responseBody = JSON.parse(JSON.stringify({ data: paymentMethod })) as unknown;
-    await completeIdempotencyKey(tx, actor.businessId, idempotencyKey, CREATE_PAYMENT_METHOD_ENDPOINT, 201, responseBody);
+    await completeIdempotencyKey(tx, actor.businessId, actor.userId, idempotencyKey, CREATE_PAYMENT_METHOD_ENDPOINT, 201, responseBody);
     return paymentMethod;
   });
 }
@@ -115,13 +115,13 @@ export async function updatePaymentMethod(id: string, input: UpdatePaymentMethod
 
 export async function archivePaymentMethod(id: string, input: ArchivePaymentMethodInput, actor: Actor, idempotencyKey: string) {
   return prisma.$transaction(async (tx) => {
-    await claimIdempotencyKey(tx, actor.businessId, idempotencyKey, archivePaymentMethodEndpoint(id));
+    await claimIdempotencyKey(tx, actor.businessId, actor.userId, idempotencyKey, archivePaymentMethodEndpoint(id), input);
 
     const paymentMethod = await getOwned(tx.payment_methods.findUnique({ where: { id } }), actor.businessId, "Payment method");
 
     if (paymentMethod.status === "archived") {
       const responseBody = JSON.parse(JSON.stringify({ data: paymentMethod })) as unknown;
-      await completeIdempotencyKey(tx, actor.businessId, idempotencyKey, archivePaymentMethodEndpoint(id), 200, responseBody);
+      await completeIdempotencyKey(tx, actor.businessId, actor.userId, idempotencyKey, archivePaymentMethodEndpoint(id), 200, responseBody);
       return paymentMethod;
     }
 
@@ -144,20 +144,20 @@ export async function archivePaymentMethod(id: string, input: ArchivePaymentMeth
     });
 
     const responseBody = JSON.parse(JSON.stringify({ data: updated })) as unknown;
-    await completeIdempotencyKey(tx, actor.businessId, idempotencyKey, archivePaymentMethodEndpoint(id), 200, responseBody);
+    await completeIdempotencyKey(tx, actor.businessId, actor.userId, idempotencyKey, archivePaymentMethodEndpoint(id), 200, responseBody);
     return updated;
   });
 }
 
 export async function restorePaymentMethod(id: string, input: RestorePaymentMethodInput, actor: Actor, idempotencyKey: string) {
   return prisma.$transaction(async (tx) => {
-    await claimIdempotencyKey(tx, actor.businessId, idempotencyKey, restorePaymentMethodEndpoint(id));
+    await claimIdempotencyKey(tx, actor.businessId, actor.userId, idempotencyKey, restorePaymentMethodEndpoint(id), input);
 
     const paymentMethod = await getOwned(tx.payment_methods.findUnique({ where: { id } }), actor.businessId, "Payment method");
 
     if (paymentMethod.status === "active") {
       const responseBody = JSON.parse(JSON.stringify({ data: paymentMethod })) as unknown;
-      await completeIdempotencyKey(tx, actor.businessId, idempotencyKey, restorePaymentMethodEndpoint(id), 200, responseBody);
+      await completeIdempotencyKey(tx, actor.businessId, actor.userId, idempotencyKey, restorePaymentMethodEndpoint(id), 200, responseBody);
       return paymentMethod;
     }
 
@@ -180,7 +180,7 @@ export async function restorePaymentMethod(id: string, input: RestorePaymentMeth
     });
 
     const responseBody = JSON.parse(JSON.stringify({ data: updated })) as unknown;
-    await completeIdempotencyKey(tx, actor.businessId, idempotencyKey, restorePaymentMethodEndpoint(id), 200, responseBody);
+    await completeIdempotencyKey(tx, actor.businessId, actor.userId, idempotencyKey, restorePaymentMethodEndpoint(id), 200, responseBody);
     return updated;
   });
 }

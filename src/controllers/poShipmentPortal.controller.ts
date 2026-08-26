@@ -26,14 +26,14 @@ export async function createShipment(req: Request, res: Response, next: NextFunc
   try {
     const { purchaseOrder } = getSecureLink(req);
     const idempotencyKey = getIdempotencyKey(req);
+    const input = createSupplierShipmentSchema.parse(req.body);
 
-    const replayed = await getReplayedResponse(purchaseOrder.business_id, idempotencyKey, shipmentService.createShipmentEndpoint(purchaseOrder.id));
+    const replayed = await getReplayedResponse(purchaseOrder.business_id, "supplier", idempotencyKey, shipmentService.createShipmentEndpoint(purchaseOrder.id), input);
     if (replayed) {
       res.status(replayed.status).json(replayed.body);
       return;
     }
 
-    const input = createSupplierShipmentSchema.parse(req.body);
     const actor = await buildSupplierActor(req, { senderName: input.senderName, senderPhone: input.senderPhone });
     const result = await shipmentService.createShipment(purchaseOrder.id, input, actor, idempotencyKey);
     res.status(201).json({ data: result });
@@ -58,18 +58,20 @@ export async function updateShipmentEta(req: Request, res: Response, next: NextF
     const { purchaseOrder } = getSecureLink(req);
     const { shipmentId } = shipmentIdParamSchema.parse(req.params);
     const idempotencyKey = getIdempotencyKey(req);
+    const input = updateSupplierShipmentEtaSchema.parse(req.body);
 
     const replayed = await getReplayedResponse(
       purchaseOrder.business_id,
+      "supplier",
       idempotencyKey,
-      shipmentService.updateShipmentEtaEndpoint(purchaseOrder.id, shipmentId)
+      shipmentService.updateShipmentEtaEndpoint(purchaseOrder.id, shipmentId),
+      input
     );
     if (replayed) {
       res.status(replayed.status).json(replayed.body);
       return;
     }
 
-    const input = updateSupplierShipmentEtaSchema.parse(req.body);
     const actor = await buildSupplierActor(req, { senderName: input.senderName, senderPhone: input.senderPhone });
     const result = await shipmentService.updateShipmentEta(purchaseOrder.id, shipmentId, input, actor, idempotencyKey);
     res.status(200).json({ data: result });
@@ -83,18 +85,20 @@ export async function uploadShipmentAttachment(req: Request, res: Response, next
     const { purchaseOrder } = getSecureLink(req);
     const { shipmentId } = shipmentIdParamSchema.parse(req.params);
     const idempotencyKey = getIdempotencyKey(req);
+    const input = uploadSupplierShipmentAttachmentSchema.parse(req.body);
 
     const replayed = await getReplayedResponse(
       purchaseOrder.business_id,
+      "supplier",
       idempotencyKey,
-      attachmentService.uploadShipmentAttachmentEndpoint(purchaseOrder.id, shipmentId)
+      attachmentService.uploadShipmentAttachmentEndpoint(purchaseOrder.id, shipmentId),
+      input
     );
     if (replayed) {
       res.status(replayed.status).json(replayed.body);
       return;
     }
 
-    const input = uploadSupplierShipmentAttachmentSchema.parse(req.body);
     const actor = await buildSupplierActor(req, { senderName: input.senderName, senderPhone: input.senderPhone });
     const result = await attachmentService.uploadShipmentAttachment(purchaseOrder.id, shipmentId, input, actor, idempotencyKey);
     res.status(201).json({ data: result });
@@ -107,14 +111,14 @@ export async function createMilestone(req: Request, res: Response, next: NextFun
   try {
     const { purchaseOrder } = getSecureLink(req);
     const idempotencyKey = getIdempotencyKey(req);
+    const input = createSupplierMilestoneSchema.parse(req.body);
 
-    const replayed = await getReplayedResponse(purchaseOrder.business_id, idempotencyKey, milestoneService.createMilestoneEndpoint(purchaseOrder.id));
+    const replayed = await getReplayedResponse(purchaseOrder.business_id, "supplier", idempotencyKey, milestoneService.createMilestoneEndpoint(purchaseOrder.id), input);
     if (replayed) {
       res.status(replayed.status).json(replayed.body);
       return;
     }
 
-    const input = createSupplierMilestoneSchema.parse(req.body);
     const actor = await buildSupplierActor(req, { senderName: input.senderName, senderPhone: input.senderPhone });
     const result = await milestoneService.createMilestone(purchaseOrder.id, input, actor, idempotencyKey);
     res.status(201).json({ data: result });

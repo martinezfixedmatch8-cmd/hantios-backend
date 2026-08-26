@@ -25,13 +25,14 @@ export async function recordAttendance(req: Request, res: Response, next: NextFu
     const actor = getActor(req);
     const idempotencyKey = getIdempotencyKey(req);
 
-    const replayed = await getReplayedResponse(actor.businessId, idempotencyKey, attendanceService.RECORD_ATTENDANCE_ENDPOINT);
+    const input = createAttendanceRecordSchema.parse(req.body);
+
+    const replayed = await getReplayedResponse(actor.businessId, actor.userId, idempotencyKey, attendanceService.RECORD_ATTENDANCE_ENDPOINT, input);
     if (replayed) {
       res.status(replayed.status).json(replayed.body);
       return;
     }
 
-    const input = createAttendanceRecordSchema.parse(req.body);
     const result = await attendanceService.recordAttendance(input, actor, idempotencyKey);
     res.status(201).json({ data: result });
   } catch (err) {
@@ -47,13 +48,14 @@ export async function recordSelfAttendance(req: Request, res: Response, next: Ne
     const actor = getActor(req);
     const idempotencyKey = getIdempotencyKey(req);
 
-    const replayed = await getReplayedResponse(actor.businessId, idempotencyKey, attendanceService.RECORD_SELF_ATTENDANCE_ENDPOINT);
+    const input = recordSelfAttendanceSchema.parse(req.body);
+
+    const replayed = await getReplayedResponse(actor.businessId, actor.userId, idempotencyKey, attendanceService.RECORD_SELF_ATTENDANCE_ENDPOINT, input);
     if (replayed) {
       res.status(replayed.status).json(replayed.body);
       return;
     }
 
-    const input = recordSelfAttendanceSchema.parse(req.body);
     const result = await attendanceService.recordSelfAttendance(input, actor, idempotencyKey);
     res.status(201).json({ data: result });
   } catch (err) {
@@ -101,13 +103,14 @@ export async function createAttendanceAdjustment(req: Request, res: Response, ne
     const { id } = idParamSchema.parse(req.params);
     const idempotencyKey = getIdempotencyKey(req);
 
-    const replayed = await getReplayedResponse(actor.businessId, idempotencyKey, attendanceService.createAttendanceAdjustmentEndpoint(id));
+    const input = createAttendanceAdjustmentSchema.parse(req.body);
+
+    const replayed = await getReplayedResponse(actor.businessId, actor.userId, idempotencyKey, attendanceService.createAttendanceAdjustmentEndpoint(id), input);
     if (replayed) {
       res.status(replayed.status).json(replayed.body);
       return;
     }
 
-    const input = createAttendanceAdjustmentSchema.parse(req.body);
     const result = await attendanceService.createAttendanceAdjustment(id, input, actor, idempotencyKey);
     res.status(201).json({ data: result });
   } catch (err) {

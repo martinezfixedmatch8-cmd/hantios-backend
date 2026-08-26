@@ -19,18 +19,20 @@ export async function createGoodsReceivedNote(req: Request, res: Response, next:
     const actor = getActor(req);
     const { id } = idParamSchema.parse(req.params);
     const idempotencyKey = getIdempotencyKey(req);
+    const input = createGoodsReceivedNoteSchema.parse(req.body);
 
     const replayed = await getReplayedResponse(
       actor.businessId,
+      actor.userId,
       idempotencyKey,
-      goodsReceivedNoteService.createGoodsReceivedNoteEndpoint(id)
+      goodsReceivedNoteService.createGoodsReceivedNoteEndpoint(id),
+      input
     );
     if (replayed) {
       res.status(replayed.status).json(replayed.body);
       return;
     }
 
-    const input = createGoodsReceivedNoteSchema.parse(req.body);
     const grn = await goodsReceivedNoteService.createGoodsReceivedNote(id, input, actor, idempotencyKey);
     res.status(201).json({ data: grn });
   } catch (err) {

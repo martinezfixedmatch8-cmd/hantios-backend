@@ -34,13 +34,14 @@ export async function createExpense(req: Request, res: Response, next: NextFunct
     const actor = getActor(req);
     const idempotencyKey = getIdempotencyKey(req);
 
-    const replayed = await getReplayedResponse(actor.businessId, idempotencyKey, expenseService.CREATE_EXPENSE_ENDPOINT);
+    const input = createExpenseSchema.parse(req.body);
+
+    const replayed = await getReplayedResponse(actor.businessId, actor.userId, idempotencyKey, expenseService.CREATE_EXPENSE_ENDPOINT, input);
     if (replayed) {
       res.status(replayed.status).json(replayed.body);
       return;
     }
 
-    const input = createExpenseSchema.parse(req.body);
     const expense = await expenseService.createExpense(input, actor, idempotencyKey);
     res.status(201).json({ data: expense });
   } catch (err) {
@@ -76,13 +77,14 @@ export async function updateExpense(req: Request, res: Response, next: NextFunct
     const { id } = idParamSchema.parse(req.params);
     const idempotencyKey = getIdempotencyKey(req);
 
-    const replayed = await getReplayedResponse(actor.businessId, idempotencyKey, expenseService.updateExpenseEndpoint(id));
+    const input = updateExpenseSchema.parse(req.body);
+
+    const replayed = await getReplayedResponse(actor.businessId, actor.userId, idempotencyKey, expenseService.updateExpenseEndpoint(id), input);
     if (replayed) {
       res.status(replayed.status).json(replayed.body);
       return;
     }
 
-    const input = updateExpenseSchema.parse(req.body);
     const expense = await expenseService.updateExpense(id, input, actor, idempotencyKey);
     res.status(200).json({ data: expense });
   } catch (err) {
@@ -96,13 +98,14 @@ export async function archiveExpense(req: Request, res: Response, next: NextFunc
     const { id } = idParamSchema.parse(req.params);
     const idempotencyKey = getIdempotencyKey(req);
 
-    const replayed = await getReplayedResponse(actor.businessId, idempotencyKey, expenseService.archiveExpenseEndpoint(id));
+    const input = archiveExpenseSchema.parse(req.body);
+
+    const replayed = await getReplayedResponse(actor.businessId, actor.userId, idempotencyKey, expenseService.archiveExpenseEndpoint(id), input);
     if (replayed) {
       res.status(replayed.status).json(replayed.body);
       return;
     }
 
-    const input = archiveExpenseSchema.parse(req.body);
     const expense = await expenseService.archiveExpense(id, input, actor, idempotencyKey);
     res.status(200).json({ data: expense });
   } catch (err) {
@@ -116,13 +119,14 @@ export async function restoreExpense(req: Request, res: Response, next: NextFunc
     const { id } = idParamSchema.parse(req.params);
     const idempotencyKey = getIdempotencyKey(req);
 
-    const replayed = await getReplayedResponse(actor.businessId, idempotencyKey, expenseService.restoreExpenseEndpoint(id));
+    const input = restoreExpenseSchema.parse(req.body);
+
+    const replayed = await getReplayedResponse(actor.businessId, actor.userId, idempotencyKey, expenseService.restoreExpenseEndpoint(id), input);
     if (replayed) {
       res.status(replayed.status).json(replayed.body);
       return;
     }
 
-    const input = restoreExpenseSchema.parse(req.body);
     const expense = await expenseService.restoreExpense(id, input, actor, idempotencyKey);
     res.status(200).json({ data: expense });
   } catch (err) {
@@ -136,13 +140,14 @@ export async function addAttachments(req: Request, res: Response, next: NextFunc
     const { id } = idParamSchema.parse(req.params);
     const idempotencyKey = getIdempotencyKey(req);
 
-    const replayed = await getReplayedResponse(actor.businessId, idempotencyKey, expenseService.addAttachmentsEndpoint(id));
+    const input = addAttachmentsSchema.parse(req.body);
+
+    const replayed = await getReplayedResponse(actor.businessId, actor.userId, idempotencyKey, expenseService.addAttachmentsEndpoint(id), input);
     if (replayed) {
       res.status(replayed.status).json(replayed.body);
       return;
     }
 
-    const input = addAttachmentsSchema.parse(req.body);
     const expense = await expenseService.addAttachments(id, input, actor, idempotencyKey);
     res.status(201).json({ data: expense });
   } catch (err) {
@@ -156,7 +161,7 @@ export async function deleteAttachment(req: Request, res: Response, next: NextFu
     const { id, attachmentId } = attachmentIdParamSchema.parse(req.params);
     const idempotencyKey = getIdempotencyKey(req);
 
-    const replayed = await getReplayedResponse(actor.businessId, idempotencyKey, expenseService.deleteAttachmentEndpoint(id, attachmentId));
+    const replayed = await getReplayedResponse(actor.businessId, actor.userId, idempotencyKey, expenseService.deleteAttachmentEndpoint(id, attachmentId), {});
     if (replayed) {
       res.status(replayed.status).json(replayed.body);
       return;
@@ -175,13 +180,14 @@ export async function approveExpense(req: Request, res: Response, next: NextFunc
     const { id } = idParamSchema.parse(req.params);
     const idempotencyKey = getIdempotencyKey(req);
 
-    const replayed = await getReplayedResponse(actor.businessId, idempotencyKey, expenseService.approveExpenseEndpoint(id));
+    const input = approveExpenseSchema.parse(req.body);
+
+    const replayed = await getReplayedResponse(actor.businessId, actor.userId, idempotencyKey, expenseService.approveExpenseEndpoint(id), input);
     if (replayed) {
       res.status(replayed.status).json(replayed.body);
       return;
     }
 
-    const input = approveExpenseSchema.parse(req.body);
     const expense = await expenseService.approveExpense(id, input, actor, idempotencyKey);
     res.status(200).json({ data: expense });
   } catch (err) {
@@ -195,13 +201,14 @@ export async function rejectExpense(req: Request, res: Response, next: NextFunct
     const { id } = idParamSchema.parse(req.params);
     const idempotencyKey = getIdempotencyKey(req);
 
-    const replayed = await getReplayedResponse(actor.businessId, idempotencyKey, expenseService.rejectExpenseEndpoint(id));
+    const input = rejectExpenseSchema.parse(req.body);
+
+    const replayed = await getReplayedResponse(actor.businessId, actor.userId, idempotencyKey, expenseService.rejectExpenseEndpoint(id), input);
     if (replayed) {
       res.status(replayed.status).json(replayed.body);
       return;
     }
 
-    const input = rejectExpenseSchema.parse(req.body);
     const expense = await expenseService.rejectExpense(id, input, actor, idempotencyKey);
     res.status(200).json({ data: expense });
   } catch (err) {
@@ -215,13 +222,14 @@ export async function markExpensePaid(req: Request, res: Response, next: NextFun
     const { id } = idParamSchema.parse(req.params);
     const idempotencyKey = getIdempotencyKey(req);
 
-    const replayed = await getReplayedResponse(actor.businessId, idempotencyKey, expenseService.markPaidExpenseEndpoint(id));
+    const input = markPaidExpenseSchema.parse(req.body);
+
+    const replayed = await getReplayedResponse(actor.businessId, actor.userId, idempotencyKey, expenseService.markPaidExpenseEndpoint(id), input);
     if (replayed) {
       res.status(replayed.status).json(replayed.body);
       return;
     }
 
-    const input = markPaidExpenseSchema.parse(req.body);
     const expense = await expenseService.markExpensePaid(id, input, actor, idempotencyKey);
     res.status(200).json({ data: expense });
   } catch (err) {
@@ -235,13 +243,14 @@ export async function updateRecurrence(req: Request, res: Response, next: NextFu
     const { id } = idParamSchema.parse(req.params);
     const idempotencyKey = getIdempotencyKey(req);
 
-    const replayed = await getReplayedResponse(actor.businessId, idempotencyKey, expenseService.updateRecurrenceEndpoint(id));
+    const input = updateRecurrenceSchema.parse(req.body);
+
+    const replayed = await getReplayedResponse(actor.businessId, actor.userId, idempotencyKey, expenseService.updateRecurrenceEndpoint(id), input);
     if (replayed) {
       res.status(replayed.status).json(replayed.body);
       return;
     }
 
-    const input = updateRecurrenceSchema.parse(req.body);
     const recurrence = await expenseService.updateRecurrence(id, input, actor, idempotencyKey);
     res.status(200).json({ data: recurrence });
   } catch (err) {
@@ -256,13 +265,14 @@ export async function createExpenseCorrection(req: Request, res: Response, next:
     const { id } = idParamSchema.parse(req.params);
     const idempotencyKey = getIdempotencyKey(req);
 
-    const replayed = await getReplayedResponse(actor.businessId, idempotencyKey, expenseService.createExpenseCorrectionEndpoint(id));
+    const input = createExpenseCorrectionSchema.parse(req.body);
+
+    const replayed = await getReplayedResponse(actor.businessId, actor.userId, idempotencyKey, expenseService.createExpenseCorrectionEndpoint(id), input);
     if (replayed) {
       res.status(replayed.status).json(replayed.body);
       return;
     }
 
-    const input = createExpenseCorrectionSchema.parse(req.body);
     const correction = await expenseService.createExpenseCorrection(id, input, actor, idempotencyKey);
     res.status(201).json({ data: correction });
   } catch (err) {

@@ -59,7 +59,7 @@ export async function createMilestone(poId: string, input: CreateMilestoneInput,
   const recordedByName = actor.party === "owner" ? actor.userName : actor.name;
 
   const result = await prisma.$transaction(async (tx) => {
-    await claimIdempotencyKey(tx, actor.businessId, idempotencyKey, createMilestoneEndpoint(poId));
+    await claimIdempotencyKey(tx, actor.businessId, (actor.party === "owner" ? actor.userId : "supplier"), idempotencyKey, createMilestoneEndpoint(poId), input);
 
     const created = await tx.po_delivery_milestones.create({
       data: {
@@ -91,7 +91,7 @@ export async function createMilestone(poId: string, input: CreateMilestoneInput,
     });
 
     const responseBody = JSON.parse(JSON.stringify({ data: { ...created, warning } })) as unknown;
-    await completeIdempotencyKey(tx, actor.businessId, idempotencyKey, createMilestoneEndpoint(poId), 201, responseBody);
+    await completeIdempotencyKey(tx, actor.businessId, (actor.party === "owner" ? actor.userId : "supplier"), idempotencyKey, createMilestoneEndpoint(poId), 201, responseBody);
     return created;
   }, MILESTONE_TRANSACTION_OPTIONS);
 

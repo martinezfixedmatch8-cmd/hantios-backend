@@ -21,13 +21,14 @@ export async function createTag(req: Request, res: Response, next: NextFunction)
     const actor = getActor(req);
     const idempotencyKey = req.idempotencyKey as string;
 
-    const replayed = await getReplayedResponse(actor.businessId, idempotencyKey, tagService.CREATE_TAG_ENDPOINT);
+    const input = createTagSchema.parse(req.body);
+
+    const replayed = await getReplayedResponse(actor.businessId, actor.userId, idempotencyKey, tagService.CREATE_TAG_ENDPOINT, input);
     if (replayed) {
       res.status(replayed.status).json(replayed.body);
       return;
     }
 
-    const input = createTagSchema.parse(req.body);
     const tag = await tagService.createTag(input, actor, idempotencyKey);
     res.status(201).json({ data: tag });
   } catch (err) {
@@ -75,13 +76,14 @@ export async function archiveTag(req: Request, res: Response, next: NextFunction
     const { id } = idParamSchema.parse(req.params);
     const idempotencyKey = req.idempotencyKey as string;
 
-    const replayed = await getReplayedResponse(actor.businessId, idempotencyKey, tagService.archiveTagEndpoint(id));
+    const input = archiveTagSchema.parse(req.body);
+
+    const replayed = await getReplayedResponse(actor.businessId, actor.userId, idempotencyKey, tagService.archiveTagEndpoint(id), input);
     if (replayed) {
       res.status(replayed.status).json(replayed.body);
       return;
     }
 
-    const input = archiveTagSchema.parse(req.body);
     const tag = await tagService.archiveTag(id, input, actor, idempotencyKey);
     res.status(200).json({ data: tag });
   } catch (err) {
@@ -95,13 +97,14 @@ export async function restoreTag(req: Request, res: Response, next: NextFunction
     const { id } = idParamSchema.parse(req.params);
     const idempotencyKey = req.idempotencyKey as string;
 
-    const replayed = await getReplayedResponse(actor.businessId, idempotencyKey, tagService.restoreTagEndpoint(id));
+    const input = restoreTagSchema.parse(req.body);
+
+    const replayed = await getReplayedResponse(actor.businessId, actor.userId, idempotencyKey, tagService.restoreTagEndpoint(id), input);
     if (replayed) {
       res.status(replayed.status).json(replayed.body);
       return;
     }
 
-    const input = restoreTagSchema.parse(req.body);
     const tag = await tagService.restoreTag(id, input, actor, idempotencyKey);
     res.status(200).json({ data: tag });
   } catch (err) {

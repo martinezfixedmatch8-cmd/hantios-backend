@@ -89,7 +89,7 @@ export async function issueCommercialInvoice(poId: string, actor: Actor, idempot
   const currencyCode = currentProforma ? currentProforma.currency_code : po.currency_code;
 
   const result = await prisma.$transaction(async (tx) => {
-    await claimIdempotencyKey(tx, actor.businessId, idempotencyKey, issueCommercialInvoiceEndpoint(poId));
+    await claimIdempotencyKey(tx, actor.businessId, actor.userId, idempotencyKey, issueCommercialInvoiceEndpoint(poId), {});
 
     // Only one current (issued) Commercial Invoice per PO -- same
     // one-active-thing-at-a-time pattern as Proforma Invoice/Secure Link.
@@ -127,7 +127,7 @@ export async function issueCommercialInvoice(poId: string, actor: Actor, idempot
     });
 
     const responseBody = JSON.parse(JSON.stringify({ data: created })) as unknown;
-    await completeIdempotencyKey(tx, actor.businessId, idempotencyKey, issueCommercialInvoiceEndpoint(poId), 201, responseBody);
+    await completeIdempotencyKey(tx, actor.businessId, actor.userId, idempotencyKey, issueCommercialInvoiceEndpoint(poId), 201, responseBody);
     return created;
   }, COMMERCIAL_INVOICE_TRANSACTION_OPTIONS);
 
@@ -161,7 +161,7 @@ export async function supersedeCommercialInvoice(
   const totalAmount = new Prisma.Decimal(input.totalAmount);
 
   const result = await prisma.$transaction(async (tx) => {
-    await claimIdempotencyKey(tx, actor.businessId, idempotencyKey, supersedeCommercialInvoiceEndpoint(poId, invoiceId));
+    await claimIdempotencyKey(tx, actor.businessId, actor.userId, idempotencyKey, supersedeCommercialInvoiceEndpoint(poId, invoiceId), input);
 
     const guarded = await tx.po_commercial_invoices.updateMany({
       where: { id: invoiceId, business_id: actor.businessId, status: "issued" },
@@ -208,7 +208,7 @@ export async function supersedeCommercialInvoice(
     });
 
     const responseBody = JSON.parse(JSON.stringify({ data: created })) as unknown;
-    await completeIdempotencyKey(tx, actor.businessId, idempotencyKey, supersedeCommercialInvoiceEndpoint(poId, invoiceId), 201, responseBody);
+    await completeIdempotencyKey(tx, actor.businessId, actor.userId, idempotencyKey, supersedeCommercialInvoiceEndpoint(poId, invoiceId), 201, responseBody);
     return created;
   }, COMMERCIAL_INVOICE_TRANSACTION_OPTIONS);
 

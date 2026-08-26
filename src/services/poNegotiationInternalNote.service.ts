@@ -29,7 +29,7 @@ export async function createInternalNote(poId: string, input: CreateInternalNote
   const po = await getOwned(prisma.purchase_orders.findUnique({ where: { id: poId } }), actor.businessId, "Purchase order");
 
   const result = await prisma.$transaction(async (tx) => {
-    await claimIdempotencyKey(tx, actor.businessId, idempotencyKey, createInternalNoteEndpoint(poId));
+    await claimIdempotencyKey(tx, actor.businessId, actor.userId, idempotencyKey, createInternalNoteEndpoint(poId), input);
 
     const created = await tx.po_negotiation_internal_notes.create({
       data: {
@@ -53,7 +53,7 @@ export async function createInternalNote(poId: string, input: CreateInternalNote
     });
 
     const responseBody = JSON.parse(JSON.stringify({ data: created })) as unknown;
-    await completeIdempotencyKey(tx, actor.businessId, idempotencyKey, createInternalNoteEndpoint(poId), 201, responseBody);
+    await completeIdempotencyKey(tx, actor.businessId, actor.userId, idempotencyKey, createInternalNoteEndpoint(poId), 201, responseBody);
     return created;
   }, NOTE_TRANSACTION_OPTIONS);
 

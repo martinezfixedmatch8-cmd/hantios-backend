@@ -28,13 +28,13 @@ export const CREATE_COMPENSATION_POLICY_ENDPOINT = "POST /compensation-policies"
 // transaction; its own historical acknowledgements stay exactly as they
 // were, never retroactively repointed at the new version.
 export async function createCompensationPolicy(input: CreateCompensationPolicyInput, actor: Actor, idempotencyKey: string) {
-  const replayed = await getReplayedResponse(actor.businessId, idempotencyKey, CREATE_COMPENSATION_POLICY_ENDPOINT);
+  const replayed = await getReplayedResponse(actor.businessId, actor.userId, idempotencyKey, CREATE_COMPENSATION_POLICY_ENDPOINT, input);
   if (replayed) {
     return (replayed.body as { data: Awaited<ReturnType<typeof prisma.compensation_policies.create>> }).data;
   }
 
   const policy = await prisma.$transaction(async (tx) => {
-    await claimIdempotencyKey(tx, actor.businessId, idempotencyKey, CREATE_COMPENSATION_POLICY_ENDPOINT);
+    await claimIdempotencyKey(tx, actor.businessId, actor.userId, idempotencyKey, CREATE_COMPENSATION_POLICY_ENDPOINT, input);
 
     await tx.compensation_policies.updateMany({
       where: { business_id: actor.businessId, policy_type: input.policyType, status: "active" },
@@ -67,7 +67,7 @@ export async function createCompensationPolicy(input: CreateCompensationPolicyIn
     });
 
     const responseBody = JSON.parse(JSON.stringify({ data: created })) as unknown;
-    await completeIdempotencyKey(tx, actor.businessId, idempotencyKey, CREATE_COMPENSATION_POLICY_ENDPOINT, 201, responseBody);
+    await completeIdempotencyKey(tx, actor.businessId, actor.userId, idempotencyKey, CREATE_COMPENSATION_POLICY_ENDPOINT, 201, responseBody);
 
     return created;
   });

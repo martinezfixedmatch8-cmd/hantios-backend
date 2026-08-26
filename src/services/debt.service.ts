@@ -106,7 +106,7 @@ export async function createDebt(input: CreateDebtInput, actor: Actor, idempoten
   const interestPolicy = getDebtInterestPolicy(business.settings);
 
   const debt = await prisma.$transaction(async (tx) => {
-    await claimIdempotencyKey(tx, actor.businessId, idempotencyKey, CREATE_DEBT_ENDPOINT);
+    await claimIdempotencyKey(tx, actor.businessId, actor.userId, idempotencyKey, CREATE_DEBT_ENDPOINT, input);
 
     // Module 05: real find-or-create, shared with Sales -- an archived
     // customer holding this phone is never reused/reactivated (active-only
@@ -172,7 +172,7 @@ export async function createDebt(input: CreateDebtInput, actor: Actor, idempoten
     });
 
     const responseBody = JSON.parse(JSON.stringify({ data: await decorateDebt(created, business) })) as unknown;
-    await completeIdempotencyKey(tx, actor.businessId, idempotencyKey, CREATE_DEBT_ENDPOINT, 201, responseBody);
+    await completeIdempotencyKey(tx, actor.businessId, actor.userId, idempotencyKey, CREATE_DEBT_ENDPOINT, 201, responseBody);
 
     return created;
   }, DEBT_TRANSACTION_OPTIONS);
@@ -514,7 +514,7 @@ export async function recordPayment(debtId: string, input: RecordPaymentInput, a
   const business = await prisma.businesses.findUniqueOrThrow({ where: { id: actor.businessId } });
 
   const result = await prisma.$transaction(async (tx) => {
-    await claimIdempotencyKey(tx, actor.businessId, idempotencyKey, recordPaymentEndpoint(debtId));
+    await claimIdempotencyKey(tx, actor.businessId, actor.userId, idempotencyKey, recordPaymentEndpoint(debtId), input);
 
     const newRemaining = debt.amount_remaining.minus(amount);
     const newPaid = debt.amount_paid.plus(amount);
@@ -598,7 +598,7 @@ export async function recordPayment(debtId: string, input: RecordPaymentInput, a
     });
 
     const responseBody = JSON.parse(JSON.stringify({ data: payment })) as unknown;
-    await completeIdempotencyKey(tx, actor.businessId, idempotencyKey, recordPaymentEndpoint(debtId), 201, responseBody);
+    await completeIdempotencyKey(tx, actor.businessId, actor.userId, idempotencyKey, recordPaymentEndpoint(debtId), 201, responseBody);
 
     return { payment, newRemaining, debtReceipt };
   }, DEBT_TRANSACTION_OPTIONS);
@@ -647,7 +647,7 @@ export async function reversePayment(
   }
 
   const result = await prisma.$transaction(async (tx) => {
-    await claimIdempotencyKey(tx, actor.businessId, idempotencyKey, reversePaymentEndpoint(debtId, paymentId));
+    await claimIdempotencyKey(tx, actor.businessId, actor.userId, idempotencyKey, reversePaymentEndpoint(debtId, paymentId), input);
 
     // Atomic claim on the original payment row -- a stale version means it
     // was already reversed (or otherwise modified) concurrently. The
@@ -740,7 +740,7 @@ export async function reversePayment(
     });
 
     const responseBody = JSON.parse(JSON.stringify({ data: reversal })) as unknown;
-    await completeIdempotencyKey(tx, actor.businessId, idempotencyKey, reversePaymentEndpoint(debtId, paymentId), 201, responseBody);
+    await completeIdempotencyKey(tx, actor.businessId, actor.userId, idempotencyKey, reversePaymentEndpoint(debtId, paymentId), 201, responseBody);
 
     return { reversal, newRemaining, reversalReceipt };
   }, DEBT_TRANSACTION_OPTIONS);
@@ -770,8 +770,9 @@ async function transitionDebtStatus(
   guard: { where: (currentStatus: DebtStatus) => boolean; errorMessage: (currentStatus: DebtStatus) => string },
   targetStatus: DebtStatus | ((debt: { amount_remaining: Prisma.Decimal; amount_original: Prisma.Decimal }) => DebtStatus),
   auditAction: string,
-  reason: string
+  input: DebtStatusActionInput
 ) {
+  const reason = input.reason;
   const debt = await getOwned(prisma.debts.findUnique({ where: { id: debtId } }), actor.businessId, "Debt");
   if (!guard.where(debt.status)) {
     throw badRequest(guard.errorMessage(debt.status));
@@ -780,7 +781,15 @@ async function transitionDebtStatus(
   const resolvedTarget = typeof targetStatus === "function" ? targetStatus(debt) : targetStatus;
 
   const updated = await prisma.$transaction(async (tx) => {
-    await claimIdempotencyKey(tx, actor.businessId, idempotencyKey, endpoint);
+    // Batch 8 Session A bugfix: this MUST hash the exact same payload the
+    // calling controller passes to getReplayedResponse (the full `input`,
+    // e.g. {version, reason}) -- an earlier version of this fix hashed only
+    // {reason}, which is a genuinely different payload from what the
+    // controller checks a replay against, causing a real same-request,
+    // same-Idempotency-Key retry to be falsely rejected as a payload
+    // mismatch (409) instead of correctly replaying (200). Caught by this
+    // session's own full-suite verification, not assumed fixed.
+    await claimIdempotencyKey(tx, actor.businessId, actor.userId, idempotencyKey, endpoint, input);
 
     const result = await tx.debts.updateMany({
       where: { id: debtId, business_id: actor.businessId, version: debt.version },
@@ -815,7 +824,7 @@ async function transitionDebtStatus(
 
     const updatedDebt = await tx.debts.findUniqueOrThrow({ where: { id: debtId } });
     const responseBody = JSON.parse(JSON.stringify({ data: updatedDebt })) as unknown;
-    await completeIdempotencyKey(tx, actor.businessId, idempotencyKey, endpoint, 200, responseBody);
+    await completeIdempotencyKey(tx, actor.businessId, actor.userId, idempotencyKey, endpoint, 200, responseBody);
 
     return updatedDebt;
   }, DEBT_TRANSACTION_OPTIONS);
@@ -836,7 +845,7 @@ export async function disputeDebt(debtId: string, input: DebtStatusActionInput, 
     },
     "disputed",
     "debt.disputed",
-    input.reason
+    input
   );
   domainEvents.publish("DebtDisputed", { debtId, businessId: actor.businessId, reason: input.reason });
   return updated;
@@ -855,7 +864,7 @@ export async function resolveDisputeDebt(debtId: string, input: DebtStatusAction
     },
     (debt) => recomputeStatus("open", debt.amount_remaining, debt.amount_original),
     "debt.resolved",
-    input.reason
+    input
   );
 }
 
@@ -872,7 +881,7 @@ export async function writeOffDebt(debtId: string, input: DebtStatusActionInput,
     },
     "written_off",
     "debt.written_off",
-    input.reason
+    input
   );
   domainEvents.publish("DebtWrittenOff", { debtId, businessId: actor.businessId, reason: input.reason });
   return updated;
@@ -1051,7 +1060,7 @@ export async function applyInterest(debtId: string, input: ApplyInterestInput, a
   }
 
   const result = await prisma.$transaction(async (tx) => {
-    await claimIdempotencyKey(tx, actor.businessId, idempotencyKey, applyInterestEndpoint(debtId));
+    await claimIdempotencyKey(tx, actor.businessId, actor.userId, idempotencyKey, applyInterestEndpoint(debtId), input);
 
     const newRemaining = debt.amount_remaining.plus(interestAmount);
     // Interest only ever increases the balance, but a partially_paid debt
@@ -1101,7 +1110,7 @@ export async function applyInterest(debtId: string, input: ApplyInterestInput, a
 
     const updatedDebt = await tx.debts.findUniqueOrThrow({ where: { id: debtId } });
     const responseBody = JSON.parse(JSON.stringify({ data: { debt: updatedDebt, transaction } })) as unknown;
-    await completeIdempotencyKey(tx, actor.businessId, idempotencyKey, applyInterestEndpoint(debtId), 201, responseBody);
+    await completeIdempotencyKey(tx, actor.businessId, actor.userId, idempotencyKey, applyInterestEndpoint(debtId), 201, responseBody);
 
     return { debt: updatedDebt, transaction };
   }, DEBT_TRANSACTION_OPTIONS);

@@ -52,7 +52,7 @@ async function assertDepartmentActiveIfProvided(businessId: string, departmentId
 
 export async function createPosition(input: CreatePositionInput, actor: Actor, idempotencyKey: string) {
   return prisma.$transaction(async (tx) => {
-    await claimIdempotencyKey(tx, actor.businessId, idempotencyKey, CREATE_POSITION_ENDPOINT);
+    await claimIdempotencyKey(tx, actor.businessId, actor.userId, idempotencyKey, CREATE_POSITION_ENDPOINT, input);
     await assertDepartmentActiveIfProvided(actor.businessId, input.departmentId);
     await assertNoActiveTitleCollision(actor.businessId, input.title);
 
@@ -78,7 +78,7 @@ export async function createPosition(input: CreatePositionInput, actor: Actor, i
     });
 
     const responseBody = JSON.parse(JSON.stringify({ data: position })) as unknown;
-    await completeIdempotencyKey(tx, actor.businessId, idempotencyKey, CREATE_POSITION_ENDPOINT, 201, responseBody);
+    await completeIdempotencyKey(tx, actor.businessId, actor.userId, idempotencyKey, CREATE_POSITION_ENDPOINT, 201, responseBody);
     return position;
   });
 }
@@ -152,13 +152,13 @@ export async function updatePosition(id: string, input: UpdatePositionInput, act
 
 export async function archivePosition(id: string, input: ArchivePositionInput, actor: Actor, idempotencyKey: string) {
   return prisma.$transaction(async (tx) => {
-    await claimIdempotencyKey(tx, actor.businessId, idempotencyKey, archivePositionEndpoint(id));
+    await claimIdempotencyKey(tx, actor.businessId, actor.userId, idempotencyKey, archivePositionEndpoint(id), input);
 
     const position = await getOwned(tx.positions.findUnique({ where: { id } }), actor.businessId, "Position");
 
     if (position.status === "archived") {
       const responseBody = JSON.parse(JSON.stringify({ data: position })) as unknown;
-      await completeIdempotencyKey(tx, actor.businessId, idempotencyKey, archivePositionEndpoint(id), 200, responseBody);
+      await completeIdempotencyKey(tx, actor.businessId, actor.userId, idempotencyKey, archivePositionEndpoint(id), 200, responseBody);
       return position;
     }
 
@@ -181,20 +181,20 @@ export async function archivePosition(id: string, input: ArchivePositionInput, a
     });
 
     const responseBody = JSON.parse(JSON.stringify({ data: updated })) as unknown;
-    await completeIdempotencyKey(tx, actor.businessId, idempotencyKey, archivePositionEndpoint(id), 200, responseBody);
+    await completeIdempotencyKey(tx, actor.businessId, actor.userId, idempotencyKey, archivePositionEndpoint(id), 200, responseBody);
     return updated;
   });
 }
 
 export async function restorePosition(id: string, input: RestorePositionInput, actor: Actor, idempotencyKey: string) {
   return prisma.$transaction(async (tx) => {
-    await claimIdempotencyKey(tx, actor.businessId, idempotencyKey, restorePositionEndpoint(id));
+    await claimIdempotencyKey(tx, actor.businessId, actor.userId, idempotencyKey, restorePositionEndpoint(id), input);
 
     const position = await getOwned(tx.positions.findUnique({ where: { id } }), actor.businessId, "Position");
 
     if (position.status === "active") {
       const responseBody = JSON.parse(JSON.stringify({ data: position })) as unknown;
-      await completeIdempotencyKey(tx, actor.businessId, idempotencyKey, restorePositionEndpoint(id), 200, responseBody);
+      await completeIdempotencyKey(tx, actor.businessId, actor.userId, idempotencyKey, restorePositionEndpoint(id), 200, responseBody);
       return position;
     }
 
@@ -223,7 +223,7 @@ export async function restorePosition(id: string, input: RestorePositionInput, a
     });
 
     const responseBody = JSON.parse(JSON.stringify({ data: updated })) as unknown;
-    await completeIdempotencyKey(tx, actor.businessId, idempotencyKey, restorePositionEndpoint(id), 200, responseBody);
+    await completeIdempotencyKey(tx, actor.businessId, actor.userId, idempotencyKey, restorePositionEndpoint(id), 200, responseBody);
     return updated;
   });
 }

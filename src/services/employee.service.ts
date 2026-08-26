@@ -50,7 +50,7 @@ export async function createEmployee(input: CreateEmployeeInput, actor: Actor, i
   }
 
   const employee = await prisma.$transaction(async (tx) => {
-    await claimIdempotencyKey(tx, actor.businessId, idempotencyKey, CREATE_EMPLOYEE_ENDPOINT);
+    await claimIdempotencyKey(tx, actor.businessId, actor.userId, idempotencyKey, CREATE_EMPLOYEE_ENDPOINT, input);
 
     let created;
     try {
@@ -86,7 +86,7 @@ export async function createEmployee(input: CreateEmployeeInput, actor: Actor, i
     });
 
     const responseBody = JSON.parse(JSON.stringify({ data: created })) as unknown;
-    await completeIdempotencyKey(tx, actor.businessId, idempotencyKey, CREATE_EMPLOYEE_ENDPOINT, 201, responseBody);
+    await completeIdempotencyKey(tx, actor.businessId, actor.userId, idempotencyKey, CREATE_EMPLOYEE_ENDPOINT, 201, responseBody);
 
     return created;
   });
@@ -207,7 +207,7 @@ export async function archiveEmployee(id: string, input: ArchiveEmployeeInput, a
   if (employee.status === "archived") throw badRequest("Employee is already archived");
 
   const result = await prisma.$transaction(async (tx) => {
-    await claimIdempotencyKey(tx, actor.businessId, idempotencyKey, archiveEmployeeEndpoint(id));
+    await claimIdempotencyKey(tx, actor.businessId, actor.userId, idempotencyKey, archiveEmployeeEndpoint(id), input);
 
     const updateResult = await tx.employees.updateMany({
       where: { id, business_id: actor.businessId, version: input.version, status: "active" },
@@ -230,7 +230,7 @@ export async function archiveEmployee(id: string, input: ArchiveEmployeeInput, a
 
     const updated = await tx.employees.findUniqueOrThrow({ where: { id } });
     const responseBody = JSON.parse(JSON.stringify({ data: updated })) as unknown;
-    await completeIdempotencyKey(tx, actor.businessId, idempotencyKey, archiveEmployeeEndpoint(id), 200, responseBody);
+    await completeIdempotencyKey(tx, actor.businessId, actor.userId, idempotencyKey, archiveEmployeeEndpoint(id), 200, responseBody);
     return updated;
   });
 

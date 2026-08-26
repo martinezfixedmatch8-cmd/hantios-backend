@@ -108,7 +108,7 @@ export async function createCustomer(input: CreateCustomerInput, actor: Actor, i
   const { normalized, original } = normalizePhone(input.phone, business.country);
 
   const customer = await prisma.$transaction(async (tx) => {
-    await claimIdempotencyKey(tx, actor.businessId, idempotencyKey, CREATE_CUSTOMER_ENDPOINT);
+    await claimIdempotencyKey(tx, actor.businessId, actor.userId, idempotencyKey, CREATE_CUSTOMER_ENDPOINT, input);
 
     // An explicit manual add must never silently merge into an existing
     // customer the way findOrCreateCustomer does -- a real duplicate is a
@@ -156,7 +156,7 @@ export async function createCustomer(input: CreateCustomerInput, actor: Actor, i
     });
 
     const responseBody = JSON.parse(JSON.stringify({ data: created })) as unknown;
-    await completeIdempotencyKey(tx, actor.businessId, idempotencyKey, CREATE_CUSTOMER_ENDPOINT, 201, responseBody);
+    await completeIdempotencyKey(tx, actor.businessId, actor.userId, idempotencyKey, CREATE_CUSTOMER_ENDPOINT, 201, responseBody);
 
     return created;
   }, CUSTOMER_TRANSACTION_OPTIONS);
@@ -343,7 +343,7 @@ export async function archiveCustomer(id: string, input: ArchiveCustomerInput, a
   if (customer.status === "archived") throw badRequest("Customer is already archived");
 
   const result = await prisma.$transaction(async (tx) => {
-    await claimIdempotencyKey(tx, actor.businessId, idempotencyKey, archiveCustomerEndpoint(id));
+    await claimIdempotencyKey(tx, actor.businessId, actor.userId, idempotencyKey, archiveCustomerEndpoint(id), input);
 
     const updateResult = await tx.customers.updateMany({
       where: { id, business_id: actor.businessId, version: input.version, status: "active" },
@@ -366,7 +366,7 @@ export async function archiveCustomer(id: string, input: ArchiveCustomerInput, a
 
     const updated = await tx.customers.findUniqueOrThrow({ where: { id } });
     const responseBody = JSON.parse(JSON.stringify({ data: updated })) as unknown;
-    await completeIdempotencyKey(tx, actor.businessId, idempotencyKey, archiveCustomerEndpoint(id), 200, responseBody);
+    await completeIdempotencyKey(tx, actor.businessId, actor.userId, idempotencyKey, archiveCustomerEndpoint(id), 200, responseBody);
     return updated;
   }, CUSTOMER_TRANSACTION_OPTIONS);
 

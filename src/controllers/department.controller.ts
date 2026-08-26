@@ -21,13 +21,14 @@ export async function createDepartment(req: Request, res: Response, next: NextFu
     const actor = getActor(req);
     const idempotencyKey = req.idempotencyKey as string; // guaranteed by requireIdempotencyKey
 
-    const replayed = await getReplayedResponse(actor.businessId, idempotencyKey, departmentService.CREATE_DEPARTMENT_ENDPOINT);
+    const input = createDepartmentSchema.parse(req.body);
+
+    const replayed = await getReplayedResponse(actor.businessId, actor.userId, idempotencyKey, departmentService.CREATE_DEPARTMENT_ENDPOINT, input);
     if (replayed) {
       res.status(replayed.status).json(replayed.body);
       return;
     }
 
-    const input = createDepartmentSchema.parse(req.body);
     const department = await departmentService.createDepartment(input, actor, idempotencyKey);
     res.status(201).json({ data: department });
   } catch (err) {
@@ -75,13 +76,14 @@ export async function archiveDepartment(req: Request, res: Response, next: NextF
     const { id } = idParamSchema.parse(req.params);
     const idempotencyKey = req.idempotencyKey as string;
 
-    const replayed = await getReplayedResponse(actor.businessId, idempotencyKey, departmentService.archiveDepartmentEndpoint(id));
+    const input = archiveDepartmentSchema.parse(req.body);
+
+    const replayed = await getReplayedResponse(actor.businessId, actor.userId, idempotencyKey, departmentService.archiveDepartmentEndpoint(id), input);
     if (replayed) {
       res.status(replayed.status).json(replayed.body);
       return;
     }
 
-    const input = archiveDepartmentSchema.parse(req.body);
     const department = await departmentService.archiveDepartment(id, input, actor, idempotencyKey);
     res.status(200).json({ data: department });
   } catch (err) {
@@ -95,13 +97,14 @@ export async function restoreDepartment(req: Request, res: Response, next: NextF
     const { id } = idParamSchema.parse(req.params);
     const idempotencyKey = req.idempotencyKey as string;
 
-    const replayed = await getReplayedResponse(actor.businessId, idempotencyKey, departmentService.restoreDepartmentEndpoint(id));
+    const input = restoreDepartmentSchema.parse(req.body);
+
+    const replayed = await getReplayedResponse(actor.businessId, actor.userId, idempotencyKey, departmentService.restoreDepartmentEndpoint(id), input);
     if (replayed) {
       res.status(replayed.status).json(replayed.body);
       return;
     }
 
-    const input = restoreDepartmentSchema.parse(req.body);
     const department = await departmentService.restoreDepartment(id, input, actor, idempotencyKey);
     res.status(200).json({ data: department });
   } catch (err) {

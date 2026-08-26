@@ -135,7 +135,7 @@ export async function createPurchaseOrder(input: CreatePurchaseOrderInput, actor
   const currency = getCurrency(business.currency);
 
   const po = await prisma.$transaction(async (tx) => {
-    await claimIdempotencyKey(tx, actor.businessId, idempotencyKey, CREATE_PO_ENDPOINT);
+    await claimIdempotencyKey(tx, actor.businessId, actor.userId, idempotencyKey, CREATE_PO_ENDPOINT, input);
 
     const poNumber = await getNextPurchaseOrderNumber(tx, actor.businessId);
 
@@ -186,7 +186,7 @@ export async function createPurchaseOrder(input: CreatePurchaseOrderInput, actor
     const responseBody = JSON.parse(
       JSON.stringify({ data: await tx.purchase_orders.findUniqueOrThrow({ where: { id: created.id }, include: PO_ITEMS_INCLUDE }) })
     ) as unknown;
-    await completeIdempotencyKey(tx, actor.businessId, idempotencyKey, CREATE_PO_ENDPOINT, 201, responseBody);
+    await completeIdempotencyKey(tx, actor.businessId, actor.userId, idempotencyKey, CREATE_PO_ENDPOINT, 201, responseBody);
 
     return created;
   }, PO_TRANSACTION_OPTIONS);
@@ -313,7 +313,7 @@ export async function sendPurchaseOrder(id: string, input: SendPurchaseOrderInpu
   await getOwned(prisma.purchase_orders.findUnique({ where: { id } }), actor.businessId, "Purchase order");
 
   const updated = await prisma.$transaction(async (tx) => {
-    await claimIdempotencyKey(tx, actor.businessId, idempotencyKey, sendPurchaseOrderEndpoint(id));
+    await claimIdempotencyKey(tx, actor.businessId, actor.userId, idempotencyKey, sendPurchaseOrderEndpoint(id), input);
 
     const result = await tx.purchase_orders.updateMany({
       where: { id, business_id: actor.businessId, version: input.version, status: "draft" },
@@ -337,7 +337,7 @@ export async function sendPurchaseOrder(id: string, input: SendPurchaseOrderInpu
     });
 
     const responseBody = JSON.parse(JSON.stringify({ data: updatedPo })) as unknown;
-    await completeIdempotencyKey(tx, actor.businessId, idempotencyKey, sendPurchaseOrderEndpoint(id), 200, responseBody);
+    await completeIdempotencyKey(tx, actor.businessId, actor.userId, idempotencyKey, sendPurchaseOrderEndpoint(id), 200, responseBody);
     return updatedPo;
   }, PO_TRANSACTION_OPTIONS);
 
@@ -349,7 +349,7 @@ export async function confirmPurchaseOrder(id: string, input: ConfirmPurchaseOrd
   await getOwned(prisma.purchase_orders.findUnique({ where: { id } }), actor.businessId, "Purchase order");
 
   const updated = await prisma.$transaction(async (tx) => {
-    await claimIdempotencyKey(tx, actor.businessId, idempotencyKey, confirmPurchaseOrderEndpoint(id));
+    await claimIdempotencyKey(tx, actor.businessId, actor.userId, idempotencyKey, confirmPurchaseOrderEndpoint(id), input);
 
     const result = await tx.purchase_orders.updateMany({
       where: { id, business_id: actor.businessId, version: input.version, status: "sent" },
@@ -377,7 +377,7 @@ export async function confirmPurchaseOrder(id: string, input: ConfirmPurchaseOrd
     });
 
     const responseBody = JSON.parse(JSON.stringify({ data: updatedPo })) as unknown;
-    await completeIdempotencyKey(tx, actor.businessId, idempotencyKey, confirmPurchaseOrderEndpoint(id), 200, responseBody);
+    await completeIdempotencyKey(tx, actor.businessId, actor.userId, idempotencyKey, confirmPurchaseOrderEndpoint(id), 200, responseBody);
     return updatedPo;
   }, PO_TRANSACTION_OPTIONS);
 
@@ -392,7 +392,7 @@ export async function cancelPurchaseOrder(id: string, input: CancelPurchaseOrder
   await getOwned(prisma.purchase_orders.findUnique({ where: { id } }), actor.businessId, "Purchase order");
 
   const updated = await prisma.$transaction(async (tx) => {
-    await claimIdempotencyKey(tx, actor.businessId, idempotencyKey, cancelPurchaseOrderEndpoint(id));
+    await claimIdempotencyKey(tx, actor.businessId, actor.userId, idempotencyKey, cancelPurchaseOrderEndpoint(id), input);
 
     const result = await tx.purchase_orders.updateMany({
       where: { id, business_id: actor.businessId, version: input.version, status: { in: ["draft", "sent"] } },
@@ -419,7 +419,7 @@ export async function cancelPurchaseOrder(id: string, input: CancelPurchaseOrder
     });
 
     const responseBody = JSON.parse(JSON.stringify({ data: updatedPo })) as unknown;
-    await completeIdempotencyKey(tx, actor.businessId, idempotencyKey, cancelPurchaseOrderEndpoint(id), 200, responseBody);
+    await completeIdempotencyKey(tx, actor.businessId, actor.userId, idempotencyKey, cancelPurchaseOrderEndpoint(id), 200, responseBody);
     return updatedPo;
   }, PO_TRANSACTION_OPTIONS);
 

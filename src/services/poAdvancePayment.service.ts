@@ -117,7 +117,7 @@ export async function recordAdvancePayment(poId: string, input: RecordAdvancePay
   const amount = new Prisma.Decimal(input.amount);
 
   const result = await prisma.$transaction(async (tx) => {
-    await claimIdempotencyKey(tx, actor.businessId, idempotencyKey, recordAdvancePaymentEndpoint(poId));
+    await claimIdempotencyKey(tx, actor.businessId, actor.userId, idempotencyKey, recordAdvancePaymentEndpoint(poId), input);
 
     // HNT2-PO-001 fix (Batch 1) -- row lock on the Proforma Invoice,
     // serializing concurrent cap-check attempts against the same invoice.
@@ -182,7 +182,7 @@ export async function recordAdvancePayment(poId: string, input: RecordAdvancePay
     // uniformly, including to the creator's own response.
     const masked = { ...maskAdvancePaymentSnapshotFields(created), effectiveAmount: amount.toString() };
     const responseBody = JSON.parse(JSON.stringify({ data: masked })) as unknown;
-    await completeIdempotencyKey(tx, actor.businessId, idempotencyKey, recordAdvancePaymentEndpoint(poId), 201, responseBody);
+    await completeIdempotencyKey(tx, actor.businessId, actor.userId, idempotencyKey, recordAdvancePaymentEndpoint(poId), 201, responseBody);
     return masked;
   }, ADVANCE_PAYMENT_TRANSACTION_OPTIONS);
 
@@ -247,7 +247,7 @@ export async function reverseAdvancePayment(
   const requestedAmount = new Prisma.Decimal(input.amount);
 
   const result = await prisma.$transaction(async (tx) => {
-    await claimIdempotencyKey(tx, actor.businessId, idempotencyKey, reverseAdvancePaymentEndpoint(poId, paymentId));
+    await claimIdempotencyKey(tx, actor.businessId, actor.userId, idempotencyKey, reverseAdvancePaymentEndpoint(poId, paymentId), input);
 
     // Atomic guard #1 -- version check + row lock in one statement.
     // business_id in the WHERE is defense-in-depth beyond getOwned's own
@@ -302,7 +302,7 @@ export async function reverseAdvancePayment(
     });
 
     const responseBody = JSON.parse(JSON.stringify({ data: reversal })) as unknown;
-    await completeIdempotencyKey(tx, actor.businessId, idempotencyKey, reverseAdvancePaymentEndpoint(poId, paymentId), 201, responseBody);
+    await completeIdempotencyKey(tx, actor.businessId, actor.userId, idempotencyKey, reverseAdvancePaymentEndpoint(poId, paymentId), 201, responseBody);
     return reversal;
   }, ADVANCE_PAYMENT_TRANSACTION_OPTIONS);
 

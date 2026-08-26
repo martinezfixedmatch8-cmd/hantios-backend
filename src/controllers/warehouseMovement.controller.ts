@@ -18,13 +18,14 @@ export async function stockIn(req: Request, res: Response, next: NextFunction): 
     const actor = getActor(req);
     const idempotencyKey = getIdempotencyKey(req);
 
-    const replayed = await getReplayedResponse(actor.businessId, idempotencyKey, warehouseMovementService.STOCK_IN_ENDPOINT);
+    const input = stockInSchema.parse(req.body);
+
+    const replayed = await getReplayedResponse(actor.businessId, actor.userId, idempotencyKey, warehouseMovementService.STOCK_IN_ENDPOINT, input);
     if (replayed) {
       res.status(replayed.status).json(replayed.body);
       return;
     }
 
-    const input = stockInSchema.parse(req.body);
     const movement = await warehouseMovementService.stockIn(input, actor, idempotencyKey);
     res.status(201).json({ data: movement });
   } catch (err) {
@@ -37,13 +38,14 @@ export async function stockOut(req: Request, res: Response, next: NextFunction):
     const actor = getActor(req);
     const idempotencyKey = getIdempotencyKey(req);
 
-    const replayed = await getReplayedResponse(actor.businessId, idempotencyKey, warehouseMovementService.STOCK_OUT_ENDPOINT);
+    const input = stockOutSchema.parse(req.body);
+
+    const replayed = await getReplayedResponse(actor.businessId, actor.userId, idempotencyKey, warehouseMovementService.STOCK_OUT_ENDPOINT, input);
     if (replayed) {
       res.status(replayed.status).json(replayed.body);
       return;
     }
 
-    const input = stockOutSchema.parse(req.body);
     const movement = await warehouseMovementService.stockOut(input, actor, idempotencyKey);
     res.status(201).json({ data: movement });
   } catch (err) {

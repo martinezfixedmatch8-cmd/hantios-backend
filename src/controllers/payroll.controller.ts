@@ -48,13 +48,14 @@ export async function markPayrollPaid(req: Request, res: Response, next: NextFun
     const { id } = idParamSchema.parse(req.params);
     const idempotencyKey = getIdempotencyKey(req);
 
-    const replayed = await getReplayedResponse(actor.businessId, idempotencyKey, payrollService.markPayrollPaidEndpoint(id));
+    const input = markPayrollPaidSchema.parse(req.body);
+
+    const replayed = await getReplayedResponse(actor.businessId, actor.userId, idempotencyKey, payrollService.markPayrollPaidEndpoint(id), input);
     if (replayed) {
       res.status(replayed.status).json(replayed.body);
       return;
     }
 
-    const input = markPayrollPaidSchema.parse(req.body);
     const result = await payrollService.markPayrollPaid(id, input, actor, idempotencyKey);
     res.status(200).json({ data: result });
   } catch (err) {
@@ -67,13 +68,14 @@ export async function bulkPayPending(req: Request, res: Response, next: NextFunc
     const actor = getActor(req);
     const idempotencyKey = getIdempotencyKey(req);
 
-    const replayed = await getReplayedResponse(actor.businessId, idempotencyKey, payrollService.BULK_PAY_PENDING_ENDPOINT);
+    const input = bulkPayPendingSchema.parse(req.body);
+
+    const replayed = await getReplayedResponse(actor.businessId, actor.userId, idempotencyKey, payrollService.BULK_PAY_PENDING_ENDPOINT, input);
     if (replayed) {
       res.status(replayed.status).json(replayed.body);
       return;
     }
 
-    const input = bulkPayPendingSchema.parse(req.body);
     const result = await payrollService.bulkPayPending(input, actor, idempotencyKey);
     res.status(200).json({ data: result });
   } catch (err) {
@@ -102,13 +104,14 @@ export async function createPayrollReversal(req: Request, res: Response, next: N
     const { id } = idParamSchema.parse(req.params);
     const idempotencyKey = getIdempotencyKey(req);
 
-    const replayed = await getReplayedResponse(actor.businessId, idempotencyKey, payrollService.createPayrollReversalEndpoint(id));
+    const input = createPayrollReversalSchema.parse(req.body);
+
+    const replayed = await getReplayedResponse(actor.businessId, actor.userId, idempotencyKey, payrollService.createPayrollReversalEndpoint(id), input);
     if (replayed) {
       res.status(replayed.status).json(replayed.body);
       return;
     }
 
-    const input = createPayrollReversalSchema.parse(req.body);
     const result = await payrollService.createPayrollReversal(id, input, actor, idempotencyKey);
     res.status(201).json({ data: result });
   } catch (err) {

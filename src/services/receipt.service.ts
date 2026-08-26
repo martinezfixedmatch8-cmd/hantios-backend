@@ -1,12 +1,11 @@
 import { Prisma, type ReceiptType, type ReceiptStatus } from "@prisma/client";
-import { createHash } from "crypto";
 import { prisma } from "../lib/prisma";
 import { generateId } from "../lib/ids";
 import { getOwned } from "../lib/ownership";
 import { badRequest, conflict } from "../lib/errors";
 import { writeAuditLog } from "../lib/auditLog";
 import { domainEvents } from "../lib/events";
-import { getReplayedResponse, claimIdempotencyKey, completeIdempotencyKey } from "../lib/idempotency";
+import { claimIdempotencyKey } from "../lib/idempotency";
 import { getReceiptSettings } from "../lib/businessSettings";
 import { getNextReceiptDocumentNumber } from "../lib/receiptNumberCounter";
 import { renderReceiptText, formatIssuedAtLocal, RECEIPT_RENDERER_VERSION } from "../lib/receiptRenderer";
@@ -375,58 +374,39 @@ export async function getReceipt(id: string, actor: Actor) {
 // its own Idempotency-Key layer (separate from generation's, which is
 // inherited from the source endpoint per the header comment above).
 //
-// Two-layer idempotency, both real, neither purely cosmetic:
-//  - TRUE concurrency (two simultaneous requests sharing a never-before-seen
-//    key) is guarded by claimIdempotencyKey's own unique constraint on
-//    (business_id, key, endpoint) -- claimed as the FIRST write inside the
-//    SAME transaction that creates the delivery_attempts row, exactly the
-//    same shape every other write endpoint in this repo already uses.
-//  - The payload-hash comparison below is an ADDITIONAL, Module-06-local
-//    semantic check on top of that shared primitive (confirmed: a local
-//    addition, not a change to src/lib/idempotency.ts itself, which has no
-//    payload-hash concept for any of its other 40+ consumers -- see
-//    CLAUDE.md's own hardening-backlog note). It distinguishes an
-//    accidental double-click (same key, same {channel} payload -> replay
-//    the original result) from a genuine "Send Again" click (a fresh
-//    client-generated key -> a new attempt) -- and rejects the one case
-//    neither the shared primitive nor a naive replay would catch: the SAME
-//    key reused with a DIFFERENT payload.
+// Batch 8 Session A (HNT-IDEMP-002, HNT-DELIV-001) -- this module's own
+// hand-rolled payload-hash-in-response-body mechanism (checkDeliveryIdempotentReplay
+// / hashDeliveryPayload / completeDeliveryIdempotencyKey / _payloadHash) has
+// been REMOVED and migrated onto the now-generalized shared primitive in
+// src/lib/idempotency.ts, which gained the identical protection (a real
+// payload_hash column, checked by getReplayedResponse/claimIdempotencyKey
+// themselves) for every one of this repo's idempotent endpoints, not just
+// this one -- CLAUDE.md's own "confirmed, deliberately local, hardening-
+// backlog item" is now closed. This is a behavior-preserving refactor: the
+// controller's shape barely changes (getReplayedResponse then the one
+// service call, exactly like every other endpoint), and the actual
+// same-key/different-payload rejection is unchanged in substance.
+//
+// A second, real gap found DURING this migration, not hypothetical: the
+// original code claimed inside requestReceiptDelivery's own transaction,
+// then did external I/O (WhatsApp send), then required the CONTROLLER to
+// make a separate, later call (completeDeliveryIdempotencyKey) to complete
+// the claim -- a genuine crash window between the send finishing and that
+// third call ever happening would leave the idempotency_keys row
+// permanently orphaned at response_status=0. (This is the one real
+// exception Batch 8 Session A's own "prove no path leaves a status=0 row
+// orphaned" investigation should have caught and didn't -- the count-based
+// per-file sweep matched claim-count to complete-count for this file
+// without verifying they shared one transaction, which they didn't.)
+// Fixed here, not deferred: completeIdempotencyKey now happens inside the
+// SAME second transaction that finalizes the delivery attempt's own status
+// (immediately after the external I/O), so the controller only ever calls
+// one service function, matching every other endpoint's shape, and the
+// crash window is now no wider than every other endpoint's own.
 // ============================================================================
-
-function hashDeliveryPayload(payload: { channel: string }): string {
-  return createHash("sha256").update(JSON.stringify({ channel: payload.channel })).digest("hex");
-}
 
 export function requestReceiptDeliveryEndpoint(receiptId: string): string {
   return `POST /receipts/${receiptId}/deliver`;
-}
-
-export interface DeliveryReplayResult {
-  status: number;
-  body: unknown;
-}
-
-// Called by the controller BEFORE the service function -- mirrors this
-// repo's universal getReplayedResponse-in-the-controller shape, with one
-// addition: payload-hash comparison. Returns null to mean "proceed
-// normally" (no prior claim -- including the mid-flight "already being
-// processed" case, which getReplayedResponse itself already throws 409 for,
-// unchanged), a replay body to mean "return this unchanged," or throws 409
-// for a genuine same-key/different-payload reuse.
-export async function checkDeliveryIdempotentReplay(
-  businessId: string,
-  key: string,
-  receiptId: string,
-  payload: { channel: string }
-): Promise<DeliveryReplayResult | null> {
-  const replayed = await getReplayedResponse(businessId, key, requestReceiptDeliveryEndpoint(receiptId));
-  if (!replayed) return null;
-  const body = replayed.body as { data?: unknown; _payloadHash?: string };
-  const freshHash = hashDeliveryPayload(payload);
-  if (body._payloadHash !== undefined && body._payloadHash !== freshHash) {
-    throw conflict("Idempotency-Key was already used with a different delivery request");
-  }
-  return { status: replayed.status, body: body.data ?? body };
 }
 
 export interface RequestDeliveryInput {
@@ -470,12 +450,14 @@ export async function requestReceiptDelivery(receiptId: string, input: RequestDe
     branchId = actor.userId ? (await prisma.users.findUnique({ where: { id: actor.userId } }))?.branch_id ?? null : null;
   }
 
+  const endpoint = requestReceiptDeliveryEndpoint(receiptId);
+
   const attempt = await prisma.$transaction(async (tx) => {
     // Real claim, first write -- the actual guard against true concurrent
     // duplicate requests sharing this exact key (a stale/mismatched-payload
     // retry is handled separately, above, before this function is ever
     // reached).
-    await claimIdempotencyKey(tx, actor.businessId, idempotencyKey, requestReceiptDeliveryEndpoint(receiptId));
+    await claimIdempotencyKey(tx, actor.businessId, actor.userId, idempotencyKey, endpoint, input);
 
     const attemptCount = await tx.receipt_delivery_attempts.count({ where: { receipt_id: receiptId } });
     let attemptNumber = attemptCount + 1;
@@ -498,6 +480,7 @@ export async function requestReceiptDelivery(receiptId: string, input: RequestDe
             channel: input.channel,
             status: "pending",
             requested_by: actor.userId,
+            idempotency_key: idempotencyKey,
             customer_id: customerId,
             employee_id: employeeId,
             phone_snapshot: phoneSnapshot,
@@ -550,6 +533,12 @@ export async function requestReceiptDelivery(receiptId: string, input: RequestDe
   let failureReason: string | null = null;
 
   if (input.channel === "whatsapp") {
+    // Batch 8 Session A (HNT-DELIV-001) -- written atomically immediately
+    // before the external I/O, closing the gap where a crash during the
+    // send left a row indistinguishable from "never attempted." The
+    // recovery sweep (src/lib/receiptDeliveryRecovery.ts) is what
+    // reconciles a row stuck here past its own staleness window.
+    await prisma.receipt_delivery_attempts.update({ where: { id: attempt.id }, data: { status: "sending" } });
     try {
       await getNotificationProvider().send({
         category: "TRANSACTIONAL",
@@ -564,10 +553,39 @@ export async function requestReceiptDelivery(receiptId: string, input: RequestDe
     }
   }
 
-  const completed = await prisma.receipt_delivery_attempts.update({
-    where: { id: attempt.id },
-    data: { status: finalStatus, completed_at: new Date(), failure_reason: failureReason },
-  });
+  // Batch 8 Session A (HNT-IDEMP-001) -- the delivery attempt's own final
+  // status and the idempotency claim's completion now happen together,
+  // atomically, immediately after the external I/O returns -- closing the
+  // real crash-window gap found migrating onto the shared idempotency
+  // mechanism (see this function's own header comment): previously the
+  // controller had to make a THIRD, separate call afterward to complete the
+  // claim, leaving a window where a crash could orphan the idempotency_keys
+  // row even though the delivery attempt itself had already finished.
+  //
+  // Array-form $transaction (a single batched round trip), not the
+  // interactive callback form -- neither statement's data depends on the
+  // other's return value (every field either is already known before this
+  // point or is a plain client-computed value), so there's no need to pay
+  // the interactive form's extra BEGIN/query/query/COMMIT round-trip cost.
+  // This matters specifically here because this whole function is called
+  // fire-and-forget (never awaited by its own caller, e.g.
+  // payroll.service.ts's automatic post-mark-paid delivery) -- a test file
+  // that triggers many of these in sequence can have several genuinely
+  // still in flight at once, and the original interactive-transaction form
+  // measurably added enough latency per call to cascade into unrelated
+  // later tests timing out under real Neon round-trip latency.
+  const completedAt = new Date();
+  const finalAttempt = { ...attempt, status: finalStatus, completed_at: completedAt, failure_reason: failureReason };
+  const [completed] = await prisma.$transaction([
+    prisma.receipt_delivery_attempts.update({
+      where: { id: attempt.id },
+      data: { status: finalStatus, completed_at: completedAt, failure_reason: failureReason },
+    }),
+    prisma.idempotency_keys.update({
+      where: { business_id_actor_id_key_endpoint: { business_id: actor.businessId, actor_id: actor.userId, key: idempotencyKey, endpoint } },
+      data: { response_status: 201, response_body: { data: { ...finalAttempt, receiptRenderedText: renderedText } } },
+    }),
+  ]);
 
   await writeAuditLog(prisma, {
     businessId: actor.businessId,
@@ -587,13 +605,7 @@ export async function requestReceiptDelivery(receiptId: string, input: RequestDe
     channel: input.channel,
   });
 
-  return { ...completed, _payloadHash: hashDeliveryPayload(input), receiptRenderedText: renderedText };
-}
-
-export async function completeDeliveryIdempotencyKey(businessId: string, key: string, receiptId: string, status: number, resultWithHash: unknown) {
-  await prisma.$transaction(async (tx) => {
-    await completeIdempotencyKey(tx, businessId, key, requestReceiptDeliveryEndpoint(receiptId), status, resultWithHash);
-  });
+  return { ...completed, receiptRenderedText: renderedText };
 }
 
 // HNT2-RECEIPT-001 -- bounded via the shared pagination envelope

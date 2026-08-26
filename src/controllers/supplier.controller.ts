@@ -25,13 +25,14 @@ export async function createSupplier(req: Request, res: Response, next: NextFunc
     const actor = getActor(req);
     const idempotencyKey = getIdempotencyKey(req);
 
-    const replayed = await getReplayedResponse(actor.businessId, idempotencyKey, supplierService.CREATE_SUPPLIER_ENDPOINT);
+    const input = createSupplierSchema.parse(req.body);
+
+    const replayed = await getReplayedResponse(actor.businessId, actor.userId, idempotencyKey, supplierService.CREATE_SUPPLIER_ENDPOINT, input);
     if (replayed) {
       res.status(replayed.status).json(replayed.body);
       return;
     }
 
-    const input = createSupplierSchema.parse(req.body);
     const supplier = await supplierService.createSupplier(input, actor, idempotencyKey);
     res.status(201).json({ data: supplier });
   } catch (err) {
@@ -79,13 +80,14 @@ export async function archiveSupplier(req: Request, res: Response, next: NextFun
     const { id } = idParamSchema.parse(req.params);
     const idempotencyKey = getIdempotencyKey(req);
 
-    const replayed = await getReplayedResponse(actor.businessId, idempotencyKey, supplierService.archiveSupplierEndpoint(id));
+    const input = archiveSupplierSchema.parse(req.body);
+
+    const replayed = await getReplayedResponse(actor.businessId, actor.userId, idempotencyKey, supplierService.archiveSupplierEndpoint(id), input);
     if (replayed) {
       res.status(replayed.status).json(replayed.body);
       return;
     }
 
-    const input = archiveSupplierSchema.parse(req.body);
     const supplier = await supplierService.archiveSupplier(id, input, actor, idempotencyKey);
     res.status(200).json({ data: supplier });
   } catch (err) {

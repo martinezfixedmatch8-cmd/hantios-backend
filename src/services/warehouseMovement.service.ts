@@ -34,7 +34,7 @@ export async function stockIn(input: StockInInput, actor: Actor, idempotencyKey:
   const unitCost = new Prisma.Decimal(input.unitCost);
 
   const result = await prisma.$transaction(async (tx) => {
-    await claimIdempotencyKey(tx, actor.businessId, idempotencyKey, STOCK_IN_ENDPOINT);
+    await claimIdempotencyKey(tx, actor.businessId, actor.userId, idempotencyKey, STOCK_IN_ENDPOINT, input);
 
     // Exactly one warehouse per business, resolved internally -- no
     // warehouseId is ever accepted from a client (see src/lib/warehouse.ts).
@@ -64,7 +64,7 @@ export async function stockIn(input: StockInInput, actor: Actor, idempotencyKey:
     });
 
     const responseBody = JSON.parse(JSON.stringify({ data: movement })) as unknown;
-    await completeIdempotencyKey(tx, actor.businessId, idempotencyKey, STOCK_IN_ENDPOINT, 201, responseBody);
+    await completeIdempotencyKey(tx, actor.businessId, actor.userId, idempotencyKey, STOCK_IN_ENDPOINT, 201, responseBody);
 
     return movement;
   }, WAREHOUSE_MOVEMENT_TRANSACTION_OPTIONS);
@@ -100,7 +100,7 @@ export async function stockOut(input: StockOutInput, actor: Actor, idempotencyKe
     : null;
 
   const result = await prisma.$transaction(async (tx) => {
-    await claimIdempotencyKey(tx, actor.businessId, idempotencyKey, STOCK_OUT_ENDPOINT);
+    await claimIdempotencyKey(tx, actor.businessId, actor.userId, idempotencyKey, STOCK_OUT_ENDPOINT, input);
 
     const warehouse = await getOrCreateWarehouse(tx, actor.businessId);
 
@@ -151,7 +151,7 @@ export async function stockOut(input: StockOutInput, actor: Actor, idempotencyKe
     });
 
     const responseBody = JSON.parse(JSON.stringify({ data: movement })) as unknown;
-    await completeIdempotencyKey(tx, actor.businessId, idempotencyKey, STOCK_OUT_ENDPOINT, 201, responseBody);
+    await completeIdempotencyKey(tx, actor.businessId, actor.userId, idempotencyKey, STOCK_OUT_ENDPOINT, 201, responseBody);
 
     return { movement, stockOutReceipt };
   }, WAREHOUSE_MOVEMENT_TRANSACTION_OPTIONS);

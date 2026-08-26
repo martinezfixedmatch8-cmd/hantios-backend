@@ -53,7 +53,7 @@ async function assertNoActiveNameCollision(businessId: string, name: string, exc
 // index is converted from P2002 to a clean 409.
 export async function createDepartment(input: CreateDepartmentInput, actor: Actor, idempotencyKey: string) {
   return prisma.$transaction(async (tx) => {
-    await claimIdempotencyKey(tx, actor.businessId, idempotencyKey, CREATE_DEPARTMENT_ENDPOINT);
+    await claimIdempotencyKey(tx, actor.businessId, actor.userId, idempotencyKey, CREATE_DEPARTMENT_ENDPOINT, input);
     await assertNoActiveNameCollision(actor.businessId, input.name);
 
     let department;
@@ -78,7 +78,7 @@ export async function createDepartment(input: CreateDepartmentInput, actor: Acto
     });
 
     const responseBody = JSON.parse(JSON.stringify({ data: department })) as unknown;
-    await completeIdempotencyKey(tx, actor.businessId, idempotencyKey, CREATE_DEPARTMENT_ENDPOINT, 201, responseBody);
+    await completeIdempotencyKey(tx, actor.businessId, actor.userId, idempotencyKey, CREATE_DEPARTMENT_ENDPOINT, 201, responseBody);
     return department;
   });
 }
@@ -150,13 +150,13 @@ export async function updateDepartment(id: string, input: UpdateDepartmentInput,
 // own review already caught and fixed for expense-category restore.
 export async function archiveDepartment(id: string, input: ArchiveDepartmentInput, actor: Actor, idempotencyKey: string) {
   return prisma.$transaction(async (tx) => {
-    await claimIdempotencyKey(tx, actor.businessId, idempotencyKey, archiveDepartmentEndpoint(id));
+    await claimIdempotencyKey(tx, actor.businessId, actor.userId, idempotencyKey, archiveDepartmentEndpoint(id), input);
 
     const department = await getOwned(tx.departments.findUnique({ where: { id } }), actor.businessId, "Department");
 
     if (department.status === "archived") {
       const responseBody = JSON.parse(JSON.stringify({ data: department })) as unknown;
-      await completeIdempotencyKey(tx, actor.businessId, idempotencyKey, archiveDepartmentEndpoint(id), 200, responseBody);
+      await completeIdempotencyKey(tx, actor.businessId, actor.userId, idempotencyKey, archiveDepartmentEndpoint(id), 200, responseBody);
       return department;
     }
 
@@ -179,7 +179,7 @@ export async function archiveDepartment(id: string, input: ArchiveDepartmentInpu
     });
 
     const responseBody = JSON.parse(JSON.stringify({ data: updated })) as unknown;
-    await completeIdempotencyKey(tx, actor.businessId, idempotencyKey, archiveDepartmentEndpoint(id), 200, responseBody);
+    await completeIdempotencyKey(tx, actor.businessId, actor.userId, idempotencyKey, archiveDepartmentEndpoint(id), 200, responseBody);
     return updated;
   });
 }
@@ -190,13 +190,13 @@ export async function archiveDepartment(id: string, input: ArchiveDepartmentInpu
 // P2002 to a clean 409.
 export async function restoreDepartment(id: string, input: RestoreDepartmentInput, actor: Actor, idempotencyKey: string) {
   return prisma.$transaction(async (tx) => {
-    await claimIdempotencyKey(tx, actor.businessId, idempotencyKey, restoreDepartmentEndpoint(id));
+    await claimIdempotencyKey(tx, actor.businessId, actor.userId, idempotencyKey, restoreDepartmentEndpoint(id), input);
 
     const department = await getOwned(tx.departments.findUnique({ where: { id } }), actor.businessId, "Department");
 
     if (department.status === "active") {
       const responseBody = JSON.parse(JSON.stringify({ data: department })) as unknown;
-      await completeIdempotencyKey(tx, actor.businessId, idempotencyKey, restoreDepartmentEndpoint(id), 200, responseBody);
+      await completeIdempotencyKey(tx, actor.businessId, actor.userId, idempotencyKey, restoreDepartmentEndpoint(id), 200, responseBody);
       return department;
     }
 
@@ -225,7 +225,7 @@ export async function restoreDepartment(id: string, input: RestoreDepartmentInpu
     });
 
     const responseBody = JSON.parse(JSON.stringify({ data: updated })) as unknown;
-    await completeIdempotencyKey(tx, actor.businessId, idempotencyKey, restoreDepartmentEndpoint(id), 200, responseBody);
+    await completeIdempotencyKey(tx, actor.businessId, actor.userId, idempotencyKey, restoreDepartmentEndpoint(id), 200, responseBody);
     return updated;
   });
 }

@@ -23,13 +23,14 @@ export async function recordAdvancePayment(req: Request, res: Response, next: Ne
     const { id } = idParamSchema.parse(req.params);
     const idempotencyKey = getIdempotencyKey(req);
 
-    const replayed = await getReplayedResponse(actor.businessId, idempotencyKey, service.recordAdvancePaymentEndpoint(id));
+    const input = recordAdvancePaymentSchema.parse(req.body);
+
+    const replayed = await getReplayedResponse(actor.businessId, actor.userId, idempotencyKey, service.recordAdvancePaymentEndpoint(id), input);
     if (replayed) {
       res.status(replayed.status).json(replayed.body);
       return;
     }
 
-    const input = recordAdvancePaymentSchema.parse(req.body);
     const result = await service.recordAdvancePayment(id, input, actor, idempotencyKey);
     res.status(201).json({ data: result });
   } catch (err) {
@@ -56,13 +57,14 @@ export async function reverseAdvancePayment(req: Request, res: Response, next: N
     const { id, paymentId } = paymentIdParamSchema.parse(req.params);
     const idempotencyKey = getIdempotencyKey(req);
 
-    const replayed = await getReplayedResponse(actor.businessId, idempotencyKey, service.reverseAdvancePaymentEndpoint(id, paymentId));
+    const input = reverseAdvancePaymentSchema.parse(req.body);
+
+    const replayed = await getReplayedResponse(actor.businessId, actor.userId, idempotencyKey, service.reverseAdvancePaymentEndpoint(id, paymentId), input);
     if (replayed) {
       res.status(replayed.status).json(replayed.body);
       return;
     }
 
-    const input = reverseAdvancePaymentSchema.parse(req.body);
     const result = await service.reverseAdvancePayment(id, paymentId, input, actor, idempotencyKey);
     res.status(201).json({ data: result });
   } catch (err) {
