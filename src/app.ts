@@ -32,9 +32,25 @@ import payrollRoutes from "./routes/payroll.routes";
 import attendanceRoutes from "./routes/attendance.routes";
 import commissionRoutes from "./routes/commission.routes";
 import compensationPolicyRoutes from "./routes/compensationPolicy.routes";
+import healthRoutes from "./routes/health.routes";
+import { requestId } from "./middleware/requestId";
+import { requestLogging } from "./middleware/requestLogging";
 import { notFoundHandler, errorHandler } from "./middleware/errorHandler";
 
 export const app = express();
+
+// Batch 8 Session B (HNT-OBS-001) -- deliberately the first two
+// app.use() calls, before helmet()/cors()/the raw-body webhook route/
+// express.json(). requestId must run before requestLogging (which reads
+// req.requestId), and both must run before the raw-body webhook mount below
+// since that route never touches express.json() and would otherwise be the
+// one request shape with no correlation id or logged outcome.
+app.use(requestId);
+app.use(requestLogging);
+// Mounted this early so Railway's own health/readiness probes stay
+// independent of helmet/cors/body-parsing and (per the locked scope) no
+// rate limiter -- none exists globally today, and none is added here.
+app.use(healthRoutes);
 
 app.use(helmet());
 // credentials: true is required now that /auth issues cookie-based sessions -- paired with
