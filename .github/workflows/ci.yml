@@ -155,15 +155,29 @@ jobs:
           PGCONNSTR: "postgresql://${{ steps.create.outputs.db_role }}:${{ env.DB_PASSWORD }}@${{ steps.create.outputs.db_host }}/${{ steps.create.outputs.db_name }}?sslmode=require"
         run: |
           set -euo pipefail
-          for i in 1 2 3 4 5; do
+          # A brand-new branch's compute is being provisioned for the first
+          # time (init -> active), not waking an already-existing compute
+          # from scale-to-zero (Neon's own documented "a few hundred ms"
+          # figure applies only to that faster, different case) -- so this
+          # budget is sized for real first-time cold-start latency, not
+          # idle-resume latency. Exponential backoff: 3s, 6s, 12s, then
+          # capped at 20s for the remaining attempts, 10 attempts total
+          # (141s of sleep in the worst case) -- fast on the common case
+          # (compute already reachable within the first attempt or two),
+          # generous on the tail for a genuinely slow cold start.
+          delays=(3 6 12 20 20 20 20 20 20)
+          for i in 1 2 3 4 5 6 7 8 9 10; do
             if psql "$PGCONNSTR" -c "SELECT 1" >/dev/null 2>&1; then
-              echo "warm-up ok"
+              echo "warm-up ok (attempt $i)"
               exit 0
             fi
-            echo "warm-up attempt $i failed, retrying in 5s..."
-            sleep 5
+            if [ "$i" -lt 10 ]; then
+              delay="${delays[$((i - 1))]}"
+              echo "warm-up attempt $i failed, retrying in ${delay}s..."
+              sleep "$delay"
+            fi
           done
-          echo "::error::Ephemeral branch never became reachable (read-only SELECT 1) after 5 attempts."
+          echo "::error::Ephemeral branch never became reachable (read-only SELECT 1) after 10 attempts with exponential backoff."
           exit 1
 
   db-integration-tests:
