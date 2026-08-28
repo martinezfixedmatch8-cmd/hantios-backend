@@ -114,10 +114,12 @@ jobs:
         run: |
           set -euo pipefail
           BRANCH_NAME="ci-pr-${{ github.event.number }}-${{ github.run_id }}"
-          RESPONSE=$(curl -sS -X POST "https://console.neon.tech/api/v2/projects/${NEON_PROJECT_ID}/branches" \
+          RESPONSE_WITH_STATUS=$(curl -sS -w "\n%{http_code}" -X POST "https://console.neon.tech/api/v2/projects/${NEON_PROJECT_ID}/branches" \
             -H "Authorization: Bearer ${NEON_API_TOKEN}" \
             -H "Content-Type: application/json" \
             -d "{\"branch\":{\"name\":\"${BRANCH_NAME}\"},\"endpoints\":[{\"type\":\"read_write\"}]}")
+          HTTP_STATUS=$(echo "$RESPONSE_WITH_STATUS" | tail -n1)
+          RESPONSE=$(echo "$RESPONSE_WITH_STATUS" | sed '$d')
 
           BRANCH_ID=$(echo "$RESPONSE" | jq -r '.branch.id')
           DB_HOST=$(echo "$RESPONSE" | jq -r '.connection_uris[0].connection_parameters.host')
@@ -126,6 +128,20 @@ jobs:
           DB_PASSWORD=$(echo "$RESPONSE" | jq -r '.connection_uris[0].connection_parameters.password')
 
           if [ -z "$BRANCH_ID" ] || [ "$BRANCH_ID" = "null" ]; then
+            # Safe, minimal diagnostics only -- the HTTP status code itself is
+            # never sensitive, and Neon's own standard error shape's
+            # "message"/"code" fields are printed on their own, never the
+            # full raw response (which could echo back request fields) and
+            # never anything under connection_uris (credentials).
+            echo "Neon branch-creation HTTP status: ${HTTP_STATUS}"
+            ERROR_MESSAGE=$(echo "$RESPONSE" | jq -r '.message // empty')
+            ERROR_CODE=$(echo "$RESPONSE" | jq -r '.code // empty')
+            if [ -n "$ERROR_MESSAGE" ]; then
+              echo "Neon error message: ${ERROR_MESSAGE}"
+            fi
+            if [ -n "$ERROR_CODE" ]; then
+              echo "Neon error code: ${ERROR_CODE}"
+            fi
             echo "::error::Neon branch creation did not return a branch id -- aborting, nothing to clean up."
             exit 1
           fi
