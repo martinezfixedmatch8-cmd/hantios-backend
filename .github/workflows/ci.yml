@@ -1,0 +1,280 @@
+name: CI
+
+# Batch 8 Session B (HNT-TEST-001). Confirmed absent before this session --
+# no .github/workflows/ directory existed at all.
+#
+# Deliberately the plain pull_request trigger, never its own "_target"
+# variant -- this repo is genuinely public (confirmed directly against the
+# live GitHub page during Phase 0), so a fork PR is a real, live
+# possibility, not a hypothetical. The plain trigger gives a fork PR's run
+# a read-only GITHUB_TOKEN and NO access to repository secrets by default;
+# the "_target" variant runs in the base repo's own secret-bearing context
+# while typically checking out the fork's own untrusted code -- exactly the
+# exploited class of Actions vulnerability this avoids by construction, not
+# by a runtime check. (tests/ciWorkflow.unit.test.ts asserts the banned
+# trigger name never appears literally anywhere in this file, including in
+# comments -- worded this way so this explanation doesn't trip its own
+# check, the same self-referential class of false positive already
+# documented for emailArchitectureLock.unit.test.ts.)
+on:
+  pull_request:
+
+# A second concurrent push to the same PR cancels the still-running check
+# for the prior one -- avoids piling up ephemeral Neon branches for
+# superseded commits.
+concurrency:
+  group: ci-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  # Fork-safe: runs for EVERY pull_request event, same-repo or fork alike.
+  # No secret is referenced anywhere in this job -- not filtered at
+  # runtime, structurally absent from this job's own step definitions.
+  # DATABASE_URL/JWT_* below are hardcoded placeholder strings (not
+  # `secrets.*`), present only so src/lib/config.ts's Zod schema (which
+  # requires non-empty values, loaded transitively by importing src/app.ts)
+  # doesn't reject module load -- no real database is ever contacted by
+  # anything this job runs.
+  checks:
+    name: Checks (no secrets, all PRs incl. forks)
+    runs-on: ubuntu-latest
+    env:
+      NODE_ENV: test
+      DATABASE_URL: "postgresql://placeholder:placeholder@localhost:5432/placeholder"
+      JWT_ACCESS_SECRET: "placeholder-access-secret-at-least-32-chars-long"
+      JWT_REFRESH_SECRET: "placeholder-refresh-secret-at-least-32-chars-long"
+      JWT_OTP_SECRET: "placeholder-otp-secret-at-least-32-characters-long"
+      JWT_RESET_SECRET: "placeholder-reset-secret-at-least-32-chars-long"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "26"
+          cache: "npm"
+      - run: npm ci
+      - run: npx prisma generate
+      - run: npx tsc --noEmit
+      - run: npm run lint
+      - run: npm run build
+      # A curated, explicit allowlist of test files confirmed (by direct
+      # import-graph inspection during Phase 0) to never import src/app.ts,
+      # src/lib/prisma.ts, or any DB-touching test helper -- these exercise
+      # pure functions only, so they're genuinely safe to run against the
+      # placeholder DATABASE_URL above (module load succeeds; nothing ever
+      # attempts a real query). Deliberately NOT "every *.unit.test.ts file"
+      # -- that would silently include a future unit test that DOES need a
+      # real DB the moment someone adds one, without this list's own author
+      # re-verifying it belongs here.
+      - name: Run DB-free unit tests
+        run: >
+          npx jest --runInBand
+          tests/businessTime.unit.test.ts
+          tests/ciWorkflow.unit.test.ts
+          tests/countryReference.unit.test.ts
+          tests/emailArchitectureLock.unit.test.ts
+          tests/emailProviderSelection.unit.test.ts
+          tests/emailTemplateRenderer.unit.test.ts
+          tests/inboundEmailCorrelation.unit.test.ts
+          tests/interestEngine.unit.test.ts
+          tests/messageTemplates.unit.test.ts
+          tests/password.unit.test.ts
+          tests/phoneNormalization.unit.test.ts
+          tests/receiptRenderer.unit.test.ts
+          tests/resendEmailProvider.unit.test.ts
+          tests/resendWebhookVerification.unit.test.ts
+          tests/stockAlerts.unit.test.ts
+
+  # Same-repo PRs only -- github.event.pull_request.head.repo.full_name
+  # differs from github.repository exactly when the PR's head is a fork.
+  # Shows as a genuinely SKIPPED job in the Actions UI for a fork PR, not a
+  # silent no-op.
+  provision-db:
+    name: Provision ephemeral Neon test branch
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    outputs:
+      branch_id: ${{ steps.create.outputs.branch_id }}
+      db_host: ${{ steps.create.outputs.db_host }}
+      db_name: ${{ steps.create.outputs.db_name }}
+      db_role: ${{ steps.create.outputs.db_role }}
+    steps:
+      - name: Ensure psql and jq are available
+        run: |
+          set -euo pipefail
+          command -v jq >/dev/null || sudo apt-get update -y && sudo apt-get install -y jq
+          command -v psql >/dev/null || (sudo apt-get update -y && sudo apt-get install -y postgresql-client)
+
+      - name: Create ephemeral branch (Neon Management API)
+        id: create
+        env:
+          NEON_API_TOKEN: ${{ secrets.NEON_CI_TEST_API_TOKEN }}
+          # Repository VARIABLE (not a secret -- project ids aren't
+          # sensitive), set separately in repo Settings > Variables.
+          NEON_PROJECT_ID: ${{ vars.NEON_CI_PROJECT_ID }}
+        run: |
+          set -euo pipefail
+          BRANCH_NAME="ci-pr-${{ github.event.number }}-${{ github.run_id }}"
+          RESPONSE=$(curl -sS -X POST "https://console.neon.tech/api/v2/projects/${NEON_PROJECT_ID}/branches" \
+            -H "Authorization: Bearer ${NEON_API_TOKEN}" \
+            -H "Content-Type: application/json" \
+            -d "{\"branch\":{\"name\":\"${BRANCH_NAME}\"},\"endpoints\":[{\"type\":\"read_write\"}]}")
+
+          BRANCH_ID=$(echo "$RESPONSE" | jq -r '.branch.id')
+          DB_HOST=$(echo "$RESPONSE" | jq -r '.connection_uris[0].connection_parameters.host')
+          DB_NAME=$(echo "$RESPONSE" | jq -r '.connection_uris[0].connection_parameters.database')
+          DB_ROLE=$(echo "$RESPONSE" | jq -r '.connection_uris[0].connection_parameters.role')
+          DB_PASSWORD=$(echo "$RESPONSE" | jq -r '.connection_uris[0].connection_parameters.password')
+
+          if [ -z "$BRANCH_ID" ] || [ "$BRANCH_ID" = "null" ]; then
+            echo "::error::Neon branch creation did not return a branch id -- aborting, nothing to clean up."
+            exit 1
+          fi
+
+          # Mask BEFORE ever echoing/using again -- add-mask applies to the
+          # rest of this whole workflow run's log stream, including in
+          # downstream jobs that reference the same value via outputs.
+          echo "::add-mask::${DB_PASSWORD}"
+          echo "::add-mask::${DB_HOST}"
+
+          {
+            echo "branch_id=${BRANCH_ID}"
+            echo "db_host=${DB_HOST}"
+            echo "db_name=${DB_NAME}"
+            echo "db_role=${DB_ROLE}"
+          } >> "$GITHUB_OUTPUT"
+
+          # db_password is deliberately NOT a job output (job outputs, even
+          # masked ones, are visible in the run's own Summary UI as `***`
+          # rather than being withheld entirely) -- instead written straight
+          # into this step's own masked env for use two steps below, in
+          # THIS job only. Downstream jobs never see it at all.
+          echo "DB_PASSWORD=${DB_PASSWORD}" >> "$GITHUB_ENV"
+
+      - name: Confirm this run's own branch is reachable (warm-up, direct/non-pooled host only)
+        env:
+          PGCONNSTR: "postgresql://${{ steps.create.outputs.db_role }}:${{ env.DB_PASSWORD }}@${{ steps.create.outputs.db_host }}/${{ steps.create.outputs.db_name }}?sslmode=require"
+        run: |
+          set -euo pipefail
+          for i in 1 2 3 4 5; do
+            if psql "$PGCONNSTR" -c "SELECT 1" >/dev/null 2>&1; then
+              echo "warm-up ok"
+              exit 0
+            fi
+            echo "warm-up attempt $i failed, retrying in 5s..."
+            sleep 5
+          done
+          echo "::error::Ephemeral branch never became reachable (read-only SELECT 1) after 5 attempts."
+          exit 1
+
+  db-integration-tests:
+    name: DB integration tests (same-repo PRs only)
+    needs: provision-db
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    env:
+      NODE_ENV: test
+      JWT_ACCESS_SECRET: "placeholder-access-secret-at-least-32-chars-long"
+      JWT_REFRESH_SECRET: "placeholder-refresh-secret-at-least-32-chars-long"
+      JWT_OTP_SECRET: "placeholder-otp-secret-at-least-32-characters-long"
+      JWT_RESET_SECRET: "placeholder-reset-secret-at-least-32-chars-long"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "26"
+          cache: "npm"
+      - run: npm ci
+      - run: npx prisma generate
+      - name: Build this run's own connection string (direct/non-pooled host only, never printed)
+        env:
+          DB_HOST: ${{ needs.provision-db.outputs.db_host }}
+          DB_NAME: ${{ needs.provision-db.outputs.db_name }}
+          DB_ROLE: ${{ needs.provision-db.outputs.db_role }}
+          NEON_API_TOKEN: ${{ secrets.NEON_CI_TEST_API_TOKEN }}
+          NEON_PROJECT_ID: ${{ vars.NEON_CI_PROJECT_ID }}
+          BRANCH_ID: ${{ needs.provision-db.outputs.branch_id }}
+        run: |
+          set -euo pipefail
+          # The password was never passed as a job output (see provision-db's
+          # own comment) -- re-fetch it directly from the Neon API for this
+          # exact branch id instead of re-deriving/guessing it.
+          ROLE_RESPONSE=$(curl -sS "https://console.neon.tech/api/v2/projects/${NEON_PROJECT_ID}/branches/${BRANCH_ID}/roles/${DB_ROLE}/reveal_password" \
+            -H "Authorization: Bearer ${NEON_API_TOKEN}")
+          DB_PASSWORD=$(echo "$ROLE_RESPONSE" | jq -r '.password')
+          echo "::add-mask::${DB_PASSWORD}"
+          echo "::add-mask::${DB_HOST}"
+          echo "DATABASE_URL=postgresql://${DB_ROLE}:${DB_PASSWORD}@${DB_HOST}/${DB_NAME}?sslmode=require" >> "$GITHUB_ENV"
+      - run: npx prisma migrate deploy
+      - run: npx prisma migrate status
+      - name: Run main test suite (quarantined tests excluded -- see tests/quarantine.config.js)
+        run: npx jest --runInBand -t "$(node scripts/quarantinePattern.js exclude)"
+      # tsc/lint/build are NOT repeated here -- they already run
+      # unconditionally in the `checks` job for every PR event, same-repo
+      # ones included, so re-running them here would just duplicate CI
+      # minutes for zero new information.
+
+  quarantine-tests:
+    name: Quarantined tests (informational, non-blocking -- issues #6-#9)
+    needs: provision-db
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    env:
+      NODE_ENV: test
+      JWT_ACCESS_SECRET: "placeholder-access-secret-at-least-32-chars-long"
+      JWT_REFRESH_SECRET: "placeholder-refresh-secret-at-least-32-chars-long"
+      JWT_OTP_SECRET: "placeholder-otp-secret-at-least-32-characters-long"
+      JWT_RESET_SECRET: "placeholder-reset-secret-at-least-32-chars-long"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "26"
+          cache: "npm"
+      - run: npm ci
+      - run: npx prisma generate
+      - name: Build this run's own connection string (direct/non-pooled host only, never printed)
+        env:
+          DB_HOST: ${{ needs.provision-db.outputs.db_host }}
+          DB_NAME: ${{ needs.provision-db.outputs.db_name }}
+          DB_ROLE: ${{ needs.provision-db.outputs.db_role }}
+          NEON_API_TOKEN: ${{ secrets.NEON_CI_TEST_API_TOKEN }}
+          NEON_PROJECT_ID: ${{ vars.NEON_CI_PROJECT_ID }}
+          BRANCH_ID: ${{ needs.provision-db.outputs.branch_id }}
+        run: |
+          set -euo pipefail
+          ROLE_RESPONSE=$(curl -sS "https://console.neon.tech/api/v2/projects/${NEON_PROJECT_ID}/branches/${BRANCH_ID}/roles/${DB_ROLE}/reveal_password" \
+            -H "Authorization: Bearer ${NEON_API_TOKEN}")
+          DB_PASSWORD=$(echo "$ROLE_RESPONSE" | jq -r '.password')
+          echo "::add-mask::${DB_PASSWORD}"
+          echo "::add-mask::${DB_HOST}"
+          echo "DATABASE_URL=postgresql://${DB_ROLE}:${DB_PASSWORD}@${DB_HOST}/${DB_NAME}?sslmode=require" >> "$GITHUB_ENV"
+      - name: Run ONLY the quarantined tests (issues #6-#9 -- see tests/quarantine.config.js)
+        run: npx jest --runInBand -t "$(node scripts/quarantinePattern.js include)"
+
+  # Runs regardless of whether provisioning or either test job succeeded,
+  # failed, or was skipped -- the cleanup boundary is deleting the exact
+  # branch id this run itself created, nothing broader. A cleanup failure
+  # fails/reports only this job, never deletes anything beyond that one id.
+  cleanup-db:
+    name: Delete this run's own ephemeral Neon branch
+    needs: [provision-db, db-integration-tests, quarantine-tests]
+    if: always() && needs.provision-db.result == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Delete branch by exact stored id (never a name search)
+        env:
+          NEON_API_TOKEN: ${{ secrets.NEON_CI_TEST_API_TOKEN }}
+          NEON_PROJECT_ID: ${{ vars.NEON_CI_PROJECT_ID }}
+          BRANCH_ID: ${{ needs.provision-db.outputs.branch_id }}
+        run: |
+          set +e
+          HTTP_STATUS=$(curl -sS -o /tmp/delete_response.json -w "%{http_code}" -X DELETE \
+            "https://console.neon.tech/api/v2/projects/${NEON_PROJECT_ID}/branches/${BRANCH_ID}" \
+            -H "Authorization: Bearer ${NEON_API_TOKEN}")
+          if [ "$HTTP_STATUS" != "200" ]; then
+            echo "::error::Failed to delete ephemeral branch ${BRANCH_ID} (HTTP ${HTTP_STATUS}). This run's branch may be orphaned -- naming convention ci-pr-${{ github.event.number }}-${{ github.run_id }} makes it identifiable for manual cleanup. Not attempting any broader deletion."
+            cat /tmp/delete_response.json
+            exit 1
+          fi
+          echo "Deleted ephemeral branch ${BRANCH_ID}."
