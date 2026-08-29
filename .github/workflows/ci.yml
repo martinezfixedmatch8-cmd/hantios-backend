@@ -122,10 +122,21 @@ jobs:
           RESPONSE=$(echo "$RESPONSE_WITH_STATUS" | sed '$d')
 
           BRANCH_ID=$(echo "$RESPONSE" | jq -r '.branch.id')
-          DB_HOST=$(echo "$RESPONSE" | jq -r '.connection_uris[0].connection_parameters.host')
-          DB_NAME=$(echo "$RESPONSE" | jq -r '.connection_uris[0].connection_parameters.database')
-          DB_ROLE=$(echo "$RESPONSE" | jq -r '.connection_uris[0].connection_parameters.role')
-          DB_PASSWORD=$(echo "$RESPONSE" | jq -r '.connection_uris[0].connection_parameters.password')
+          # HNT-CI-DNS-001: Neon's own docs confirm the response's
+          # connection-URIs field is OMITTED whenever the parent branch has
+          # more than one role or database -- confirmed as the real, root
+          # cause of this whole investigation (jq's own null-propagation
+          # silently turned a missing path into the literal text "null",
+          # never an error, so every extracted "host" was never a real
+          # hostname at all). host/database-name/role-name are read instead
+          # from endpoints/databases/roles -- confirmed via Neon's own API
+          # reference to be REQUIRED/always-populated fields, unlike that
+          # connection-URIs field. The role's actual PASSWORD is
+          # deliberately NOT read from here (see the dedicated
+          # reveal-password step below for why).
+          DB_HOST=$(echo "$RESPONSE" | jq -r '.endpoints[0].host')
+          DB_NAME=$(echo "$RESPONSE" | jq -r '.databases[0].name')
+          DB_ROLE=$(echo "$RESPONSE" | jq -r '.roles[0].name')
           # Confirmed via Neon's own createProjectBranch API reference: the
           # response's operations array includes a "start_compute" entry
           # (alongside create_branch/create_compute) with its own id/status
@@ -139,7 +150,7 @@ jobs:
             # never sensitive, and Neon's own standard error shape's
             # "message"/"code" fields are printed on their own, never the
             # full raw response (which could echo back request fields) and
-            # never anything under connection_uris (credentials).
+            # never anything under the connection-URIs field (credentials).
             echo "Neon branch-creation HTTP status: ${HTTP_STATUS}"
             ERROR_MESSAGE=$(echo "$RESPONSE" | jq -r '.message // empty')
             ERROR_CODE=$(echo "$RESPONSE" | jq -r '.code // empty')
@@ -156,7 +167,6 @@ jobs:
           # Mask BEFORE ever echoing/using again -- add-mask applies to the
           # rest of this whole workflow run's log stream, including in
           # downstream jobs that reference the same value via outputs.
-          echo "::add-mask::${DB_PASSWORD}"
           echo "::add-mask::${DB_HOST}"
 
           {
@@ -167,11 +177,38 @@ jobs:
             echo "start_compute_operation_id=${START_COMPUTE_OPERATION_ID}"
           } >> "$GITHUB_OUTPUT"
 
+      - name: Reveal role password (Neon Management API)
+        env:
+          NEON_API_TOKEN: ${{ secrets.NEON_CI_TEST_API_TOKEN }}
+          NEON_PROJECT_ID: ${{ vars.NEON_CI_PROJECT_ID }}
+          BRANCH_ID: ${{ steps.create.outputs.branch_id }}
+          DB_ROLE: ${{ steps.create.outputs.db_role }}
+        run: |
+          set -euo pipefail
+          # HNT-CI-DNS-001 continued: Neon's own docs confirm a real
+          # password value appears in a standalone "create role" response,
+          # but there is no concrete example confirming the same holds for
+          # a "roles" array bundled inside a branch-creation response --
+          # rather than guess in a security-sensitive path, this reuses the
+          # exact reveal_password call already proven working elsewhere in
+          # this same file (db-integration-tests' own connection-string
+          # step), instead of trusting an unconfirmed field or introducing
+          # a third, never-before-used pattern in this repo.
+          ROLE_RESPONSE=$(curl -sS "https://console.neon.tech/api/v2/projects/${NEON_PROJECT_ID}/branches/${BRANCH_ID}/roles/${DB_ROLE}/reveal_password" \
+            -H "Authorization: Bearer ${NEON_API_TOKEN}")
+          DB_PASSWORD=$(echo "$ROLE_RESPONSE" | jq -r '.password // empty')
+
+          if [ -z "$DB_PASSWORD" ]; then
+            echo "::error::Neon did not return a usable password via reveal_password -- aborting."
+            exit 1
+          fi
+
           # db_password is deliberately NOT a job output (job outputs, even
           # masked ones, are visible in the run's own Summary UI as `***`
           # rather than being withheld entirely) -- instead written straight
-          # into this step's own masked env for use two steps below, in
+          # into this step's own masked env for use by later steps, in
           # THIS job only. Downstream jobs never see it at all.
+          echo "::add-mask::${DB_PASSWORD}"
           echo "DB_PASSWORD=${DB_PASSWORD}" >> "$GITHUB_ENV"
 
       - name: Wait for compute to be ready (poll start_compute operation)
@@ -272,18 +309,26 @@ jobs:
       - name: Confirm this run's own branch is reachable (final psql check, direct/non-pooled host only)
         env:
           PGCONNSTR: "postgresql://${{ steps.create.outputs.db_role }}:${{ env.DB_PASSWORD }}@${{ steps.create.outputs.db_host }}/${{ steps.create.outputs.db_name }}?sslmode=require"
-          DB_HOST: ${{ steps.create.outputs.db_host }}
         run: |
           set -euo pipefail
-          # Short, fixed final confirmation only -- the prior step's
-          # 120s operations-poll is now the primary readiness mechanism;
-          # this just absorbs any small residual DNS-propagation lag
-          # Neon's own docs don't explicitly rule out even once the
-          # compute itself reports "active" (they document no guaranteed
-          # link between the two). 5 fixed attempts, 3s apart (~12s worst
-          # case) -- proportionate to a confirmation step, not a primary
-          # wait mechanism; no exponential backoff needed here since the
-          # real waiting already happened in the operations-poll above.
+          # Short, fixed final confirmation only -- the operations-poll
+          # step above is the primary readiness mechanism; this just
+          # absorbs any small residual DNS-propagation lag Neon's own
+          # docs don't explicitly rule out even once the compute itself
+          # reports "active" (they document no guaranteed link between
+          # the two). 5 fixed attempts, 3s apart (~12s worst case) --
+          # proportionate to a confirmation step, not a primary wait
+          # mechanism; no exponential backoff needed here since the real
+          # waiting already happened in the operations-poll above.
+          #
+          # The one-off DNS diagnostic (getent hosts / dig @8.8.8.8 /
+          # literal-"null" check) that used to live in this step's final
+          # attempt was investigative only, purpose-built to diagnose
+          # HNT-CI-DNS-001 -- host/name/role are now read from the
+          # confirmed-reliable endpoints/databases/roles fields (see the
+          # create step), so that diagnostic's own premise (an
+          # unreliably-extracted, bogus host string) no longer applies.
+          # Removed rather than left to rot as dead investigative code.
           for i in 1 2 3 4 5; do
             if PSQL_STDERR=$(psql "$PGCONNSTR" -c "SELECT 1" 2>&1 >/dev/null); then
               echo "warm-up ok (attempt $i)"
@@ -293,46 +338,16 @@ jobs:
             # (host/password/role/dbname are all embedded together in this
             # one value) if it appears verbatim in psql's own error text --
             # defense in depth alongside GitHub's own ::add-mask:: on
-            # DB_HOST/DB_PASSWORD (already registered in the create step,
-            # which persists for the rest of this job's log stream), never
-            # relying on masking alone. What remains is just the error
-            # class/message, never a credential.
+            # DB_HOST/DB_PASSWORD (already registered in the create/
+            # reveal-password steps, which persists for the rest of this
+            # job's log stream), never relying on masking alone. What
+            # remains is just the error class/message, never a credential.
             SANITIZED_ERROR="${PSQL_STDERR//$PGCONNSTR/[connection string redacted]}"
             if [ "$i" -lt 5 ]; then
               echo "warm-up attempt $i failed, retrying in 3s. psql error: ${SANITIZED_ERROR}"
               sleep 3
             else
               echo "warm-up attempt $i (final) failed. psql error: ${SANITIZED_ERROR}"
-              # One-off diagnostic on the final failure only, to distinguish
-              # a GitHub-Actions-runner-side resolver issue (hypothesis B)
-              # from genuine Neon-side DNS propagation lag beyond the
-              # operations-poll's own "finished" signal (hypothesis A).
-              # Never repeated per-attempt -- purely investigative, and the
-              # answer won't meaningfully change attempt-to-attempt within
-              # this same ~15s window. Neither hostnames nor the lookup
-              # results here are credentials -- this is a throwaway test
-              # branch already gated to same-repo PRs only, and DB_HOST is
-              # already registered via ::add-mask:: from the create step
-              # regardless, so it still renders as *** in the log even
-              # though printing it is fine for this diagnostic.
-              # Confirm or refute, before the DNS lookups below, whether
-              # DB_HOST was ever a real hostname at all: Neon's own API
-              # reference documents that connection_uris is OMITTED from
-              # the branch-creation response whenever the parent branch
-              # has more than one role or database -- jq's own null-
-              # propagation would then make our .connection_uris[0]...
-              # extraction silently yield the literal text "null" (never
-              # an error), not a real host. Boolean-only check, never the
-              # raw value -- if this hypothesis is wrong, DB_HOST could
-              # be a real hostname that shouldn't be printed even here.
-              if [ "$DB_HOST" = "null" ]; then
-                echo "CONFIRMED: DB_HOST is the literal string 'null' -- connection_uris was absent from the branch-creation response."
-              else
-                echo "DB_HOST is NOT the literal string 'null' -- hypothesis needs revision. Length: ${#DB_HOST} characters."
-              fi
-              command -v dig >/dev/null 2>&1 || sudo apt-get update -y && sudo apt-get install -y dnsutils
-              echo "Default-resolver lookup (getent hosts): $(getent hosts "$DB_HOST" 2>&1 || echo 'FAILED')"
-              echo "Explicit public-resolver lookup (dig @8.8.8.8): $(dig +short "$DB_HOST" @8.8.8.8 2>&1 || echo 'FAILED')"
             fi
           done
           echo "::error::Ephemeral branch never became reachable (read-only SELECT 1) after 5 confirmation attempts, despite the operations-poll reporting the compute as ready."

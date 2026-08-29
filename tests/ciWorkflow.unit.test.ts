@@ -103,8 +103,16 @@ describe("CI workflow -- static security properties", () => {
     expect(workflow).toMatch(/#6-#9/);
   });
 
-  it("the warm-up step uses the connection's own direct (non-pooled) host field, never pooler_host", () => {
-    expect(workflow).toContain("connection_parameters.host");
+  it("branch creation reads the direct (non-pooled) host from endpoints, never connection_uris or pooler_host", () => {
+    // HNT-CI-DNS-001: connection_uris is documented by Neon as omitted
+    // from the branch-creation response whenever the parent branch has
+    // more than one role or database -- confirmed as the real root
+    // cause of a whole DNS investigation (jq's own null-propagation
+    // silently turned the missing path into the literal string "null").
+    // endpoints[].host is the confirmed-reliable, always-populated
+    // replacement; pooler_host is Neon's own deprecated field.
+    expect(workflow).toContain("endpoints[0].host");
+    expect(workflow).not.toContain("connection_uris");
     expect(workflow).not.toContain("pooler_host");
   });
 });
