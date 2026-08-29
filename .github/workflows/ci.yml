@@ -126,6 +126,13 @@ jobs:
           DB_NAME=$(echo "$RESPONSE" | jq -r '.connection_uris[0].connection_parameters.database')
           DB_ROLE=$(echo "$RESPONSE" | jq -r '.connection_uris[0].connection_parameters.role')
           DB_PASSWORD=$(echo "$RESPONSE" | jq -r '.connection_uris[0].connection_parameters.password')
+          # Confirmed via Neon's own createProjectBranch API reference: the
+          # response's operations array includes a "start_compute" entry
+          # (alongside create_branch/create_compute) with its own id/status
+          # -- this is the real, authoritative readiness signal the next
+          # step polls, never guessed from the operation's own id alone.
+          # Not a secret -- operation ids aren't sensitive.
+          START_COMPUTE_OPERATION_ID=$(echo "$RESPONSE" | jq -r '.operations[]? | select(.action == "start_compute") | .id')
 
           if [ -z "$BRANCH_ID" ] || [ "$BRANCH_ID" = "null" ]; then
             # Safe, minimal diagnostics only -- the HTTP status code itself is
@@ -157,6 +164,7 @@ jobs:
             echo "db_host=${DB_HOST}"
             echo "db_name=${DB_NAME}"
             echo "db_role=${DB_ROLE}"
+            echo "start_compute_operation_id=${START_COMPUTE_OPERATION_ID}"
           } >> "$GITHUB_OUTPUT"
 
           # db_password is deliberately NOT a job output (job outputs, even
@@ -166,23 +174,116 @@ jobs:
           # THIS job only. Downstream jobs never see it at all.
           echo "DB_PASSWORD=${DB_PASSWORD}" >> "$GITHUB_ENV"
 
-      - name: Confirm this run's own branch is reachable (warm-up, direct/non-pooled host only)
+      - name: Wait for compute to be ready (poll start_compute operation)
+        env:
+          NEON_API_TOKEN: ${{ secrets.NEON_CI_TEST_API_TOKEN }}
+          NEON_PROJECT_ID: ${{ vars.NEON_CI_PROJECT_ID }}
+          OPERATION_ID: ${{ steps.create.outputs.start_compute_operation_id }}
+        run: |
+          set -euo pipefail
+          # Real readiness mechanism, not a guess: the prior "warm-up" step
+          # here used to blindly retry a psql SELECT 1 on a timer, hoping
+          # DNS/compute-readiness happened to line up -- diagnostics added
+          # to that loop then proved the actual failure was a DNS lookup
+          # never resolving, unrelated to how long we waited. This polls
+          # Neon's own Management API operation status instead (confirmed
+          # via their createProjectBranch/getProjectOperation API
+          # references: the branch-creation response's own operations
+          # array includes a start_compute entry with real, authoritative
+          # status values -- scheduling/running/finished/failed/error/
+          # cancelling/cancelled/skipped), which is what Neon's own MCP
+          # server's create_branch tool does under the hood too ("waits
+          # until it is ready", confirmed from its own source to use a
+          # bounded wait against the Management API, not a blind
+          # connection retry -- matching the ~13s real readiness already
+          # observed through that tool).
+          #
+          # 120s budget: matches Neon's own MCP server's evidenced
+          # WAIT.timeoutMs = 120_000 for this exact "waits until ready"
+          # behavior (mcp/tools/generated/adapt.ts in
+          # neondatabase/mcp-server-neon) -- reusing their own real number
+          # rather than a fresh guess. Checked every 4s (~30 checks over
+          # the budget): frequent enough to return promptly the moment the
+          # operation actually finishes, not so frequent as to hammer the
+          # Management API for a bounded async job that doesn't need
+          # exponential backoff the way a cold, unbounded external
+          # dependency (like the old DNS-retry loop) did.
+          if [ -z "$OPERATION_ID" ] || [ "$OPERATION_ID" = "null" ]; then
+            echo "::error::No start_compute operation id was returned by branch creation -- cannot confirm readiness, aborting."
+            exit 1
+          fi
+
+          DEADLINE=$(( $(date +%s) + 120 ))
+          while true; do
+            # Tolerate a transient failure reaching Neon's own Management
+            # API here -- this is a call to Neon's control plane, not to
+            # the ephemeral branch itself, and a single dropped request
+            # must not abort the whole step under set -e. `|| true` keeps
+            # the substitution's own exit status 0 regardless of curl's;
+            # an empty/non-JSON response then falls back to "unknown"
+            # rather than letting a jq parse failure crash the script the
+            # same way. "unknown" matches neither "finished" nor the
+            # terminal-failure case list below, so it simply falls through
+            # to the existing deadline check and another 4s poll -- the
+            # 120s deadline and the terminal-status checks stay the real
+            # safety bounds either way; this only stops one bad poll
+            # attempt from ending the loop early.
+            OP_RESPONSE=$(curl -sS "https://console.neon.tech/api/v2/projects/${NEON_PROJECT_ID}/operations/${OPERATION_ID}" \
+              -H "Authorization: Bearer ${NEON_API_TOKEN}" || true)
+            if [ -z "$OP_RESPONSE" ]; then
+              OP_STATUS="unknown"
+            else
+              OP_STATUS=$(echo "$OP_RESPONSE" | jq -r '.operation.status // "unknown"' 2>/dev/null || echo "unknown")
+            fi
+
+            if [ "$OP_STATUS" = "finished" ]; then
+              echo "start_compute operation finished -- compute is active."
+              exit 0
+            fi
+
+            # failed/error/cancelled/skipped are all real terminal outcomes
+            # that will never become "finished" no matter how long we wait
+            # -- surface immediately as an error rather than burning the
+            # rest of the 120s budget (or the next step's own psql retry
+            # budget) on something that can't succeed. "skipped" is
+            # included here as a judgment call, not a documented failure
+            # state: Neon's docs don't say what it means for this specific
+            # operation type, so it's treated the same as a genuine
+            # failure rather than guessed as an implicit success.
+            # "cancelling" (still in progress) is deliberately NOT in this
+            # list -- it keeps polling like scheduling/running until it
+            # settles into the real terminal "cancelled" state.
+            case "$OP_STATUS" in
+              failed|error|cancelled|skipped)
+                echo "::error::start_compute operation ended in status '${OP_STATUS}' -- it will never become ready, aborting without wasting the psql confirmation budget on it."
+                exit 1
+                ;;
+            esac
+
+            if [ "$(date +%s)" -ge "$DEADLINE" ]; then
+              echo "::error::start_compute operation did not reach 'finished' within 120s (last status: '${OP_STATUS}')."
+              exit 1
+            fi
+
+            echo "start_compute operation status: ${OP_STATUS}, checking again in 4s..."
+            sleep 4
+          done
+
+      - name: Confirm this run's own branch is reachable (final psql check, direct/non-pooled host only)
         env:
           PGCONNSTR: "postgresql://${{ steps.create.outputs.db_role }}:${{ env.DB_PASSWORD }}@${{ steps.create.outputs.db_host }}/${{ steps.create.outputs.db_name }}?sslmode=require"
         run: |
           set -euo pipefail
-          # A brand-new branch's compute is being provisioned for the first
-          # time (init -> active), not waking an already-existing compute
-          # from scale-to-zero (Neon's own documented "a few hundred ms"
-          # figure applies only to that faster, different case) -- so this
-          # budget is sized for real first-time cold-start latency, not
-          # idle-resume latency. Exponential backoff: 3s, 6s, 12s, then
-          # capped at 20s for the remaining attempts, 10 attempts total
-          # (141s of sleep in the worst case) -- fast on the common case
-          # (compute already reachable within the first attempt or two),
-          # generous on the tail for a genuinely slow cold start.
-          delays=(3 6 12 20 20 20 20 20 20)
-          for i in 1 2 3 4 5 6 7 8 9 10; do
+          # Short, fixed final confirmation only -- the prior step's
+          # 120s operations-poll is now the primary readiness mechanism;
+          # this just absorbs any small residual DNS-propagation lag
+          # Neon's own docs don't explicitly rule out even once the
+          # compute itself reports "active" (they document no guaranteed
+          # link between the two). 5 fixed attempts, 3s apart (~12s worst
+          # case) -- proportionate to a confirmation step, not a primary
+          # wait mechanism; no exponential backoff needed here since the
+          # real waiting already happened in the operations-poll above.
+          for i in 1 2 3 4 5; do
             if PSQL_STDERR=$(psql "$PGCONNSTR" -c "SELECT 1" 2>&1 >/dev/null); then
               echo "warm-up ok (attempt $i)"
               exit 0
@@ -191,21 +292,19 @@ jobs:
             # (host/password/role/dbname are all embedded together in this
             # one value) if it appears verbatim in psql's own error text --
             # defense in depth alongside GitHub's own ::add-mask:: on
-            # DB_HOST/DB_PASSWORD (already registered in the prior step,
+            # DB_HOST/DB_PASSWORD (already registered in the create step,
             # which persists for the rest of this job's log stream), never
             # relying on masking alone. What remains is just the error
-            # class/message (e.g. "connection timed out", "server closed
-            # the connection unexpectedly"), never a credential.
+            # class/message, never a credential.
             SANITIZED_ERROR="${PSQL_STDERR//$PGCONNSTR/[connection string redacted]}"
-            if [ "$i" -lt 10 ]; then
-              delay="${delays[$((i - 1))]}"
-              echo "warm-up attempt $i failed, retrying in ${delay}s. psql error: ${SANITIZED_ERROR}"
-              sleep "$delay"
+            if [ "$i" -lt 5 ]; then
+              echo "warm-up attempt $i failed, retrying in 3s. psql error: ${SANITIZED_ERROR}"
+              sleep 3
             else
               echo "warm-up attempt $i (final) failed. psql error: ${SANITIZED_ERROR}"
             fi
           done
-          echo "::error::Ephemeral branch never became reachable (read-only SELECT 1) after 10 attempts with exponential backoff."
+          echo "::error::Ephemeral branch never became reachable (read-only SELECT 1) after 5 confirmation attempts, despite the operations-poll reporting the compute as ready."
           exit 1
 
   db-integration-tests:
