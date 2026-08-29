@@ -183,14 +183,26 @@ jobs:
           # generous on the tail for a genuinely slow cold start.
           delays=(3 6 12 20 20 20 20 20 20)
           for i in 1 2 3 4 5 6 7 8 9 10; do
-            if psql "$PGCONNSTR" -c "SELECT 1" >/dev/null 2>&1; then
+            if PSQL_STDERR=$(psql "$PGCONNSTR" -c "SELECT 1" 2>&1 >/dev/null); then
               echo "warm-up ok (attempt $i)"
               exit 0
             fi
+            # Sanitize before ever printing: strip the full connection string
+            # (host/password/role/dbname are all embedded together in this
+            # one value) if it appears verbatim in psql's own error text --
+            # defense in depth alongside GitHub's own ::add-mask:: on
+            # DB_HOST/DB_PASSWORD (already registered in the prior step,
+            # which persists for the rest of this job's log stream), never
+            # relying on masking alone. What remains is just the error
+            # class/message (e.g. "connection timed out", "server closed
+            # the connection unexpectedly"), never a credential.
+            SANITIZED_ERROR="${PSQL_STDERR//$PGCONNSTR/[connection string redacted]}"
             if [ "$i" -lt 10 ]; then
               delay="${delays[$((i - 1))]}"
-              echo "warm-up attempt $i failed, retrying in ${delay}s..."
+              echo "warm-up attempt $i failed, retrying in ${delay}s. psql error: ${SANITIZED_ERROR}"
               sleep "$delay"
+            else
+              echo "warm-up attempt $i (final) failed. psql error: ${SANITIZED_ERROR}"
             fi
           done
           echo "::error::Ephemeral branch never became reachable (read-only SELECT 1) after 10 attempts with exponential backoff."
@@ -286,10 +298,18 @@ jobs:
   # failed, or was skipped -- the cleanup boundary is deleting the exact
   # branch id this run itself created, nothing broader. A cleanup failure
   # fails/reports only this job, never deletes anything beyond that one id.
+  #
+  # Gated on the branch_id OUTPUT existing, never on provision-db's own
+  # overall job result: branch creation is one early step in that job,
+  # warm-up is a later, separate step -- a branch created successfully by
+  # the first step still costs real Neon resources and must be deleted
+  # even when a later step (warm-up) fails and makes the whole job's own
+  # result "failure". Job outputs set via $GITHUB_OUTPUT persist even when
+  # a later step in the same job fails, so this check is reliable.
   cleanup-db:
     name: Delete this run's own ephemeral Neon branch
     needs: [provision-db, db-integration-tests, quarantine-tests]
-    if: always() && needs.provision-db.result == 'success'
+    if: always() && needs.provision-db.outputs.branch_id != ''
     runs-on: ubuntu-latest
     steps:
       - name: Delete branch by exact stored id (never a name search)
