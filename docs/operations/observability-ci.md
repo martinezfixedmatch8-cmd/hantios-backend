@@ -45,18 +45,19 @@ Both confirmed absent before this session via direct search of `src/app.ts`/`src
 
 **Outstanding configuration dependency, not resolvable from inside this session**: `vars.NEON_CI_PROJECT_ID` (a repository *variable*, not a secret — project IDs aren't sensitive) must be set in **Settings → Secrets and variables → Actions → Variables** before this workflow can run its database-touching jobs; `secrets.NEON_CI_TEST_API_TOKEN` must already exist as a real, least-privilege, test-project-scoped secret (referenced here on the assumption it's already been provisioned, per this session's own authorization). Branch protection (requiring the `checks` and `db-integration-tests` jobs to pass before merge) is a separate, follow-up **repository setting**, not a code change — not yet configured, not treated as done here.
 
-## Test quarantine — issues #6–#9
+## Test quarantine — issues #6–#9, #13
 
-`tests/quarantine.config.js` is the single source of truth: four named entries, each with a file, a unique test-name fragment, a real linked GitHub issue number, an owner, and an expiry date (`2026-11-25`). `scripts/quarantinePattern.js` reads this file and builds two jest `-t` regexes — the negative-lookahead "exclude" pattern for the blocking `db-integration-tests` job, and the positive "include" pattern for the informational `quarantine-tests` job — so there is exactly one place this list can drift.
+`tests/quarantine.config.js` is the single source of truth: five named entries, each with a file, a unique test-name fragment, a real linked GitHub issue number, an owner, and an expiry date. `scripts/quarantinePattern.js` reads this file and builds two jest `-t` regexes — the negative-lookahead "exclude" pattern for the blocking `db-integration-tests` job, and the positive "include" pattern for the informational `quarantine-tests` job — so there is exactly one place this list can drift.
 
 Never a bare `.skip()`, never a broad `testPathIgnorePatterns`. The script refuses to run (non-zero exit, listing every expired entry by id/issue/owner) once any entry's `expiryDate` has passed, unless a human has explicitly edited that entry's own `renewedUntil` field to a later date — a real, reviewed diff, never a silent auto-extension.
 
-| Id | File | Issue | Root cause |
-|---|---|---|---|
-| HNT-FLAKY-006 | `tests/debt.test.ts` | [#6](../../../../issues/6) | `date-fns` `differenceInCalendarMonths` calendar-boundary sensitivity; long-documented across multiple prior remediation batches |
-| HNT-FLAKY-007 | `tests/debt.test.ts` | [#7](../../../../issues/7) | Samples up to 6 wall-clock hour candidates, each a full HTTP+DB round trip, inside a fixed 30s timeout; reproduced identically in isolation during Batch 8 Session A verification |
-| HNT-FLAKY-008 | `tests/poCommercialInvoice.test.ts` | [#8](../../../../issues/8) | Setup helper called 3× in a loop, each walking the full shipment state machine; reproduced identically in isolation |
-| HNT-FLAKY-009 | `tests/poShipment.test.ts` | [#9](../../../../issues/9) | 11-Incoterm loop, each iteration a full PO-create+send+shipment-create cycle (44+ round trips); reproduced identically in isolation |
+| Id | File | Issue | Expiry | Root cause |
+|---|---|---|---|---|
+| HNT-FLAKY-006 | `tests/debt.test.ts` | [#6](../../../../issues/6) | 2026-11-25 | `date-fns` `differenceInCalendarMonths` calendar-boundary sensitivity; long-documented across multiple prior remediation batches |
+| HNT-FLAKY-007 | `tests/debt.test.ts` | [#7](../../../../issues/7) | 2026-11-25 | Samples up to 6 wall-clock hour candidates, each a full HTTP+DB round trip, inside a fixed 30s timeout; reproduced identically in isolation during Batch 8 Session A verification |
+| HNT-FLAKY-008 | `tests/poCommercialInvoice.test.ts` | [#8](../../../../issues/8) | 2026-11-25 | Setup helper called 3× in a loop, each walking the full shipment state machine; reproduced identically in isolation |
+| HNT-FLAKY-009 | `tests/poShipment.test.ts` | [#9](../../../../issues/9) | 2026-11-25 | 11-Incoterm loop, each iteration a full PO-create+send+shipment-create cycle (44+ round trips); reproduced identically in isolation |
+| HNT-FLAKY-013 | `tests/supplierPaymentInstruction.test.ts` | [#13](../../../../issues/13) | 2026-11-27 | Concurrent set-default test fails (409 instead of 200) 3/3 times on freshly-created ephemeral CI branches, passes cleanly on the long-lived local branch same session; direct tracing of the service's own lock/constraint logic found no constructible path to this failure -- correlation with branch freshness is established, the mechanism is not yet proven |
 
 All four are confirmed, by direct isolated reproduction during Session A's own full-suite verification, to be real-clock/environment-latency sensitivity in the test's own design — not a defect in any Batch 8 (or earlier) production code path.
 

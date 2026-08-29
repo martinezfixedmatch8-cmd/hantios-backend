@@ -99,8 +99,8 @@ describe("CI workflow -- static security properties", () => {
     expect(workflow).toContain("https://console.neon.tech/api/v2/projects/${NEON_PROJECT_ID}/branches");
   });
 
-  it("the workflow's own comments reference all four quarantined issues", () => {
-    expect(workflow).toMatch(/#6-#9/);
+  it("the workflow's own comments reference all five quarantined issues", () => {
+    expect(workflow).toMatch(/#6-#9, #13/);
   });
 
   it("branch creation reads the direct (non-pooled) host from endpoints, never connection_uris or pooler_host", () => {
@@ -118,9 +118,9 @@ describe("CI workflow -- static security properties", () => {
 });
 
 describe("Quarantine config -- referential integrity with CI", () => {
-  it("every quarantine entry references one of the four confirmed issues (#6-#9), each exactly once", () => {
-    const issues = quarantineEntries.map((e) => e.issue).sort();
-    expect(issues).toEqual([6, 7, 8, 9]);
+  it("every quarantine entry references one of the five confirmed issues (#6-#9, #13), each exactly once", () => {
+    const issues = quarantineEntries.map((e) => e.issue).sort((a, b) => a - b);
+    expect(issues).toEqual([6, 7, 8, 9, 13]);
   });
 
   it("every quarantine entry has a non-empty owner and a well-formed expiryDate", () => {

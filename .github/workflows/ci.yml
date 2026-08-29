@@ -440,7 +440,7 @@ jobs:
       # minutes for zero new information.
 
   quarantine-tests:
-    name: Quarantined tests (informational, non-blocking -- issues #6-#9)
+    name: Quarantined tests (informational, non-blocking -- issues #6-#9, #13)
     needs: provision-db
     if: github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
@@ -500,7 +500,7 @@ jobs:
           DB_PASSWORD=$(echo "$ROLE_RESPONSE" | jq -r '.password')
           echo "::add-mask::${DB_PASSWORD}"
           echo "DATABASE_URL=postgresql://${DB_ROLE}:${DB_PASSWORD}@${DB_HOST}/${DB_NAME}?sslmode=require" >> "$GITHUB_ENV"
-      - name: Run ONLY the quarantined tests (issues #6-#9 -- see tests/quarantine.config.js)
+      - name: Run ONLY the quarantined tests (issues #6-#9, #13 -- see tests/quarantine.config.js)
         run: npx jest --runInBand -t "$(node scripts/quarantinePattern.js include)"
 
   # Runs regardless of whether provisioning or either test job succeeded,
