@@ -77,8 +77,14 @@ describe("CI workflow -- static security properties", () => {
     expect(getJobBody("quarantine-tests")).toMatch(/continue-on-error:\s*true/);
   });
 
-  it("cleanup runs under if: always() and is scoped to whether provision-db itself succeeded", () => {
-    expect(getJobBody("cleanup-db")).toMatch(/if:\s*always\(\)\s*&&\s*needs\.provision-db\.result\s*==\s*'success'/);
+  it("cleanup runs under if: always() and is scoped to whether provision-db actually created a branch, not the job's own overall result", () => {
+    // Branch creation and warm-up are separate steps within provision-db --
+    // a branch created successfully by the first step must still be
+    // deleted even when a later step (warm-up) fails and makes the whole
+    // job's own result "failure". Gating on the job's overall result
+    // (the original, since-fixed condition) skipped cleanup in exactly
+    // that case, orphaning a real, billable Neon branch.
+    expect(getJobBody("cleanup-db")).toMatch(/if:\s*always\(\)\s*&&\s*needs\.provision-db\.outputs\.branch_id\s*!=\s*''/);
   });
 
   it("cleanup deletes by the exact stored branch_id output, never a name search or list call", () => {
