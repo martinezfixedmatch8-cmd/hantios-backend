@@ -77,8 +77,14 @@ describe("CI workflow -- static security properties", () => {
     expect(getJobBody("quarantine-tests")).toMatch(/continue-on-error:\s*true/);
   });
 
-  it("cleanup runs under if: always() and is scoped to whether provision-db itself succeeded", () => {
-    expect(getJobBody("cleanup-db")).toMatch(/if:\s*always\(\)\s*&&\s*needs\.provision-db\.result\s*==\s*'success'/);
+  it("cleanup runs under if: always() and is scoped to whether provision-db actually created a branch, not the job's own overall result", () => {
+    // Branch creation and warm-up are separate steps within provision-db --
+    // a branch created successfully by the first step must still be
+    // deleted even when a later step (warm-up) fails and makes the whole
+    // job's own result "failure". Gating on the job's overall result
+    // (the original, since-fixed condition) skipped cleanup in exactly
+    // that case, orphaning a real, billable Neon branch.
+    expect(getJobBody("cleanup-db")).toMatch(/if:\s*always\(\)\s*&&\s*needs\.provision-db\.outputs\.branch_id\s*!=\s*''/);
   });
 
   it("cleanup deletes by the exact stored branch_id output, never a name search or list call", () => {
@@ -93,20 +99,28 @@ describe("CI workflow -- static security properties", () => {
     expect(workflow).toContain("https://console.neon.tech/api/v2/projects/${NEON_PROJECT_ID}/branches");
   });
 
-  it("the workflow's own comments reference all four quarantined issues", () => {
-    expect(workflow).toMatch(/#6-#9/);
+  it("the workflow's own comments reference all five quarantined issues", () => {
+    expect(workflow).toMatch(/#6-#9, #13/);
   });
 
-  it("the warm-up step uses the connection's own direct (non-pooled) host field, never pooler_host", () => {
-    expect(workflow).toContain("connection_parameters.host");
+  it("branch creation reads the direct (non-pooled) host from endpoints, never connection_uris or pooler_host", () => {
+    // HNT-CI-DNS-001: connection_uris is documented by Neon as omitted
+    // from the branch-creation response whenever the parent branch has
+    // more than one role or database -- confirmed as the real root
+    // cause of a whole DNS investigation (jq's own null-propagation
+    // silently turned the missing path into the literal string "null").
+    // endpoints[].host is the confirmed-reliable, always-populated
+    // replacement; pooler_host is Neon's own deprecated field.
+    expect(workflow).toContain("endpoints[0].host");
+    expect(workflow).not.toContain("connection_uris");
     expect(workflow).not.toContain("pooler_host");
   });
 });
 
 describe("Quarantine config -- referential integrity with CI", () => {
-  it("every quarantine entry references one of the four confirmed issues (#6-#9), each exactly once", () => {
-    const issues = quarantineEntries.map((e) => e.issue).sort();
-    expect(issues).toEqual([6, 7, 8, 9]);
+  it("every quarantine entry references one of the five confirmed issues (#6-#9, #13), each exactly once", () => {
+    const issues = quarantineEntries.map((e) => e.issue).sort((a, b) => a - b);
+    expect(issues).toEqual([6, 7, 8, 9, 13]);
   });
 
   it("every quarantine entry has a non-empty owner and a well-formed expiryDate", () => {

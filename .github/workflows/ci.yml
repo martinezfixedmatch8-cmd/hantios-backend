@@ -94,9 +94,22 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       branch_id: ${{ steps.create.outputs.branch_id }}
-      db_host: ${{ steps.create.outputs.db_host }}
       db_name: ${{ steps.create.outputs.db_name }}
       db_role: ${{ steps.create.outputs.db_role }}
+      # HNT-CI-DNS-002: db_host is deliberately NOT a job output. Neon's own
+      # API schema marks the endpoint host field "x-sensitive" (the same
+      # annotation as Role.password) -- confirmed directly against their
+      # createProjectBranch/getProjectEndpoint references, not assumed.
+      # It stays masked and step-scoped within THIS job only (the
+      # operations-poll/final-confirmation steps below still read it via
+      # steps.create.outputs.db_host); GitHub Actions blanks a masked value
+      # to empty the moment it crosses a job boundary via
+      # needs.<job>.outputs.<name>, which is exactly what silently broke
+      # db-integration-tests/quarantine-tests the first time this job ever
+      # ran far enough to expose it. Each of those jobs now re-derives its
+      # own host independently instead, the same way they already
+      # re-derive the password via reveal_password rather than trusting a
+      # masked job output.
     steps:
       - name: Ensure psql and jq are available
         run: |
@@ -122,17 +135,35 @@ jobs:
           RESPONSE=$(echo "$RESPONSE_WITH_STATUS" | sed '$d')
 
           BRANCH_ID=$(echo "$RESPONSE" | jq -r '.branch.id')
-          DB_HOST=$(echo "$RESPONSE" | jq -r '.connection_uris[0].connection_parameters.host')
-          DB_NAME=$(echo "$RESPONSE" | jq -r '.connection_uris[0].connection_parameters.database')
-          DB_ROLE=$(echo "$RESPONSE" | jq -r '.connection_uris[0].connection_parameters.role')
-          DB_PASSWORD=$(echo "$RESPONSE" | jq -r '.connection_uris[0].connection_parameters.password')
+          # HNT-CI-DNS-001: Neon's own docs confirm the response's
+          # connection-URIs field is OMITTED whenever the parent branch has
+          # more than one role or database -- confirmed as the real, root
+          # cause of this whole investigation (jq's own null-propagation
+          # silently turned a missing path into the literal text "null",
+          # never an error, so every extracted "host" was never a real
+          # hostname at all). host/database-name/role-name are read instead
+          # from endpoints/databases/roles -- confirmed via Neon's own API
+          # reference to be REQUIRED/always-populated fields, unlike that
+          # connection-URIs field. The role's actual PASSWORD is
+          # deliberately NOT read from here (see the dedicated
+          # reveal-password step below for why).
+          DB_HOST=$(echo "$RESPONSE" | jq -r '.endpoints[0].host')
+          DB_NAME=$(echo "$RESPONSE" | jq -r '.databases[0].name')
+          DB_ROLE=$(echo "$RESPONSE" | jq -r '.roles[0].name')
+          # Confirmed via Neon's own createProjectBranch API reference: the
+          # response's operations array includes a "start_compute" entry
+          # (alongside create_branch/create_compute) with its own id/status
+          # -- this is the real, authoritative readiness signal the next
+          # step polls, never guessed from the operation's own id alone.
+          # Not a secret -- operation ids aren't sensitive.
+          START_COMPUTE_OPERATION_ID=$(echo "$RESPONSE" | jq -r '.operations[]? | select(.action == "start_compute") | .id')
 
           if [ -z "$BRANCH_ID" ] || [ "$BRANCH_ID" = "null" ]; then
             # Safe, minimal diagnostics only -- the HTTP status code itself is
             # never sensitive, and Neon's own standard error shape's
             # "message"/"code" fields are printed on their own, never the
             # full raw response (which could echo back request fields) and
-            # never anything under connection_uris (credentials).
+            # never anything under the connection-URIs field (credentials).
             echo "Neon branch-creation HTTP status: ${HTTP_STATUS}"
             ERROR_MESSAGE=$(echo "$RESPONSE" | jq -r '.message // empty')
             ERROR_CODE=$(echo "$RESPONSE" | jq -r '.code // empty')
@@ -149,7 +180,6 @@ jobs:
           # Mask BEFORE ever echoing/using again -- add-mask applies to the
           # rest of this whole workflow run's log stream, including in
           # downstream jobs that reference the same value via outputs.
-          echo "::add-mask::${DB_PASSWORD}"
           echo "::add-mask::${DB_HOST}"
 
           {
@@ -157,43 +187,183 @@ jobs:
             echo "db_host=${DB_HOST}"
             echo "db_name=${DB_NAME}"
             echo "db_role=${DB_ROLE}"
+            echo "start_compute_operation_id=${START_COMPUTE_OPERATION_ID}"
           } >> "$GITHUB_OUTPUT"
+
+      - name: Reveal role password (Neon Management API)
+        env:
+          NEON_API_TOKEN: ${{ secrets.NEON_CI_TEST_API_TOKEN }}
+          NEON_PROJECT_ID: ${{ vars.NEON_CI_PROJECT_ID }}
+          BRANCH_ID: ${{ steps.create.outputs.branch_id }}
+          DB_ROLE: ${{ steps.create.outputs.db_role }}
+        run: |
+          set -euo pipefail
+          # HNT-CI-DNS-001 continued: Neon's own docs confirm a real
+          # password value appears in a standalone "create role" response,
+          # but there is no concrete example confirming the same holds for
+          # a "roles" array bundled inside a branch-creation response --
+          # rather than guess in a security-sensitive path, this reuses the
+          # exact reveal_password call already proven working elsewhere in
+          # this same file (db-integration-tests' own connection-string
+          # step), instead of trusting an unconfirmed field or introducing
+          # a third, never-before-used pattern in this repo.
+          ROLE_RESPONSE=$(curl -sS "https://console.neon.tech/api/v2/projects/${NEON_PROJECT_ID}/branches/${BRANCH_ID}/roles/${DB_ROLE}/reveal_password" \
+            -H "Authorization: Bearer ${NEON_API_TOKEN}")
+          DB_PASSWORD=$(echo "$ROLE_RESPONSE" | jq -r '.password // empty')
+
+          if [ -z "$DB_PASSWORD" ]; then
+            echo "::error::Neon did not return a usable password via reveal_password -- aborting."
+            exit 1
+          fi
 
           # db_password is deliberately NOT a job output (job outputs, even
           # masked ones, are visible in the run's own Summary UI as `***`
           # rather than being withheld entirely) -- instead written straight
-          # into this step's own masked env for use two steps below, in
+          # into this step's own masked env for use by later steps, in
           # THIS job only. Downstream jobs never see it at all.
+          echo "::add-mask::${DB_PASSWORD}"
           echo "DB_PASSWORD=${DB_PASSWORD}" >> "$GITHUB_ENV"
 
-      - name: Confirm this run's own branch is reachable (warm-up, direct/non-pooled host only)
+      - name: Wait for compute to be ready (poll start_compute operation)
+        env:
+          NEON_API_TOKEN: ${{ secrets.NEON_CI_TEST_API_TOKEN }}
+          NEON_PROJECT_ID: ${{ vars.NEON_CI_PROJECT_ID }}
+          OPERATION_ID: ${{ steps.create.outputs.start_compute_operation_id }}
+        run: |
+          set -euo pipefail
+          # Real readiness mechanism, not a guess: the prior "warm-up" step
+          # here used to blindly retry a psql SELECT 1 on a timer, hoping
+          # DNS/compute-readiness happened to line up -- diagnostics added
+          # to that loop then proved the actual failure was a DNS lookup
+          # never resolving, unrelated to how long we waited. This polls
+          # Neon's own Management API operation status instead (confirmed
+          # via their createProjectBranch/getProjectOperation API
+          # references: the branch-creation response's own operations
+          # array includes a start_compute entry with real, authoritative
+          # status values -- scheduling/running/finished/failed/error/
+          # cancelling/cancelled/skipped), which is what Neon's own MCP
+          # server's create_branch tool does under the hood too ("waits
+          # until it is ready", confirmed from its own source to use a
+          # bounded wait against the Management API, not a blind
+          # connection retry -- matching the ~13s real readiness already
+          # observed through that tool).
+          #
+          # 120s budget: matches Neon's own MCP server's evidenced
+          # WAIT.timeoutMs = 120_000 for this exact "waits until ready"
+          # behavior (mcp/tools/generated/adapt.ts in
+          # neondatabase/mcp-server-neon) -- reusing their own real number
+          # rather than a fresh guess. Checked every 4s (~30 checks over
+          # the budget): frequent enough to return promptly the moment the
+          # operation actually finishes, not so frequent as to hammer the
+          # Management API for a bounded async job that doesn't need
+          # exponential backoff the way a cold, unbounded external
+          # dependency (like the old DNS-retry loop) did.
+          if [ -z "$OPERATION_ID" ] || [ "$OPERATION_ID" = "null" ]; then
+            echo "::error::No start_compute operation id was returned by branch creation -- cannot confirm readiness, aborting."
+            exit 1
+          fi
+
+          DEADLINE=$(( $(date +%s) + 120 ))
+          while true; do
+            # Tolerate a transient failure reaching Neon's own Management
+            # API here -- this is a call to Neon's control plane, not to
+            # the ephemeral branch itself, and a single dropped request
+            # must not abort the whole step under set -e. `|| true` keeps
+            # the substitution's own exit status 0 regardless of curl's;
+            # an empty/non-JSON response then falls back to "unknown"
+            # rather than letting a jq parse failure crash the script the
+            # same way. "unknown" matches neither "finished" nor the
+            # terminal-failure case list below, so it simply falls through
+            # to the existing deadline check and another 4s poll -- the
+            # 120s deadline and the terminal-status checks stay the real
+            # safety bounds either way; this only stops one bad poll
+            # attempt from ending the loop early.
+            OP_RESPONSE=$(curl -sS "https://console.neon.tech/api/v2/projects/${NEON_PROJECT_ID}/operations/${OPERATION_ID}" \
+              -H "Authorization: Bearer ${NEON_API_TOKEN}" || true)
+            if [ -z "$OP_RESPONSE" ]; then
+              OP_STATUS="unknown"
+            else
+              OP_STATUS=$(echo "$OP_RESPONSE" | jq -r '.operation.status // "unknown"' 2>/dev/null || echo "unknown")
+            fi
+
+            if [ "$OP_STATUS" = "finished" ]; then
+              echo "start_compute operation finished -- compute is active."
+              exit 0
+            fi
+
+            # failed/error/cancelled/skipped are all real terminal outcomes
+            # that will never become "finished" no matter how long we wait
+            # -- surface immediately as an error rather than burning the
+            # rest of the 120s budget (or the next step's own psql retry
+            # budget) on something that can't succeed. "skipped" is
+            # included here as a judgment call, not a documented failure
+            # state: Neon's docs don't say what it means for this specific
+            # operation type, so it's treated the same as a genuine
+            # failure rather than guessed as an implicit success.
+            # "cancelling" (still in progress) is deliberately NOT in this
+            # list -- it keeps polling like scheduling/running until it
+            # settles into the real terminal "cancelled" state.
+            case "$OP_STATUS" in
+              failed|error|cancelled|skipped)
+                echo "::error::start_compute operation ended in status '${OP_STATUS}' -- it will never become ready, aborting without wasting the psql confirmation budget on it."
+                exit 1
+                ;;
+            esac
+
+            if [ "$(date +%s)" -ge "$DEADLINE" ]; then
+              echo "::error::start_compute operation did not reach 'finished' within 120s (last status: '${OP_STATUS}')."
+              exit 1
+            fi
+
+            echo "start_compute operation status: ${OP_STATUS}, checking again in 4s..."
+            sleep 4
+          done
+
+      - name: Confirm this run's own branch is reachable (final psql check, direct/non-pooled host only)
         env:
           PGCONNSTR: "postgresql://${{ steps.create.outputs.db_role }}:${{ env.DB_PASSWORD }}@${{ steps.create.outputs.db_host }}/${{ steps.create.outputs.db_name }}?sslmode=require"
         run: |
           set -euo pipefail
-          # A brand-new branch's compute is being provisioned for the first
-          # time (init -> active), not waking an already-existing compute
-          # from scale-to-zero (Neon's own documented "a few hundred ms"
-          # figure applies only to that faster, different case) -- so this
-          # budget is sized for real first-time cold-start latency, not
-          # idle-resume latency. Exponential backoff: 3s, 6s, 12s, then
-          # capped at 20s for the remaining attempts, 10 attempts total
-          # (141s of sleep in the worst case) -- fast on the common case
-          # (compute already reachable within the first attempt or two),
-          # generous on the tail for a genuinely slow cold start.
-          delays=(3 6 12 20 20 20 20 20 20)
-          for i in 1 2 3 4 5 6 7 8 9 10; do
-            if psql "$PGCONNSTR" -c "SELECT 1" >/dev/null 2>&1; then
+          # Short, fixed final confirmation only -- the operations-poll
+          # step above is the primary readiness mechanism; this just
+          # absorbs any small residual DNS-propagation lag Neon's own
+          # docs don't explicitly rule out even once the compute itself
+          # reports "active" (they document no guaranteed link between
+          # the two). 5 fixed attempts, 3s apart (~12s worst case) --
+          # proportionate to a confirmation step, not a primary wait
+          # mechanism; no exponential backoff needed here since the real
+          # waiting already happened in the operations-poll above.
+          #
+          # The one-off DNS diagnostic (getent hosts / dig @8.8.8.8 /
+          # literal-"null" check) that used to live in this step's final
+          # attempt was investigative only, purpose-built to diagnose
+          # HNT-CI-DNS-001 -- host/name/role are now read from the
+          # confirmed-reliable endpoints/databases/roles fields (see the
+          # create step), so that diagnostic's own premise (an
+          # unreliably-extracted, bogus host string) no longer applies.
+          # Removed rather than left to rot as dead investigative code.
+          for i in 1 2 3 4 5; do
+            if PSQL_STDERR=$(psql "$PGCONNSTR" -c "SELECT 1" 2>&1 >/dev/null); then
               echo "warm-up ok (attempt $i)"
               exit 0
             fi
-            if [ "$i" -lt 10 ]; then
-              delay="${delays[$((i - 1))]}"
-              echo "warm-up attempt $i failed, retrying in ${delay}s..."
-              sleep "$delay"
+            # Sanitize before ever printing: strip the full connection string
+            # (host/password/role/dbname are all embedded together in this
+            # one value) if it appears verbatim in psql's own error text --
+            # defense in depth alongside GitHub's own ::add-mask:: on
+            # DB_HOST/DB_PASSWORD (already registered in the create/
+            # reveal-password steps, which persists for the rest of this
+            # job's log stream), never relying on masking alone. What
+            # remains is just the error class/message, never a credential.
+            SANITIZED_ERROR="${PSQL_STDERR//$PGCONNSTR/[connection string redacted]}"
+            if [ "$i" -lt 5 ]; then
+              echo "warm-up attempt $i failed, retrying in 3s. psql error: ${SANITIZED_ERROR}"
+              sleep 3
+            else
+              echo "warm-up attempt $i (final) failed. psql error: ${SANITIZED_ERROR}"
             fi
           done
-          echo "::error::Ephemeral branch never became reachable (read-only SELECT 1) after 10 attempts with exponential backoff."
+          echo "::error::Ephemeral branch never became reachable (read-only SELECT 1) after 5 confirmation attempts, despite the operations-poll reporting the compute as ready."
           exit 1
 
   db-integration-tests:
@@ -207,6 +377,15 @@ jobs:
       JWT_REFRESH_SECRET: "placeholder-refresh-secret-at-least-32-chars-long"
       JWT_OTP_SECRET: "placeholder-otp-secret-at-least-32-characters-long"
       JWT_RESET_SECRET: "placeholder-reset-secret-at-least-32-chars-long"
+      # HNT-CI-TEST-001: tests/resendInboundWebhook.test.ts hard-requires
+      # this (env.RESEND_WEBHOOK_SECRET!, no self-contained fallback) to
+      # sign/verify its own synthetic test webhook payloads -- a real CI
+      # config gap found running the actual test suite for the first time
+      # after HNT-CI-DNS-001/002 fixed provisioning itself. A synthetic,
+      # CI-only value (never a real Resend secret) is sufficient: both the
+      # signing and verifying sides read this same value within this one
+      # job, so there's nothing to match against anything real.
+      RESEND_WEBHOOK_SECRET: ${{ secrets.RESEND_CI_TEST_WEBHOOK_SECRET }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -217,7 +396,6 @@ jobs:
       - run: npx prisma generate
       - name: Build this run's own connection string (direct/non-pooled host only, never printed)
         env:
-          DB_HOST: ${{ needs.provision-db.outputs.db_host }}
           DB_NAME: ${{ needs.provision-db.outputs.db_name }}
           DB_ROLE: ${{ needs.provision-db.outputs.db_role }}
           NEON_API_TOKEN: ${{ secrets.NEON_CI_TEST_API_TOKEN }}
@@ -225,6 +403,25 @@ jobs:
           BRANCH_ID: ${{ needs.provision-db.outputs.branch_id }}
         run: |
           set -euo pipefail
+          # HNT-CI-DNS-002: host is deliberately NOT read from a job output
+          # (see provision-db's own outputs comment for why -- Neon's own
+          # API schema marks it "x-sensitive", and masking it breaks the
+          # instant it crosses a job boundary via
+          # needs.<job>.outputs.<name>). Re-derived independently here via
+          # the same "list endpoints for this branch" call, using only the
+          # already-safe, never-masked branch_id -- the same pattern
+          # already proven correct for the password below via
+          # reveal_password, never trusting a masked cross-job value.
+          ENDPOINTS_RESPONSE=$(curl -sS "https://console.neon.tech/api/v2/projects/${NEON_PROJECT_ID}/branches/${BRANCH_ID}/endpoints" \
+            -H "Authorization: Bearer ${NEON_API_TOKEN}")
+          DB_HOST=$(echo "$ENDPOINTS_RESPONSE" | jq -r '.endpoints[] | select(.type == "read_write") | .host')
+          echo "::add-mask::${DB_HOST}"
+
+          if [ -z "$DB_HOST" ] || [ "$DB_HOST" = "null" ]; then
+            echo "::error::Could not resolve this branch's own read_write endpoint host -- aborting."
+            exit 1
+          fi
+
           # The password was never passed as a job output (see provision-db's
           # own comment) -- re-fetch it directly from the Neon API for this
           # exact branch id instead of re-deriving/guessing it.
@@ -232,7 +429,6 @@ jobs:
             -H "Authorization: Bearer ${NEON_API_TOKEN}")
           DB_PASSWORD=$(echo "$ROLE_RESPONSE" | jq -r '.password')
           echo "::add-mask::${DB_PASSWORD}"
-          echo "::add-mask::${DB_HOST}"
           echo "DATABASE_URL=postgresql://${DB_ROLE}:${DB_PASSWORD}@${DB_HOST}/${DB_NAME}?sslmode=require" >> "$GITHUB_ENV"
       - run: npx prisma migrate deploy
       - run: npx prisma migrate status
@@ -244,7 +440,7 @@ jobs:
       # minutes for zero new information.
 
   quarantine-tests:
-    name: Quarantined tests (informational, non-blocking -- issues #6-#9)
+    name: Quarantined tests (informational, non-blocking -- issues #6-#9, #13)
     needs: provision-db
     if: github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
@@ -255,6 +451,14 @@ jobs:
       JWT_REFRESH_SECRET: "placeholder-refresh-secret-at-least-32-chars-long"
       JWT_OTP_SECRET: "placeholder-otp-secret-at-least-32-characters-long"
       JWT_RESET_SECRET: "placeholder-reset-secret-at-least-32-chars-long"
+      # HNT-CI-TEST-001: this job's own -t filter never matches any test
+      # inside tests/resendInboundWebhook.test.ts today (none of its tests
+      # are in tests/quarantine.config.js), so the crash this fixes isn't
+      # currently reachable here -- added anyway for consistency, closing
+      # the fragile implicit safety of "only doesn't break because no
+      # quarantine entry happens to target this file yet." See
+      # db-integration-tests' own identical env entry for the full reasoning.
+      RESEND_WEBHOOK_SECRET: ${{ secrets.RESEND_CI_TEST_WEBHOOK_SECRET }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -265,7 +469,6 @@ jobs:
       - run: npx prisma generate
       - name: Build this run's own connection string (direct/non-pooled host only, never printed)
         env:
-          DB_HOST: ${{ needs.provision-db.outputs.db_host }}
           DB_NAME: ${{ needs.provision-db.outputs.db_name }}
           DB_ROLE: ${{ needs.provision-db.outputs.db_role }}
           NEON_API_TOKEN: ${{ secrets.NEON_CI_TEST_API_TOKEN }}
@@ -273,23 +476,49 @@ jobs:
           BRANCH_ID: ${{ needs.provision-db.outputs.branch_id }}
         run: |
           set -euo pipefail
+          # HNT-CI-DNS-002: host is deliberately NOT read from a job output
+          # (see provision-db's own outputs comment for why -- Neon's own
+          # API schema marks it "x-sensitive", and masking it breaks the
+          # instant it crosses a job boundary via
+          # needs.<job>.outputs.<name>). Re-derived independently here via
+          # the same "list endpoints for this branch" call, using only the
+          # already-safe, never-masked branch_id -- the same pattern
+          # already proven correct for the password below via
+          # reveal_password, never trusting a masked cross-job value.
+          ENDPOINTS_RESPONSE=$(curl -sS "https://console.neon.tech/api/v2/projects/${NEON_PROJECT_ID}/branches/${BRANCH_ID}/endpoints" \
+            -H "Authorization: Bearer ${NEON_API_TOKEN}")
+          DB_HOST=$(echo "$ENDPOINTS_RESPONSE" | jq -r '.endpoints[] | select(.type == "read_write") | .host')
+          echo "::add-mask::${DB_HOST}"
+
+          if [ -z "$DB_HOST" ] || [ "$DB_HOST" = "null" ]; then
+            echo "::error::Could not resolve this branch's own read_write endpoint host -- aborting."
+            exit 1
+          fi
+
           ROLE_RESPONSE=$(curl -sS "https://console.neon.tech/api/v2/projects/${NEON_PROJECT_ID}/branches/${BRANCH_ID}/roles/${DB_ROLE}/reveal_password" \
             -H "Authorization: Bearer ${NEON_API_TOKEN}")
           DB_PASSWORD=$(echo "$ROLE_RESPONSE" | jq -r '.password')
           echo "::add-mask::${DB_PASSWORD}"
-          echo "::add-mask::${DB_HOST}"
           echo "DATABASE_URL=postgresql://${DB_ROLE}:${DB_PASSWORD}@${DB_HOST}/${DB_NAME}?sslmode=require" >> "$GITHUB_ENV"
-      - name: Run ONLY the quarantined tests (issues #6-#9 -- see tests/quarantine.config.js)
+      - name: Run ONLY the quarantined tests (issues #6-#9, #13 -- see tests/quarantine.config.js)
         run: npx jest --runInBand -t "$(node scripts/quarantinePattern.js include)"
 
   # Runs regardless of whether provisioning or either test job succeeded,
   # failed, or was skipped -- the cleanup boundary is deleting the exact
   # branch id this run itself created, nothing broader. A cleanup failure
   # fails/reports only this job, never deletes anything beyond that one id.
+  #
+  # Gated on the branch_id OUTPUT existing, never on provision-db's own
+  # overall job result: branch creation is one early step in that job,
+  # warm-up is a later, separate step -- a branch created successfully by
+  # the first step still costs real Neon resources and must be deleted
+  # even when a later step (warm-up) fails and makes the whole job's own
+  # result "failure". Job outputs set via $GITHUB_OUTPUT persist even when
+  # a later step in the same job fails, so this check is reliable.
   cleanup-db:
     name: Delete this run's own ephemeral Neon branch
     needs: [provision-db, db-integration-tests, quarantine-tests]
-    if: always() && needs.provision-db.result == 'success'
+    if: always() && needs.provision-db.outputs.branch_id != ''
     runs-on: ubuntu-latest
     steps:
       - name: Delete branch by exact stored id (never a name search)

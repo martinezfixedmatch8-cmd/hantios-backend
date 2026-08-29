@@ -14,11 +14,20 @@
 // human editing this file directly (a real diff reviewed on its own merits,
 // never a silent auto-extension).
 //
-// Root cause for all four: real, environment-level Neon/HTTP latency
+// Root cause for issues #6-#9: real, environment-level Neon/HTTP latency
 // combined with a test design that performs many sequential round trips
 // inside a fixed timeout -- confirmed via direct isolated reproduction
 // during Batch 8 Session A's own full-suite verification (not a Batch 8
 // code defect; none of these tests exercise any Batch 8 Session A/B code).
+//
+// Issue #13 is a genuinely different, not-yet-proven class: a real,
+// reproducible correlation with ephemeral/fresh-branch provisioning (3/3
+// CI failures vs. a clean same-session local run against a long-lived
+// branch), but direct tracing of the service's own transaction/lock logic
+// found no constructible path to the observed failure -- the mechanism
+// itself remains unconfirmed. Quarantined rather than fixed speculatively,
+// since this is core financial/data-integrity logic (supplier default-
+// payment-instruction uniqueness). See issue #13 for the full investigation.
 
 /**
  * @typedef {Object} QuarantineEntry
@@ -69,5 +78,14 @@ module.exports = [
     owner: "martinezfixedmatch8-cmd",
     expiryDate: "2026-11-25",
     reason: "11-Incoterm loop, each iteration a full PO-create+send+shipment-create cycle (44+ round trips) -- confirmed reproducing identically in complete isolation during Batch 8 Session A verification. Three sibling failures observed in the same file/describe block during a combined full-suite run (a cascading P2028 transaction-timeout and its resulting TypeError, plus one more timeout) did NOT reproduce in isolation and are not quarantined here -- confirmed combined-run resource-pressure artifacts, a different, non-deterministic class.",
+  },
+  {
+    id: "HNT-FLAKY-013",
+    file: "tests/supplierPaymentInstruction.test.ts",
+    testNameFragment: "only one row is ever default at a time, even under concurrent set-default calls targeting different instructions",
+    issue: 13,
+    owner: "martinezfixedmatch8-cmd",
+    expiryDate: "2026-11-27",
+    reason: "Failed identically (409 instead of 200) on 3 of 3 Batch 8 Session B CI runs against freshly-created ephemeral Neon branches, while passing cleanly the same session against the long-lived local test branch. Direct tracing of the service's own transaction/lock logic against the real partial-unique-index constraint found no constructible logic path to this failure for two calls targeting different rows -- correlation with fresh-branch provisioning is established, the underlying mechanism is not yet proven. See issue #13 for the full investigation.",
   },
 ];
