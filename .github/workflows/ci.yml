@@ -315,6 +315,21 @@ jobs:
               # already registered via ::add-mask:: from the create step
               # regardless, so it still renders as *** in the log even
               # though printing it is fine for this diagnostic.
+              # Confirm or refute, before the DNS lookups below, whether
+              # DB_HOST was ever a real hostname at all: Neon's own API
+              # reference documents that connection_uris is OMITTED from
+              # the branch-creation response whenever the parent branch
+              # has more than one role or database -- jq's own null-
+              # propagation would then make our .connection_uris[0]...
+              # extraction silently yield the literal text "null" (never
+              # an error), not a real host. Boolean-only check, never the
+              # raw value -- if this hypothesis is wrong, DB_HOST could
+              # be a real hostname that shouldn't be printed even here.
+              if [ "$DB_HOST" = "null" ]; then
+                echo "CONFIRMED: DB_HOST is the literal string 'null' -- connection_uris was absent from the branch-creation response."
+              else
+                echo "DB_HOST is NOT the literal string 'null' -- hypothesis needs revision. Length: ${#DB_HOST} characters."
+              fi
               command -v dig >/dev/null 2>&1 || sudo apt-get update -y && sudo apt-get install -y dnsutils
               echo "Default-resolver lookup (getent hosts): $(getent hosts "$DB_HOST" 2>&1 || echo 'FAILED')"
               echo "Explicit public-resolver lookup (dig @8.8.8.8): $(dig +short "$DB_HOST" @8.8.8.8 2>&1 || echo 'FAILED')"
