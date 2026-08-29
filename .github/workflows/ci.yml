@@ -94,9 +94,22 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       branch_id: ${{ steps.create.outputs.branch_id }}
-      db_host: ${{ steps.create.outputs.db_host }}
       db_name: ${{ steps.create.outputs.db_name }}
       db_role: ${{ steps.create.outputs.db_role }}
+      # HNT-CI-DNS-002: db_host is deliberately NOT a job output. Neon's own
+      # API schema marks the endpoint host field "x-sensitive" (the same
+      # annotation as Role.password) -- confirmed directly against their
+      # createProjectBranch/getProjectEndpoint references, not assumed.
+      # It stays masked and step-scoped within THIS job only (the
+      # operations-poll/final-confirmation steps below still read it via
+      # steps.create.outputs.db_host); GitHub Actions blanks a masked value
+      # to empty the moment it crosses a job boundary via
+      # needs.<job>.outputs.<name>, which is exactly what silently broke
+      # db-integration-tests/quarantine-tests the first time this job ever
+      # ran far enough to expose it. Each of those jobs now re-derives its
+      # own host independently instead, the same way they already
+      # re-derive the password via reveal_password rather than trusting a
+      # masked job output.
     steps:
       - name: Ensure psql and jq are available
         run: |
@@ -374,7 +387,6 @@ jobs:
       - run: npx prisma generate
       - name: Build this run's own connection string (direct/non-pooled host only, never printed)
         env:
-          DB_HOST: ${{ needs.provision-db.outputs.db_host }}
           DB_NAME: ${{ needs.provision-db.outputs.db_name }}
           DB_ROLE: ${{ needs.provision-db.outputs.db_role }}
           NEON_API_TOKEN: ${{ secrets.NEON_CI_TEST_API_TOKEN }}
@@ -382,6 +394,25 @@ jobs:
           BRANCH_ID: ${{ needs.provision-db.outputs.branch_id }}
         run: |
           set -euo pipefail
+          # HNT-CI-DNS-002: host is deliberately NOT read from a job output
+          # (see provision-db's own outputs comment for why -- Neon's own
+          # API schema marks it "x-sensitive", and masking it breaks the
+          # instant it crosses a job boundary via
+          # needs.<job>.outputs.<name>). Re-derived independently here via
+          # the same "list endpoints for this branch" call, using only the
+          # already-safe, never-masked branch_id -- the same pattern
+          # already proven correct for the password below via
+          # reveal_password, never trusting a masked cross-job value.
+          ENDPOINTS_RESPONSE=$(curl -sS "https://console.neon.tech/api/v2/projects/${NEON_PROJECT_ID}/branches/${BRANCH_ID}/endpoints" \
+            -H "Authorization: Bearer ${NEON_API_TOKEN}")
+          DB_HOST=$(echo "$ENDPOINTS_RESPONSE" | jq -r '.endpoints[] | select(.type == "read_write") | .host')
+          echo "::add-mask::${DB_HOST}"
+
+          if [ -z "$DB_HOST" ] || [ "$DB_HOST" = "null" ]; then
+            echo "::error::Could not resolve this branch's own read_write endpoint host -- aborting."
+            exit 1
+          fi
+
           # The password was never passed as a job output (see provision-db's
           # own comment) -- re-fetch it directly from the Neon API for this
           # exact branch id instead of re-deriving/guessing it.
@@ -389,7 +420,6 @@ jobs:
             -H "Authorization: Bearer ${NEON_API_TOKEN}")
           DB_PASSWORD=$(echo "$ROLE_RESPONSE" | jq -r '.password')
           echo "::add-mask::${DB_PASSWORD}"
-          echo "::add-mask::${DB_HOST}"
           echo "DATABASE_URL=postgresql://${DB_ROLE}:${DB_PASSWORD}@${DB_HOST}/${DB_NAME}?sslmode=require" >> "$GITHUB_ENV"
       - run: npx prisma migrate deploy
       - run: npx prisma migrate status
@@ -422,7 +452,6 @@ jobs:
       - run: npx prisma generate
       - name: Build this run's own connection string (direct/non-pooled host only, never printed)
         env:
-          DB_HOST: ${{ needs.provision-db.outputs.db_host }}
           DB_NAME: ${{ needs.provision-db.outputs.db_name }}
           DB_ROLE: ${{ needs.provision-db.outputs.db_role }}
           NEON_API_TOKEN: ${{ secrets.NEON_CI_TEST_API_TOKEN }}
@@ -430,11 +459,29 @@ jobs:
           BRANCH_ID: ${{ needs.provision-db.outputs.branch_id }}
         run: |
           set -euo pipefail
+          # HNT-CI-DNS-002: host is deliberately NOT read from a job output
+          # (see provision-db's own outputs comment for why -- Neon's own
+          # API schema marks it "x-sensitive", and masking it breaks the
+          # instant it crosses a job boundary via
+          # needs.<job>.outputs.<name>). Re-derived independently here via
+          # the same "list endpoints for this branch" call, using only the
+          # already-safe, never-masked branch_id -- the same pattern
+          # already proven correct for the password below via
+          # reveal_password, never trusting a masked cross-job value.
+          ENDPOINTS_RESPONSE=$(curl -sS "https://console.neon.tech/api/v2/projects/${NEON_PROJECT_ID}/branches/${BRANCH_ID}/endpoints" \
+            -H "Authorization: Bearer ${NEON_API_TOKEN}")
+          DB_HOST=$(echo "$ENDPOINTS_RESPONSE" | jq -r '.endpoints[] | select(.type == "read_write") | .host')
+          echo "::add-mask::${DB_HOST}"
+
+          if [ -z "$DB_HOST" ] || [ "$DB_HOST" = "null" ]; then
+            echo "::error::Could not resolve this branch's own read_write endpoint host -- aborting."
+            exit 1
+          fi
+
           ROLE_RESPONSE=$(curl -sS "https://console.neon.tech/api/v2/projects/${NEON_PROJECT_ID}/branches/${BRANCH_ID}/roles/${DB_ROLE}/reveal_password" \
             -H "Authorization: Bearer ${NEON_API_TOKEN}")
           DB_PASSWORD=$(echo "$ROLE_RESPONSE" | jq -r '.password')
           echo "::add-mask::${DB_PASSWORD}"
-          echo "::add-mask::${DB_HOST}"
           echo "DATABASE_URL=postgresql://${DB_ROLE}:${DB_PASSWORD}@${DB_HOST}/${DB_NAME}?sslmode=require" >> "$GITHUB_ENV"
       - name: Run ONLY the quarantined tests (issues #6-#9 -- see tests/quarantine.config.js)
         run: npx jest --runInBand -t "$(node scripts/quarantinePattern.js include)"
