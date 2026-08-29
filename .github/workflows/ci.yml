@@ -377,6 +377,15 @@ jobs:
       JWT_REFRESH_SECRET: "placeholder-refresh-secret-at-least-32-chars-long"
       JWT_OTP_SECRET: "placeholder-otp-secret-at-least-32-characters-long"
       JWT_RESET_SECRET: "placeholder-reset-secret-at-least-32-chars-long"
+      # HNT-CI-TEST-001: tests/resendInboundWebhook.test.ts hard-requires
+      # this (env.RESEND_WEBHOOK_SECRET!, no self-contained fallback) to
+      # sign/verify its own synthetic test webhook payloads -- a real CI
+      # config gap found running the actual test suite for the first time
+      # after HNT-CI-DNS-001/002 fixed provisioning itself. A synthetic,
+      # CI-only value (never a real Resend secret) is sufficient: both the
+      # signing and verifying sides read this same value within this one
+      # job, so there's nothing to match against anything real.
+      RESEND_WEBHOOK_SECRET: ${{ secrets.RESEND_CI_TEST_WEBHOOK_SECRET }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -442,6 +451,14 @@ jobs:
       JWT_REFRESH_SECRET: "placeholder-refresh-secret-at-least-32-chars-long"
       JWT_OTP_SECRET: "placeholder-otp-secret-at-least-32-characters-long"
       JWT_RESET_SECRET: "placeholder-reset-secret-at-least-32-chars-long"
+      # HNT-CI-TEST-001: this job's own -t filter never matches any test
+      # inside tests/resendInboundWebhook.test.ts today (none of its tests
+      # are in tests/quarantine.config.js), so the crash this fixes isn't
+      # currently reachable here -- added anyway for consistency, closing
+      # the fragile implicit safety of "only doesn't break because no
+      # quarantine entry happens to target this file yet." See
+      # db-integration-tests' own identical env entry for the full reasoning.
+      RESEND_WEBHOOK_SECRET: ${{ secrets.RESEND_CI_TEST_WEBHOOK_SECRET }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
