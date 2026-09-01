@@ -12,10 +12,12 @@ import {
   rejectExpenseSchema,
   markPaidExpenseSchema,
   updateRecurrenceSchema,
+  recurrenceRunsQuerySchema,
   createExpenseCorrectionSchema,
 } from "../validation/expense.schema";
 import { idParamSchema } from "../validation/common.schema";
 import * as expenseService from "../services/expense.service";
+import { listRecurrenceRuns as listRecurrenceRunsService } from "../services/recurringExpense.service";
 import { getReplayedResponse } from "../lib/idempotency";
 
 const attachmentIdParamSchema = z.object({ id: z.string().uuid(), attachmentId: z.string().uuid() });
@@ -253,6 +255,21 @@ export async function updateRecurrence(req: Request, res: Response, next: NextFu
 
     const recurrence = await expenseService.updateRecurrence(id, input, actor, idempotencyKey);
     res.status(200).json({ data: recurrence });
+  } catch (err) {
+    next(err);
+  }
+}
+
+// HNT-OPS-003 (Batch 8) -- dead-letter visibility: a paginated read of every
+// occurrence the worker has ever attempted for this expense's own recurrence
+// schedule, including status/expense_id/last_error per run.
+export async function listRecurrenceRuns(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    if (!req.auth) throw unauthorized();
+    const { id } = idParamSchema.parse(req.params);
+    const query = recurrenceRunsQuerySchema.parse(req.query);
+    const result = await listRecurrenceRunsService(id, query, req.auth.businessId);
+    res.status(200).json(result);
   } catch (err) {
     next(err);
   }

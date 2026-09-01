@@ -551,25 +551,42 @@ describe("Expenses", () => {
     });
   });
 
-  describe("Recurrence (architecture-only -- no scheduler exists yet)", () => {
+  describe("Recurrence (HNT-OPS-003 -- Recurring Expense Worker/Policy Engine)", () => {
+    function validRecurrence(overrides: Record<string, unknown> = {}) {
+      return {
+        frequency: "monthly",
+        interval: 1,
+        executionMode: "auto_post",
+        amountType: "fixed",
+        configuredAmount: 500,
+        startDate: isoDate(-30),
+        ...overrides,
+      };
+    }
+
     it("creates an expense_recurrence row when recurrence is provided at creation, referencing the new expense as template", async () => {
       const expense = await createExpenseAs(ownerToken, {
-        recurrence: { frequency: "monthly", interval: 2, nextRun: isoDate(30) },
+        recurrence: validRecurrence({ interval: 2, nextRun: isoDate(30) }),
       });
       expect(expense.expense_recurrence).toMatchObject({
         template_expense_id: expense.id,
         frequency: "monthly",
         interval: 2,
+        execution_mode: "auto_post",
+        amount_type: "fixed",
         active: true,
       });
+      expect(Number(expense.expense_recurrence.configured_amount)).toBe(500);
       expect(expense.expense_recurrence.last_run).toBeNull();
+      expect(expense.expense_recurrence.daily_auto_post_confirmed_by).toBeNull();
+      expect(expense.expense_recurrence.daily_auto_post_confirmed_at).toBeNull();
 
       const row = await prisma.expense_recurrence.findUnique({ where: { template_expense_id: expense.id } });
       expect(row).not.toBeNull();
     });
 
     it("defaults interval to 1 when omitted", async () => {
-      const expense = await createExpenseAs(ownerToken, { recurrence: { frequency: "weekly" } });
+      const expense = await createExpenseAs(ownerToken, { recurrence: validRecurrence({ frequency: "weekly", interval: undefined }) });
       expect(expense.expense_recurrence.interval).toBe(1);
     });
 
@@ -578,21 +595,116 @@ describe("Expenses", () => {
       expect(expense.expense_recurrence).toBeNull();
     });
 
-    it("updates an existing recurrence schedule's frequency/interval/active via PATCH", async () => {
-      const expense = await createExpenseAs(ownerToken, { recurrence: { frequency: "daily", interval: 1 } });
+    it("rejects execution_mode auto_post combined with amount_type variable", async () => {
+      const res = await request(app)
+        .post("/expenses")
+        .set("Authorization", `Bearer ${ownerToken}`)
+        .set("Idempotency-Key", idemKey())
+        .send(validExpensePayload({ recurrence: validRecurrence({ amountType: "variable", configuredAmount: undefined }) }));
+      expect(res.status).toBe(400);
+    });
+
+    it("rejects amountType fixed with no configuredAmount, and variable WITH a configuredAmount", async () => {
+      const missingAmount = await request(app)
+        .post("/expenses")
+        .set("Authorization", `Bearer ${ownerToken}`)
+        .set("Idempotency-Key", idemKey())
+        .send(validExpensePayload({ recurrence: validRecurrence({ configuredAmount: undefined }) }));
+      expect(missingAmount.status).toBe(400);
+
+      const extraAmount = await request(app)
+        .post("/expenses")
+        .set("Authorization", `Bearer ${ownerToken}`)
+        .set("Idempotency-Key", idemKey())
+        .send(validExpensePayload({ recurrence: validRecurrence({ executionMode: "auto_draft", amountType: "variable", configuredAmount: 10 }) }));
+      expect(extraAmount.status).toBe(400);
+    });
+
+    it("rejects endDate that is not after startDate", async () => {
+      const res = await request(app)
+        .post("/expenses")
+        .set("Authorization", `Bearer ${ownerToken}`)
+        .set("Idempotency-Key", idemKey())
+        .send(validExpensePayload({ recurrence: validRecurrence({ startDate: isoDate(0), endDate: isoDate(-5) }) }));
+      expect(res.status).toBe(400);
+    });
+
+    it("rejects daily + auto_post without dailyAutoPostConfirmed, and accepts it with a real accountability trail once confirmed", async () => {
+      const rejected = await request(app)
+        .post("/expenses")
+        .set("Authorization", `Bearer ${ownerToken}`)
+        .set("Idempotency-Key", idemKey())
+        .send(validExpensePayload({ recurrence: validRecurrence({ frequency: "daily" }) }));
+      expect(rejected.status).toBe(400);
+
+      const before = new Date();
+      const expense = await createExpenseAs(ownerToken, {
+        recurrence: validRecurrence({ frequency: "daily", dailyAutoPostConfirmed: true }),
+      });
+      expect(expense.expense_recurrence.daily_auto_post_confirmed).toBe(true);
+      expect(expense.expense_recurrence.daily_auto_post_confirmed_by).toBeTruthy();
+      expect(new Date(expense.expense_recurrence.daily_auto_post_confirmed_at).getTime()).toBeGreaterThanOrEqual(before.getTime());
+    });
+
+    it("updates an existing recurrence schedule's interval/execution_mode/active via PATCH -- frequency is NOT accepted (immutable once created)", async () => {
+      const expense = await createExpenseAs(ownerToken, { recurrence: validRecurrence({ frequency: "yearly", executionMode: "auto_draft", amountType: "variable", configuredAmount: undefined }) });
 
       const res = await request(app)
         .patch(`/expenses/${expense.id}/recurrence`)
         .set("Authorization", `Bearer ${ownerToken}`)
         .set("Idempotency-Key", idemKey())
-        .send({ frequency: "yearly", interval: 3, active: false });
+        .send({ frequency: "daily", interval: 3, active: false });
       expect(res.status).toBe(200);
-      expect(res.body.data.frequency).toBe("yearly");
+      expect(res.body.data.frequency).toBe("yearly"); // silently ignored -- not a valid field on this schema
       expect(res.body.data.interval).toBe(3);
       expect(res.body.data.active).toBe(false);
 
       const auditRows = await prisma.audit_logs.findMany({ where: { action: "expense_recurrence.updated", entity_id: res.body.data.id } });
       expect(auditRows).toHaveLength(1);
+    });
+
+    it("allows changing startDate before any occurrence has been generated, but rejects it once expense_recurrence_runs is non-empty", async () => {
+      const expense = await createExpenseAs(ownerToken, { recurrence: validRecurrence() });
+
+      const beforeAnyRun = await request(app)
+        .patch(`/expenses/${expense.id}/recurrence`)
+        .set("Authorization", `Bearer ${ownerToken}`)
+        .set("Idempotency-Key", idemKey())
+        .send({ startDate: isoDate(-10) });
+      expect(beforeAnyRun.status).toBe(200);
+
+      // Simulate a real generated occurrence directly -- the scheduler/worker
+      // itself is covered by its own dedicated test file.
+      const recurrenceRow = await prisma.expense_recurrence.findUniqueOrThrow({ where: { template_expense_id: expense.id } });
+      await prisma.expense_recurrence_runs.create({
+        data: {
+          id: `test-run-${randomUUID()}`,
+          business_id: businessId,
+          recurrence_id: recurrenceRow.id,
+          scheduled_period: new Date(isoDate(-10)),
+          status: "succeeded",
+          expense_id: expense.id,
+        },
+      });
+
+      const afterARun = await request(app)
+        .patch(`/expenses/${expense.id}/recurrence`)
+        .set("Authorization", `Bearer ${ownerToken}`)
+        .set("Idempotency-Key", idemKey())
+        .send({ startDate: isoDate(-1) });
+      expect(afterARun.status).toBe(400);
+    });
+
+    it("rejects flipping dailyAutoPostConfirmed back to false via PATCH while frequency=daily and execution_mode is still auto_post", async () => {
+      const expense = await createExpenseAs(ownerToken, {
+        recurrence: validRecurrence({ frequency: "daily", dailyAutoPostConfirmed: true }),
+      });
+      const res = await request(app)
+        .patch(`/expenses/${expense.id}/recurrence`)
+        .set("Authorization", `Bearer ${ownerToken}`)
+        .set("Idempotency-Key", idemKey())
+        .send({ dailyAutoPostConfirmed: false });
+      expect(res.status).toBe(400);
     });
 
     it("returns 404 updating recurrence on an expense that has none", async () => {
@@ -614,7 +726,14 @@ describe("Expenses", () => {
         .post("/expenses")
         .set("Authorization", `Bearer ${otherLogin.accessToken}`)
         .set("Idempotency-Key", idemKey())
-        .send({ scope: "business", categoryId: otherCategories.body.data[0].id, amount: 10, expenseDate: isoDate(-1), recurrence: { frequency: "daily" } });
+        .send({
+          scope: "business",
+          categoryId: otherCategories.body.data[0].id,
+          amount: 10,
+          expenseDate: isoDate(-1),
+          recurrence: validRecurrence(),
+        });
+      expect(otherCreated.status).toBe(201);
 
       const res = await request(app)
         .patch(`/expenses/${otherCreated.body.data.id}/recurrence`)

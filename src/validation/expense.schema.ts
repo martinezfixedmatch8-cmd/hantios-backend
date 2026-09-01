@@ -1,5 +1,12 @@
 import { z } from "zod";
-import { ExpenseScope, ExpenseSource, ExpenseWorkflowStatus, RecurrenceFrequency } from "@prisma/client";
+import {
+  ExpenseScope,
+  ExpenseSource,
+  ExpenseWorkflowStatus,
+  RecurrenceFrequency,
+  ExpenseRecurrenceExecutionMode,
+  ExpenseRecurrenceAmountType,
+} from "@prisma/client";
 import { decimalField, idParamSchema } from "./common.schema";
 import { paginationQuerySchema } from "../lib/pagination";
 
@@ -22,23 +29,102 @@ export const attachmentInputSchema = z.object({
 });
 export type AttachmentInput = z.infer<typeof attachmentInputSchema>;
 
-// Session 5B -- architecture-only (no scheduler reads this yet). Setup is
-// folded into createExpenseSchema rather than a separate endpoint; changing
-// an existing schedule goes through updateRecurrenceSchema below.
-export const recurrenceInputSchema = z.object({
-  frequency: z.nativeEnum(RecurrenceFrequency),
-  interval: z.number().int().positive().optional().default(1),
-  nextRun: z.coerce.date().optional(),
-});
+// HNT-OPS-003 (Batch 8) -- setup is folded into createExpenseSchema rather
+// than a separate endpoint; changing an existing schedule goes through
+// updateRecurrenceSchema below. frequency is immutable once created --
+// confirmed, no update path for it at all (removed from updateRecurrenceSchema
+// entirely, not merely disallowed). execution_mode/amount_type are two
+// independent configuration axes; the three cross-field rules below (auto_post
+// never combines with variable; daily+auto_post requires an explicit
+// confirmation; configuredAmount presence must match amountType) are the same
+// DB CHECK constraints re-checked here for a clean 400 instead of a raw
+// constraint-violation error.
+function refineRecurrenceRules<
+  T extends {
+    frequency?: RecurrenceFrequency;
+    executionMode?: ExpenseRecurrenceExecutionMode;
+    amountType?: ExpenseRecurrenceAmountType;
+    configuredAmount?: number;
+    startDate?: Date;
+    endDate?: Date;
+    dailyAutoPostConfirmed?: boolean;
+  },
+>(data: T, ctx: z.RefinementCtx): void {
+  if (data.executionMode === "auto_post" && data.amountType === "variable") {
+    ctx.addIssue({
+      code: "custom",
+      message: "execution_mode auto_post cannot be combined with amount_type variable -- there is no known amount to post automatically",
+      path: ["executionMode"],
+    });
+  }
+  if (data.frequency === "daily" && data.executionMode === "auto_post" && !data.dailyAutoPostConfirmed) {
+    ctx.addIssue({
+      code: "custom",
+      message: "daily + auto_post requires dailyAutoPostConfirmed: true -- an explicit, deliberate confirmation of unattended daily posting",
+      path: ["dailyAutoPostConfirmed"],
+    });
+  }
+  if (data.amountType === "fixed" && data.configuredAmount === undefined) {
+    ctx.addIssue({ code: "custom", message: "configuredAmount is required when amountType is fixed", path: ["configuredAmount"] });
+  }
+  if (data.amountType === "variable" && data.configuredAmount !== undefined) {
+    ctx.addIssue({ code: "custom", message: "configuredAmount must not be set when amountType is variable", path: ["configuredAmount"] });
+  }
+  if (data.endDate && data.startDate && data.endDate <= data.startDate) {
+    ctx.addIssue({ code: "custom", message: "endDate must be after startDate", path: ["endDate"] });
+  }
+}
+
+export const recurrenceInputSchema = z
+  .object({
+    frequency: z.nativeEnum(RecurrenceFrequency),
+    interval: z.number().int().positive().optional().default(1),
+    executionMode: z.nativeEnum(ExpenseRecurrenceExecutionMode),
+    amountType: z.nativeEnum(ExpenseRecurrenceAmountType),
+    configuredAmount: decimalField(z.coerce.number().positive()).optional(),
+    startDate: z.coerce.date(),
+    endDate: z.coerce.date().optional(),
+    dailyAutoPostConfirmed: z.boolean().optional().default(false),
+    nextRun: z.coerce.date().optional(),
+  })
+  .superRefine(refineRecurrenceRules);
 export type RecurrenceInput = z.infer<typeof recurrenceInputSchema>;
 
-export const updateRecurrenceSchema = z.object({
-  frequency: z.nativeEnum(RecurrenceFrequency).optional(),
-  interval: z.number().int().positive().optional(),
-  nextRun: z.coerce.date().optional().nullable(),
-  active: z.boolean().optional(),
-});
+// Every genuinely-nullable-in-DB field is `.nullable()` here (matching
+// updateExpenseSchema's own established rule), except frequency/startDate:
+// frequency has no update path at all (see above); startDate is confirmed
+// immutable once ANY expense_recurrence_runs row exists for this recurrence
+// (locked uniformly across all five frequencies, even though the corruption
+// risk is specific to the three rolling ones) -- enforced at the SERVICE
+// layer (Zod alone can't see whether runs exist), not rejected here.
+export const updateRecurrenceSchema = z
+  .object({
+    interval: z.number().int().positive().optional(),
+    executionMode: z.nativeEnum(ExpenseRecurrenceExecutionMode).optional(),
+    amountType: z.nativeEnum(ExpenseRecurrenceAmountType).optional(),
+    configuredAmount: decimalField(z.coerce.number().positive()).optional().nullable(),
+    startDate: z.coerce.date().optional(),
+    endDate: z.coerce.date().optional().nullable(),
+    dailyAutoPostConfirmed: z.boolean().optional(),
+    nextRun: z.coerce.date().optional().nullable(),
+    active: z.boolean().optional(),
+  })
+  .superRefine((data, ctx) => {
+    // Only catches a request that's internally inconsistent on its own (both
+    // fields sent together in the same call) -- the full merged-against-
+    // stored-state check still happens in updateRecurrence itself, same
+    // "Zod alone can't see existing DB state" pattern updateExpense uses.
+    if (data.amountType === "variable" && data.configuredAmount !== undefined && data.configuredAmount !== null) {
+      ctx.addIssue({ code: "custom", message: "configuredAmount must not be set when amountType is variable", path: ["configuredAmount"] });
+    }
+    if (data.endDate && data.startDate && data.endDate <= data.startDate) {
+      ctx.addIssue({ code: "custom", message: "endDate must be after startDate", path: ["endDate"] });
+    }
+  });
 export type UpdateRecurrenceInput = z.infer<typeof updateRecurrenceSchema>;
+
+export const recurrenceRunsQuerySchema = paginationQuerySchema.pick({ page: true, pageSize: true });
+export type RecurrenceRunsQuery = z.infer<typeof recurrenceRunsQuerySchema>;
 
 function withScopeRefine<T extends z.ZodType<{ scope?: ExpenseScope; branchId?: string | null }>>(schema: T) {
   return schema.superRefine((data, ctx) => {

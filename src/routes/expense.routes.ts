@@ -15,6 +15,7 @@ import {
   rejectExpense,
   markExpensePaid,
   updateRecurrence,
+  listRecurrenceRuns,
   createExpenseCorrection,
 } from "../controllers/expense.controller";
 
@@ -46,8 +47,11 @@ router.delete("/:id/attachments/:attachmentId", requireRole(...writeRoles), requ
 router.post("/:id/approve", requireRole(...writeRoles), requireIdempotencyKey, approveExpense);
 router.post("/:id/reject", requireRole(...writeRoles), requireIdempotencyKey, rejectExpense);
 router.post("/:id/mark-paid", requireRole(...writeRoles), requireIdempotencyKey, markExpensePaid);
-// Recurrence schedule management -- architecture-only, no scheduler reads it.
+// Recurrence schedule management -- HNT-OPS-003 (Batch 8): a real scheduler
+// now reads this (src/lib/recurringExpenseScheduler.ts).
 router.patch("/:id/recurrence", requireRole(...writeRoles), requireIdempotencyKey, updateRecurrence);
+// Dead-letter visibility -- read-only, matches Expenses' own general view bar.
+router.get("/:id/recurrence/runs", requireRole(...readRoles), listRecurrenceRuns);
 // HNT-FIN-001 remediation -- the only way to correct a frozen financial
 // field on an already-paid expense. Same elevated bar as every other
 // financial-mutation action on this resource.

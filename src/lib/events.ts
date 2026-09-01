@@ -31,6 +31,16 @@ export interface DomainEventPayloads {
   ExpensePaid: { expenseId: string; businessId: string; paidBy: string };
   // HNT-FIN-001 remediation -- a correction against an already-paid expense.
   ExpenseCorrected: { businessId: string; expenseId: string; correctionId: string; reason: string };
+  // HNT-OPS-003 (Batch 8) -- the Recurring Expense Worker's own auto-
+  // generated occurrence, published after generateOccurrence's own
+  // transaction commits (never from inside it), ALONGSIDE a second
+  // ExpenseCreated fire for the same expense -- matching Module 11 Session
+  // B's own established precedent exactly ("a second ExpenseCreated fire for
+  // the auto-created expense... same as every other path that creates one"),
+  // since generateOccurrence calls createExpenseInTransaction directly
+  // rather than the outer createExpense (which is the only place that
+  // otherwise publishes ExpenseCreated).
+  RecurringExpenseGenerated: { businessId: string; recurrenceId: string; expenseId: string; scheduledPeriod: string };
   // Module 02 (Inventory) -- the first domain events in this repo with a
   // real production subscriber (src/lib/stockAlertSubscriber.ts); every
   // other event above still has zero subscribers, only ephemeral test

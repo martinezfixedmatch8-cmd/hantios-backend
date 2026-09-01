@@ -6,6 +6,7 @@ import { checkEmailDomainVerification } from "./lib/emailDomainCheck";
 import { startPayrollScheduler, runPayrollSchedulerCatchUp, stopPayrollScheduler } from "./lib/payrollScheduler";
 import { startReceiptDeliveryRecovery, stopReceiptDeliveryRecovery } from "./lib/receiptDeliveryRecovery";
 import { startIdempotencyCleanupScheduler, stopIdempotencyCleanupScheduler } from "./lib/idempotencyCleanupScheduler";
+import { startRecurringExpenseScheduler, stopRecurringExpenseScheduler } from "./lib/recurringExpenseScheduler";
 
 // Batch 8 Session A (HNT-OPS-001) -- a bounded grace window for SIGTERM,
 // matching Railway's own typical SIGTERM-then-SIGKILL grace period.
@@ -23,6 +24,7 @@ const server = app.listen(env.PORT, () => {
   startPayrollScheduler();
   startReceiptDeliveryRecovery();
   startIdempotencyCleanupScheduler();
+  startRecurringExpenseScheduler();
   startStockAlertSubscriber();
   void checkEmailDomainVerification();
 
@@ -40,6 +42,7 @@ function shutdown(signal: string): void {
   stopPayrollScheduler();
   stopReceiptDeliveryRecovery();
   stopIdempotencyCleanupScheduler();
+  stopRecurringExpenseScheduler();
   server.close(() => console.log("HTTP server closed"));
 
   setTimeout(() => {
