@@ -1,4 +1,4 @@
-import { Prisma, ExpenseScope, ExpenseSource, RecurrenceFrequency } from "@prisma/client";
+import { Prisma, ExpenseScope, ExpenseSource, RecurrenceFrequency, ExpenseRecurrenceExecutionMode, ExpenseRecurrenceAmountType } from "@prisma/client";
 import { prisma } from "../lib/prisma";
 import { generateId } from "../lib/ids";
 import { getOwned } from "../lib/ownership";
@@ -20,6 +20,7 @@ import {
   ApproveExpenseInput,
   RejectExpenseInput,
   MarkPaidExpenseInput,
+  RecurrenceInput,
   UpdateRecurrenceInput,
   CreateExpenseCorrectionInput,
   MAX_ATTACHMENTS,
@@ -30,6 +31,29 @@ interface Actor {
   businessId: string;
   userName: string;
   userRole: string;
+}
+
+// HNT-OPS-003 (Batch 8) -- the real accountability trail for the
+// daily+auto_post override: the confirming actor's user ID + the current
+// timestamp are populated together, at the moment dailyAutoPostConfirmed is
+// set to true via the API -- never independently of it, and never derived
+// any other way (e.g. never backfilled from created_by/created_at, which
+// would misrepresent who actually confirmed the override).
+function toRecurrenceCreateInput(recurrence: RecurrenceInput, actor: Actor): CreateExpenseInTransactionInput["recurrence"] {
+  const confirmedNow = recurrence.dailyAutoPostConfirmed;
+  return {
+    frequency: recurrence.frequency,
+    interval: recurrence.interval,
+    executionMode: recurrence.executionMode,
+    amountType: recurrence.amountType,
+    configuredAmount: recurrence.configuredAmount !== undefined ? new Prisma.Decimal(recurrence.configuredAmount) : undefined,
+    startDate: recurrence.startDate,
+    endDate: recurrence.endDate,
+    dailyAutoPostConfirmed: recurrence.dailyAutoPostConfirmed,
+    dailyAutoPostConfirmedBy: confirmedNow ? actor.userId : undefined,
+    dailyAutoPostConfirmedAt: confirmedNow ? new Date() : undefined,
+    nextRun: recurrence.nextRun,
+  };
 }
 
 // Neon's serverless HTTP driver adds real per-query latency, same reasoning
@@ -119,16 +143,37 @@ export interface CreateExpenseInTransactionInput {
   createdBy: string;
   attachments?: { filename: string; mimeType: string; size: number; storageKey: string }[];
   tagIds?: string[];
-  recurrence?: { frequency: RecurrenceFrequency; interval: number; nextRun?: Date };
+  recurrence?: {
+    frequency: RecurrenceFrequency;
+    interval: number;
+    executionMode: ExpenseRecurrenceExecutionMode;
+    amountType: ExpenseRecurrenceAmountType;
+    configuredAmount?: Prisma.Decimal;
+    startDate: Date;
+    endDate?: Date;
+    dailyAutoPostConfirmed: boolean;
+    dailyAutoPostConfirmedBy?: string;
+    dailyAutoPostConfirmedAt?: Date;
+    nextRun?: Date;
+  };
   // Module 11 Session B -- populated only when source === "purchase_order".
   purchaseOrderId?: string | null;
   poNumber?: string | null;
   grnNumber?: string | null;
-  // When set, bypasses the normal "always creates in pending" rule -- used
-  // exclusively by PO Payments: the payment recording IS the approval+paid
-  // event, just via a different path than the manual approve/mark-paid
-  // endpoints, so all four actor/timestamp fields are stamped together.
-  workflowOverride?: { status: "paid"; approvedBy: string; approvedAt: Date; paidBy: string; paidAt: Date };
+  // When set, bypasses the normal "always creates in pending" rule. The
+  // "paid" branch is used exclusively by PO Payments: the payment recording
+  // IS the approval+paid event, just via a different path than the manual
+  // approve/mark-paid endpoints, so all four actor/timestamp fields are
+  // stamped together. The "draft" branch (HNT-OPS-003, Batch 8) is used
+  // exclusively by the Recurring Expense Worker's auto_draft execution mode
+  // -- an auto-generated expense that needs human review before it enters
+  // the normal pending->approved->paid workflow (e.g. a variable-amount
+  // schedule with no real number known at generation time), reusing
+  // ExpenseWorkflowStatus.draft, which was schema-complete but code-
+  // unreachable until now (see that enum's own comment).
+  workflowOverride?:
+    | { status: "paid"; approvedBy: string; approvedAt: Date; paidBy: string; paidAt: Date }
+    | { status: "draft" };
   actorUserName: string;
   actorUserRole: string;
 }
@@ -160,14 +205,13 @@ export async function createExpenseInTransaction(tx: Prisma.TransactionClient, i
       source: input.source,
       // Spec named only create/approve/reject/mark-paid as actions, with no
       // "submit" -- createExpense always creates directly in `pending`
-      // (confirmed with the user). `draft` stays in the enum, unreachable.
-      // A PO payment is the one exception (workflowOverride) -- confirmed
-      // with the user, not assumed silently.
+      // (confirmed with the user). `draft` stays in the enum, unreachable
+      // except via the two confirmed workflowOverride branches below.
       workflow_status: input.workflowOverride ? input.workflowOverride.status : "pending",
-      approved_by: input.workflowOverride?.approvedBy ?? null,
-      approved_at: input.workflowOverride?.approvedAt ?? null,
-      paid_by: input.workflowOverride?.paidBy ?? null,
-      paid_at: input.workflowOverride?.paidAt ?? null,
+      approved_by: input.workflowOverride?.status === "paid" ? input.workflowOverride.approvedBy : null,
+      approved_at: input.workflowOverride?.status === "paid" ? input.workflowOverride.approvedAt : null,
+      paid_by: input.workflowOverride?.status === "paid" ? input.workflowOverride.paidBy : null,
+      paid_at: input.workflowOverride?.status === "paid" ? input.workflowOverride.paidAt : null,
       created_by: input.createdBy,
       expense_number: expenseNumber,
       status: "active",
@@ -222,6 +266,14 @@ export async function createExpenseInTransaction(tx: Prisma.TransactionClient, i
         template_expense_id: created.id,
         frequency: input.recurrence.frequency,
         interval: input.recurrence.interval,
+        execution_mode: input.recurrence.executionMode,
+        amount_type: input.recurrence.amountType,
+        configured_amount: input.recurrence.configuredAmount,
+        start_date: input.recurrence.startDate,
+        end_date: input.recurrence.endDate,
+        daily_auto_post_confirmed: input.recurrence.dailyAutoPostConfirmed,
+        daily_auto_post_confirmed_by: input.recurrence.dailyAutoPostConfirmedBy,
+        daily_auto_post_confirmed_at: input.recurrence.dailyAutoPostConfirmedAt,
         next_run: input.recurrence.nextRun,
       },
     });
@@ -287,7 +339,7 @@ export async function createExpense(input: CreateExpenseInput, actor: Actor, ide
       createdBy: actor.userId,
       attachments: input.attachments,
       tagIds: input.tagIds,
-      recurrence: input.recurrence,
+      recurrence: input.recurrence ? toRecurrenceCreateInput(input.recurrence, actor) : undefined,
       actorUserName: actor.userName,
       actorUserRole: actor.userRole,
     });
@@ -845,14 +897,66 @@ export async function updateRecurrence(id: string, input: UpdateRecurrenceInput,
     "Expense recurrence schedule"
   );
 
+  // frequency has no update path at all (immutable once created -- not in
+  // UpdateRecurrenceInput). startDate is confirmed immutable once ANY
+  // expense_recurrence_runs row exists for this recurrence -- locked
+  // uniformly across all five frequencies for simplicity, even though the
+  // corruption risk (changing the anchor a rolling next_run sequence is
+  // built from) is specific to the three rolling ones. Zod alone can't see
+  // whether runs exist, so this is checked here, at the service layer.
+  if (input.startDate !== undefined) {
+    const runCount = await prisma.expense_recurrence_runs.count({ where: { recurrence_id: recurrence.id } });
+    if (runCount > 0) {
+      throw badRequest("startDate cannot be changed once occurrences have been generated for this recurrence");
+    }
+  }
+
+  // Cross-field rules re-checked against the MERGED (stored + incoming)
+  // state -- the same "Zod alone can't see existing DB state" pattern
+  // updateExpense already established for scope/branchId. This also
+  // symmetrically blocks flipping dailyAutoPostConfirmed back to false while
+  // frequency=daily and the merged execution_mode is still auto_post (the
+  // same invariant the DB CHECK enforces in the other direction).
+  const mergedAmountType = input.amountType ?? recurrence.amount_type;
+  const mergedExecutionMode = input.executionMode ?? recurrence.execution_mode;
+  const mergedConfiguredAmount = input.configuredAmount !== undefined ? input.configuredAmount : recurrence.configured_amount;
+  const mergedDailyConfirmed = input.dailyAutoPostConfirmed ?? recurrence.daily_auto_post_confirmed;
+
+  if (mergedExecutionMode === "auto_post" && mergedAmountType === "variable") {
+    throw badRequest("execution_mode auto_post cannot be combined with amount_type variable");
+  }
+  if (recurrence.frequency === "daily" && mergedExecutionMode === "auto_post" && !mergedDailyConfirmed) {
+    throw badRequest("daily + auto_post requires dailyAutoPostConfirmed: true -- an explicit, deliberate confirmation of unattended daily posting");
+  }
+  if (mergedAmountType === "fixed" && (mergedConfiguredAmount === null || mergedConfiguredAmount === undefined)) {
+    throw badRequest("configuredAmount is required when amountType is fixed");
+  }
+  if (mergedAmountType === "variable" && mergedConfiguredAmount !== null && mergedConfiguredAmount !== undefined) {
+    throw badRequest("configuredAmount must not be set when amountType is variable");
+  }
+
+  // Real accountability trail: populated ONLY at the moment
+  // dailyAutoPostConfirmed transitions from false/unset to true via THIS
+  // call -- never touched otherwise. An already-true flag re-sent unchanged,
+  // or later flipped back to false, keeps its original confirmer/timestamp
+  // as a permanent historical record (see the migration's own comment).
+  const confirmingNow = input.dailyAutoPostConfirmed === true && !recurrence.daily_auto_post_confirmed;
+
   const result = await prisma.$transaction(async (tx) => {
     await claimIdempotencyKey(tx, actor.businessId, actor.userId, idempotencyKey, updateRecurrenceEndpoint(id), input);
 
     const updated = await tx.expense_recurrence.update({
       where: { id: recurrence.id },
       data: {
-        frequency: input.frequency,
         interval: input.interval,
+        execution_mode: input.executionMode,
+        amount_type: input.amountType,
+        configured_amount:
+          input.configuredAmount === undefined ? undefined : input.configuredAmount === null ? null : new Prisma.Decimal(input.configuredAmount),
+        start_date: input.startDate,
+        end_date: input.endDate,
+        daily_auto_post_confirmed: input.dailyAutoPostConfirmed,
+        ...(confirmingNow ? { daily_auto_post_confirmed_by: actor.userId, daily_auto_post_confirmed_at: new Date() } : {}),
         next_run: input.nextRun,
         active: input.active,
       },

@@ -126,6 +126,7 @@ model businesses {
   expense_counters                    expense_counters?
   expense_attachments                 expense_attachments[]
   expense_recurrence                  expense_recurrence[]
+  expense_recurrence_runs              expense_recurrence_runs[]
   expense_corrections                 expense_corrections[]
   tags                                tags[]
   goods_received_notes                goods_received_notes[]
@@ -549,6 +550,7 @@ model expenses {
   users_expenses_paid_byTousers     users?                    @relation("expenses_paid_byTousers", fields: [paid_by], references: [id])
   expense_attachments               expense_attachments[]
   expense_recurrence                expense_recurrence?
+  expense_recurrence_runs           expense_recurrence_runs[]
   expense_corrections               expense_corrections[]
   expense_tags                      expense_tags[]
   purchase_order_payments           purchase_order_payments[]
@@ -615,29 +617,106 @@ model expense_attachments {
   @@index([business_id])
 }
 
-// Session 5B. Architecture-only -- no scheduler exists yet to actually
-// generate new expenses from this schedule (same "ready but not automated"
-// boundary the Debt Reminder Scheduler used correctly before it was built).
-// One schedule per template expense (@unique) -- to change frequency/
-// interval, update this row, not create a second one. `interval` expresses
-// "every N periods" (every 2 weeks = frequency: weekly, interval: 2). When a
-// real scheduler eventually reads this table and generates a new expense,
-// it should audit-log that generation as "expense.recurring_generated" --
-// no such action is written by any code path yet.
+enum ExpenseRecurrenceExecutionMode {
+  auto_post
+  auto_draft
+}
+
+enum ExpenseRecurrenceAmountType {
+  fixed
+  variable
+}
+
+// Session 5B built this table architecture-only; HNT-OPS-003 (Batch 8) is the
+// real scheduler that finally reads it. One schedule per template expense
+// (@unique) -- to change frequency/interval, update this row, not create a
+// second one. `frequency` is immutable once created (confirmed) -- there is
+// no update path for it; `interval` expresses "every N periods" (every 2
+// weeks = frequency: weekly, interval: 2). `start_date` is likewise locked
+// once any expense_recurrence_runs row exists for this recurrence (confirmed)
+// -- changing it after real occurrences have been generated against the
+// rolling next_run sequence (weekly/quarterly/yearly) would corrupt that
+// sequence; locked uniformly across all five frequencies for simplicity, even
+// though the corruption risk is specific to the three rolling ones.
+// execution_mode/amount_type are two independent configuration axes (Schedule
+// x Execution x Amount) -- auto_post posts a real expense directly (normal
+// workflow_status="pending", no override); auto_draft creates it at
+// workflow_status="draft" instead (see createExpenseInTransaction's
+// workflowOverride). auto_post + amount_type=variable is nonsensical (nothing
+// to post without a real amount) and rejected both at the Zod layer and by
+// chk_expense_recurrence_no_variable_auto_post below. daily + auto_post is
+// the single riskiest combination (an unattended real financial posting every
+// single day) -- gated behind an explicit daily_auto_post_confirmed flag,
+// itself requiring a real accountability trail (who confirmed it, and when),
+// not just a bare boolean.
 model expense_recurrence {
-  id                  String              @id
-  business_id         String
-  template_expense_id String              @unique
-  frequency           RecurrenceFrequency
-  interval            Int                 @default(1)
-  next_run            DateTime?           @db.Date
-  last_run            DateTime?           @db.Date
-  active              Boolean             @default(true)
-  created_at          DateTime            @default(now())
-  businesses          businesses          @relation(fields: [business_id], references: [id])
-  expenses            expenses            @relation(fields: [template_expense_id], references: [id])
+  id                           String                         @id
+  business_id                  String
+  template_expense_id          String                         @unique
+  frequency                    RecurrenceFrequency
+  interval                     Int                            @default(1)
+  execution_mode               ExpenseRecurrenceExecutionMode
+  amount_type                   ExpenseRecurrenceAmountType
+  // Required iff amount_type=fixed, NULL iff variable -- CHECK-enforced
+  // (chk_expense_recurrence_configured_amount_matches_type), not just at the
+  // Zod layer -- a variable schedule has no single number to pre-configure,
+  // the real amount is supplied at generation time (auto_draft only, since
+  // auto_post+variable is itself rejected above).
+  configured_amount             Decimal?                       @db.Decimal(14, 2)
+  start_date                    DateTime                       @db.Date
+  end_date                      DateTime?                      @db.Date
+  daily_auto_post_confirmed     Boolean                        @default(false)
+  // Real accountability trail for the one deliberately risky override above
+  // -- populated together, at the moment daily_auto_post_confirmed is set to
+  // true via the API (never independently of it).
+  daily_auto_post_confirmed_by  String?
+  daily_auto_post_confirmed_at  DateTime?
+  next_run                      DateTime?                      @db.Date
+  last_run                      DateTime?                      @db.Date
+  active                        Boolean                        @default(true)
+  created_at                    DateTime                       @default(now())
+  businesses                    businesses                     @relation(fields: [business_id], references: [id])
+  expenses                      expenses                       @relation(fields: [template_expense_id], references: [id])
+  daily_auto_post_confirmed_by_user users?                     @relation("expense_recurrence_daily_auto_post_confirmed_byTousers", fields: [daily_auto_post_confirmed_by], references: [id])
+  runs                           expense_recurrence_runs[]
 
   @@index([business_id])
+}
+
+// HNT-OPS-003: one row per occurrence the worker has ever attempted for a
+// given recurrence -- the real Layer-2 domain-level dedup guard (the
+// scheduled_job_runs sweep-tick above only proves "the sweep ran," never
+// "this specific business-period was generated"). scheduled_period is a
+// single calendar date regardless of frequency: monthly = first-of-
+// business-local-month, daily = the day itself, weekly/quarterly/yearly =
+// that occurrence's own rolling anchor date. status reuses ScheduledJobStatus
+// as-is (no new enum needed) -- pending/running mid-claim, succeeded once the
+// linked expense_id is set (and only then, see the CHECK below),
+// retry_wait/dead_letter on failure, mirroring scheduledJob.ts's own
+// claim/backoff shape exactly, just re-implemented against this table since
+// that file hardcodes "scheduled_job_runs" in raw SQL and can't be pointed
+// elsewhere. expense_id is nullable specifically because a pending/failed
+// attempt has no expense yet -- once set, it's permanent (the run's own
+// success record is never re-pointed at a different expense).
+model expense_recurrence_runs {
+  id               String              @id
+  business_id      String
+  recurrence_id    String
+  scheduled_period DateTime            @db.Date
+  status           ScheduledJobStatus  @default(pending)
+  expense_id       String?
+  attempts         Int                 @default(0)
+  next_attempt_at  DateTime?
+  last_error       String?
+  created_at       DateTime            @default(now())
+  updated_at       DateTime            @updatedAt
+  businesses       businesses          @relation(fields: [business_id], references: [id])
+  expense_recurrence expense_recurrence @relation(fields: [recurrence_id], references: [id])
+  expenses         expenses?           @relation(fields: [expense_id], references: [id])
+
+  @@unique([recurrence_id, scheduled_period])
+  @@index([business_id])
+  @@index([status])
 }
 
 // HNT-FIN-001 remediation -- once an expense reaches workflow_status=paid,
@@ -2454,6 +2533,7 @@ model users {
   expenses_expenses_approved_byTousers          expenses[]                           @relation("expenses_approved_byTousers")
   expenses_expenses_rejected_byTousers          expenses[]                           @relation("expenses_rejected_byTousers")
   expenses_expenses_paid_byTousers              expenses[]                           @relation("expenses_paid_byTousers")
+  expense_recurrence_daily_auto_post_confirmed_byTousers expense_recurrence[]        @relation("expense_recurrence_daily_auto_post_confirmed_byTousers")
   expense_attachments                           expense_attachments[]
   expense_corrections                           expense_corrections[]
   inventory_adjustments                         inventory_adjustments[]

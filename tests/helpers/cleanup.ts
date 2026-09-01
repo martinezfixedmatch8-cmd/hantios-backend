@@ -111,6 +111,9 @@ export async function cleanupTestBusiness(businessId: string): Promise<void> {
   // append-only correction ledger (RESTRICT), must go first too.
   await prisma.expense_attachments.deleteMany({ where: { business_id: businessId } });
   await prisma.expense_tags.deleteMany({ where: { expenses: { business_id: businessId } } });
+  // HNT-OPS-003 -- expense_recurrence_runs FKs to expense_recurrence (RESTRICT),
+  // must go first.
+  await prisma.expense_recurrence_runs.deleteMany({ where: { business_id: businessId } });
   await prisma.expense_recurrence.deleteMany({ where: { business_id: businessId } });
   await prisma.expense_corrections.deleteMany({ where: { business_id: businessId } });
   await prisma.expenses.deleteMany({ where: { business_id: businessId } });
