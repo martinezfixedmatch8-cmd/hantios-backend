@@ -872,6 +872,28 @@ model scheduled_job_runs {
   @@index([job_type, status])
 }
 
+// HNT-OPS-004 (Batch 9 Session A) -- the shared, distributed store backing
+// every rate limiter in src/middleware/rateLimit.ts, replacing express-
+// rate-limit's default per-process MemoryStore (which silently multiplies
+// every limiter's real ceiling by however many API instances are running).
+// key is the full "<limiter-prefix>:<express-rate-limit's own computed
+// key>" composite -- the prefix is what lets 11 limiters share this one
+// table without ever colliding on the same client IP. Fixed-window
+// semantics: reset_at is the window's own expiry instant, recomputed
+// atomically (in the same INSERT ... ON CONFLICT ... DO UPDATE statement
+// that increments count) whenever a hit arrives after the prior window has
+// already expired -- see src/lib/rateLimitStore.ts's own increment().
+model rate_limit_counters {
+  id         String   @id
+  key        String   @unique
+  count      Int      @default(1)
+  reset_at   DateTime
+  created_at DateTime @default(now())
+  updated_at DateTime @updatedAt
+
+  @@index([reset_at])
+}
+
 /// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
 model inventory_adjustments {
   id                String         @id
