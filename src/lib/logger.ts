@@ -92,3 +92,22 @@ export function logUnhandledError(input: UnhandledErrorLogInput, err: unknown): 
   });
   console.error(line);
 }
+
+// HNT-OPS-004 (Batch 9 Session A) -- the rate-limit Store's own error path
+// (express-rate-limit's `Logger.error`) has no requestId/method/path to
+// attach (the Store interface's `increment`/`decrement`/`resetKey` methods
+// receive only a `key` string, never the Express request), so this is a
+// second, narrower entry point rather than a forced fit into
+// logUnhandledError above -- same allowlist discipline (constructor name +
+// safe `.code` only, never `.message`/`.stack`), just without the three
+// request-scoped fields that function requires.
+export function logRateLimitStoreError(event: "init" | "increment" | "decrement" | "resetKey" | "get", err: unknown): void {
+  const line = JSON.stringify({
+    level: "error",
+    event: "rate_limit_store_error",
+    storeOperation: event,
+    errorName: err instanceof Error ? err.constructor.name : typeof err,
+    ...(safeErrorCode(err) ? { errorCode: safeErrorCode(err) } : {}),
+  });
+  console.error(line);
+}
